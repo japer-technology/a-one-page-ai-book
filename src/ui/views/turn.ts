@@ -188,7 +188,7 @@ async function suggest(
   try {
     const context = buildContext(api.nodes, book);
     const raw = await api.generateJSON<string[]>(suggestionsMessages(context, 3), {
-      model: book.model,
+      model: book.model || api.lib.settings.endpoint.model,
     });
     if (api.staleGen(token)) return;
     const list = raw.filter((s) => typeof s === 'string' && s.length > 0).slice(0, 3);

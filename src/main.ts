@@ -39,6 +39,8 @@ import { newId } from './core/id';
 import type { AppApi, ToastKind, ViewName } from './ui/ctx';
 import { renderShell, renderToastStack, type Toast } from './ui/shell';
 import { renderLibrary } from './ui/views/library';
+import { genStates } from './ui/genpage';
+import { audit, auditLog } from './ui/audit';
 import { renderSeed } from './ui/views/seed';
 import { maybeAutoGenerate, renderTitles } from './ui/views/titles';
 import { renderPage } from './ui/views/page';
@@ -55,7 +57,6 @@ interface AppState {
   toasts: Toast[];
   genCounter: number;
   abort: AbortController | null;
-  genTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /** Hard ceiling for one LLM call — local CPU inference can be slow, but never this slow. */
@@ -91,7 +92,6 @@ class App implements AppApi {
       toasts: [],
       genCounter: 0,
       abort: null,
-      genTimer: null,
     };
   }
 
@@ -114,6 +114,7 @@ class App implements AppApi {
   // ---- Routing & rendering ------------------------------------------------
 
   navigate(view: ViewName, params: Record<string, string> = {}): void {
+    audit(`navigate→${view}`);
     this.abortGeneration();
     this.state.view = view;
     this.state.params = params;
@@ -163,6 +164,14 @@ class App implements AppApi {
 
   update(recipe: (lib: Library) => Library): void {
     this.state.lib = recipe(this.state.lib);
+    // Book mutations replace the Book object inside lib.books (new frontier,
+    // status, …). Keep the session's open-book pointer in sync, or views would
+    // render against a stale frontier — the classic "generated but nothing
+    // changed" bug.
+    const open = this.state.book;
+    if (open) {
+      this.state.book = this.state.lib.books.find((b) => b.id === open.id) ?? open;
+    }
     this.scheduleSave();
     this.render();
   }
@@ -170,6 +179,21 @@ class App implements AppApi {
   setBook(book: Book | null): void {
     this.state.book = book;
     this.render();
+  }
+
+  /** Support/debug snapshot (exposed as window.__PAGE_TURN__). */
+  debug(): {
+    genCounter: number;
+    view: ViewName;
+    params: Record<string, string>;
+    bookId: string | null;
+  } {
+    return {
+      genCounter: this.state.genCounter,
+      view: this.state.view,
+      params: { ...this.state.params },
+      bookId: this.state.book?.id ?? null,
+    };
   }
 
   // ---- Generation ---------------------------------------------------------
@@ -180,17 +204,17 @@ class App implements AppApi {
   ): Promise<string> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    const controller = this.armGeneration();
+    const armed = this.armGeneration();
     return chat(
       {
         endpoint,
         model,
         temperature: endpoint.temperature,
-        signal: controller.signal,
+        signal: armed.controller.signal,
         onToken: opts.onToken,
       },
       messages,
-    ).finally(() => this.disarmGeneration(controller));
+    ).finally(() => this.disarmGeneration(armed));
   }
 
   generateJSON<T>(
@@ -199,32 +223,36 @@ class App implements AppApi {
   ): Promise<T> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    const controller = this.armGeneration();
+    const armed = this.armGeneration();
     return chatJSON<T>(
-      { endpoint, model, temperature: endpoint.temperature, signal: controller.signal },
+      { endpoint, model, temperature: endpoint.temperature, signal: armed.controller.signal },
       messages,
-    ).finally(() => this.disarmGeneration(controller));
+    ).finally(() => this.disarmGeneration(armed));
   }
 
-  /** One in-flight request at a time, with a hard timeout so a hung server can't stall the app. */
-  private armGeneration(): AbortController {
+  /** One in-flight request at a time, each with its own hard timeout. */
+  private armGeneration(): { controller: AbortController; timer: ReturnType<typeof setTimeout> } {
     this.state.abort?.abort();
     const controller = new AbortController();
     this.state.abort = controller;
-    this.state.genTimer = setTimeout(
+    const timer = setTimeout(
       () => controller.abort(new DOMException('Generation timed out', 'TimeoutError')),
       GENERATION_TIMEOUT_MS,
     );
-    return controller;
+    return { controller, timer };
   }
 
-  private disarmGeneration(controller: AbortController): void {
-    if (this.state.genTimer !== null) clearTimeout(this.state.genTimer);
-    this.state.genTimer = null;
-    if (this.state.abort === controller) this.state.abort = null;
+  private disarmGeneration(armed: {
+    controller: AbortController;
+    timer: ReturnType<typeof setTimeout>;
+  }): void {
+    // Clear OUR timer only — a newer request may have armed its own by now.
+    clearTimeout(armed.timer);
+    if (this.state.abort === armed.controller) this.state.abort = null;
   }
 
   beginGen(): number {
+    audit('beginGen');
     return ++this.state.genCounter;
   }
 
@@ -235,6 +263,7 @@ class App implements AppApi {
   abortGeneration(): void {
     // Incrementing the token marks every in-flight generation as stale, so
     // cancel/navigation can never leave a stuck "busy" panel behind.
+    audit('abortGeneration');
     this.state.genCounter++;
     this.state.abort?.abort();
     this.state.abort = null;
@@ -276,6 +305,7 @@ class App implements AppApi {
   }
 
   pickTitle(seedNodeId: string, option: TitleOption): Book {
+    audit(`pickTitle seed=${seedNodeId}`);
     const titleNode = makeTitleNode(seedNodeId, option);
     const book = makeBook(seedNodeId, titleNode.id, this.state.lib.settings.endpoint.model);
     this.state.book = book;
@@ -294,6 +324,7 @@ class App implements AppApi {
     text: string,
     model: string,
   ): StoryNode {
+    audit(`attachPage book=${book.id} parent=${parentId}`);
     const node = makePageNode(parentId, direction, model, text);
     this.update((lib) => ({
       ...lib,
@@ -493,6 +524,18 @@ async function boot(): Promise<void> {
     `%c📖 Page Turn ${build?.version ?? ''}`,
     'font-family: Georgia, serif; font-size: 16px; color: #e8c47a;',
   );
+
+  // Debug affordance for support: inspect live app state from the console.
+  (window as unknown as { __PAGE_TURN__?: unknown }).__PAGE_TURN__ = {
+    version: build?.version ?? '',
+    view: () => app.view,
+    params: () => ({ ...app.params }),
+    bookId: () => app.book?.id ?? null,
+    model: () => app.lib.settings.endpoint,
+    genCounter: () => app.debug().genCounter,
+    genStateKeys: () => [...genStates.keys()],
+    audit: () => [...auditLog],
+  };
   console.info(
     'Everything lives in this browser profile: IndexedDB + an OPFS file. The story never leaves your machine except to the local LLM endpoint you choose.',
   );

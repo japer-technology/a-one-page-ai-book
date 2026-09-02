@@ -8,6 +8,7 @@
  */
 import type { AppApi } from './ctx';
 import { button, h, spinner } from './dom';
+import { audit } from './audit';
 import { buildContext, pageMessages } from '../core/prompt';
 import type { Book, StoryNode, TurnInput } from '../core/types';
 
@@ -34,27 +35,30 @@ export async function generatePage(
   target: GenTarget,
 ): Promise<StoryNode | null> {
   const token = api.beginGen();
+  audit(`generatePage start key=${key} token=${token} target=${target.kind}`);
   genStates.set(key, { token, status: 'busy', label, stream: '', error: '' });
   api.refresh();
   try {
     const context = buildContext(api.nodes, book);
     const messages = pageMessages(context, direction, targetPageNumber);
+    const model = book.model || api.lib.settings.endpoint.model;
     const text = await api.generateText(messages, {
-      model: book.model,
+      model,
       onToken: (piece) => {
         const state = genStates.get(key);
         if (state) state.stream += piece;
       },
     });
+    audit(`generatePage got text len=${text.length} stale=${api.staleGen(token)}`);
     if (api.staleGen(token)) {
       genStates.delete(key);
       return null;
     }
     let node: StoryNode;
     if (target.kind === 'new') {
-      node = api.attachPage(book, target.parentId, direction, text, book.model);
+      node = api.attachPage(book, target.parentId, direction, text, model);
     } else {
-      api.appendVersion(target.pageId, text, 'ai', book.model);
+      api.appendVersion(target.pageId, text, 'ai', model);
       node =
         api.nodes[target.pageId] ??
         ((): never => {
@@ -65,6 +69,7 @@ export async function generatePage(
     api.refresh();
     return node;
   } catch (err) {
+    audit(`generatePage error stale=${api.staleGen(token)} err=${String(err)}`);
     genStates.delete(key);
     if (api.staleGen(token)) {
       // Cancelled (cancel button or navigation) or superseded by a newer

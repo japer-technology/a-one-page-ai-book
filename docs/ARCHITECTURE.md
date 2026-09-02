@@ -154,10 +154,12 @@ Discovery (`llm/probe.ts`) works within a browser's hard CORS reality:
 
 Generation (`llm/client.ts`) speaks two dialects behind one interface — **OpenAI-compatible**
 (`POST /v1/chat/completions`) and **Ollama native** (`POST /api/chat`, with automatic `/v1` fallback
-on 404) — and streams both via server-sent events so pages write themselves onto the screen.
-Streaming is detected by the response's `content-type`, so a server that ignores `stream: true`
-degrades to a plain JSON read instead of failing. Every request carries a hard 120 s timeout; HTTP
-401/403 errors explain themselves ("add the API key in Settings").
+on 404). Streaming is detected by the response's `content-type`: **SSE** (`text/event-stream`,
+`data:`-prefixed lines — LM Studio, llama.cpp, vLLM) vs **NDJSON** (`application/x-ndjson`, bare
+JSON per line — Ollama native) vs plain JSON when a server ignores `stream: true`. Both stream
+readers drain partial lines across chunk boundaries and salvage a final line without a trailing
+newline. Every request carries a hard 120 s timeout (per-request, never a shared slot); HTTP 401/403
+errors explain themselves ("add the API key in Settings").
 
 ## 7. Prompt engineering: calibrated, not adjectival
 
@@ -202,6 +204,13 @@ Two hard-won rules keep this layer from biting itself:
   → "Use" → save flow).
 - **Cancellation always marks staleness.** Cancel/navigation increments the generation token, so any
   in-flight `await` wakes up stale, cleans its busy state, and can never leave a stuck panel.
+- **The open-book pointer is re-synced on every mutation.** Tree mutations replace the `Book` object
+  inside `lib.books` (new frontier, status, …); `update()` re-derives the session's open book from
+  the library, so no view ever renders against a stale frontier — the classic "it generated but the
+  screen didn't change" bug.
+- **`window.__PAGE_TURN__`** is a debug handle: live view/params/book/model, the generation counter
+  and state keys, and a rolling **audit trail** (`audit()` — navigations, begin/abort, page attach)
+  for diagnosing exactly this kind of failure from the devtools console or the e2e driver.
 
 ## 9. Testing & quality gates
 
@@ -210,11 +219,13 @@ Two hard-won rules keep this layer from biting itself:
   tolerant parsers, schema validation, and the endpoint catalog — plus every diagnosis path of the
   probe (reachable, reachable-without-models, non-OK response, CORS-blocked, absent, parallel
   discovery) with a stubbed `fetch`.
-- **Optional end-to-end harness** (`pnpm test:e2e`, requires `chromium` in PATH): a mock
-  OpenAI-compatible server on :1234 plus the real built file in headless Chromium, driven over CDP —
-  boot → `#/settings` → Scan → reachable row with models → Use → Save → Test connection → a real
-  generation round-trip. This is the check that catches browser-only regressions (CORS, the datalist
-  attribute crash, boot hangs).
+- **Optional end-to-end harness** (`pnpm test:e2e`, requires `chromium` in PATH): TWO mock servers
+  (OpenAI-compatible SSE on :1234, Ollama-native NDJSON on :11434) plus the real built file in
+  headless Chromium, driven over CDP — the full user journey: boot → `#/settings` → Scan → Use →
+  Save → Test connection → New book → seed → titles → **page 1 streams via SSE** → keep → turn →
+  switch endpoint to Ollama → **page 2 streams via NDJSON** → LAN scan finds the loopback server.
+  This is the check that catches browser-only regressions (CORS, streaming dialects, the
+  stale-frontier bug, boot hangs).
 - **TypeScript strict** with `noUncheckedIndexedAccess` and `verbatimModuleSyntax`; **ESLint**
   (typescript-eslint recommended) + **Prettier**; **CI** runs `pnpm check` (typecheck → lint →
   format → test → build) on every push and PR, and publishes the built single file as an artifact.

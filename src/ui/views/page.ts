@@ -10,6 +10,7 @@ import { childrenOf, getNode, pageNumberAt, seedTextOf, titleNodeOf } from '../.
 import type { Book, StoryNode, TurnInput } from '../../core/types';
 import { DEFAULT_TURN } from '../../core/types';
 import { generatePage, genStates, renderGenPanel } from '../genpage';
+import { audit } from '../audit';
 
 // Session view state.
 const editState = new Map<string, { open: boolean; text: string }>();
@@ -256,6 +257,7 @@ function beginView(api: AppApi, book: Book): HTMLElement {
   }
 
   if (api.params.auto === '1' && !autoStarted.has(book.id)) {
+    audit(`beginView auto-start book=${book.id}`);
     autoStarted.add(book.id);
     setTimeout(
       () =>

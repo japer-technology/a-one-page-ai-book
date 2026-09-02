@@ -644,7 +644,10 @@ async function testConnection(api: AppApi, controls: Controls): Promise<void> {
       endpoint,
     });
     if (api.staleGen(token)) return;
-    api.toast(`Connected — the model said “${answer.trim().slice(0, 40)}”`, 'success');
+    api.toast(
+      `Connected — the model said “${answer.trim().slice(0, 40)}”. Press 💾 Save to use this endpoint for your books.`,
+      'success',
+    );
   } catch (err) {
     if (api.staleGen(token)) return;
     api.toast(api.genError(err), 'error');
