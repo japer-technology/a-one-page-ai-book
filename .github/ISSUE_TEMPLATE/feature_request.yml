@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose something new for the one-page AI book.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What should exist, and what should it feel like to use?
+    validations:
+      required: true
+  - type: textarea
+    id: fit
+    attributes:
+      label: How it fits the product
+      description:
+        Which part of the core loop does this serve — the seed, titles, pages, the page turn,
+        memory/tree, or the library? (See docs/PRODUCT.md §1–10.)
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Any simpler ways to get the same payoff?
+    validations:
+      required: false

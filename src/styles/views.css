@@ -1,0 +1,407 @@
+/* styles/views.css — per-view layout. The page typography is the product:
+ * a real book page, not a chat bubble. */
+
+/* ---- Library ------------------------------------------------------------ */
+
+.empty-state {
+  text-align: center;
+  padding: 3rem 1rem 2rem;
+}
+
+.empty-state .lede {
+  max-width: 34rem;
+  margin: 0 auto 1.4rem;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.search {
+  flex: 1;
+  min-width: 200px;
+}
+
+.book-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.book-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.9rem 1rem;
+}
+
+.book-card.finished {
+  border-left-color: var(--ok);
+}
+
+.book-status {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.book-title {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.25rem;
+  margin: 0.15rem 0 0;
+  color: var(--paper);
+}
+
+.book-tagline {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 0.88rem;
+  margin: 0.15rem 0;
+}
+
+.book-stats {
+  color: var(--paper-dim);
+  font-size: 0.85rem;
+  margin: 0.2rem 0;
+}
+
+.book-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.2rem 0;
+}
+
+.book-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+}
+
+/* ---- Seed --------------------------------------------------------------- */
+
+.seed-input {
+  font-family: var(--serif);
+  font-size: 1.12rem;
+  line-height: 1.6;
+  min-height: 6.5rem;
+}
+
+/* ---- Titles ------------------------------------------------------------- */
+
+.title-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  margin: 1rem 0;
+}
+
+.title-card {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.9rem 1.1rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.title-card:hover {
+  border-color: var(--accent-strong);
+}
+
+.title-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.title-card h2 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.3rem;
+  margin: 0;
+  color: var(--paper);
+}
+
+.title-card.selected h2 {
+  color: var(--accent);
+}
+
+.title-edit {
+  margin-top: 0.6rem;
+}
+
+/* ---- The page ----------------------------------------------------------- */
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.page-num {
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.page-book {
+  font-family: var(--serif);
+  font-style: italic;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.page-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-bottom: 0.6rem;
+}
+
+.page-text {
+  font-family: var(--serif);
+  font-size: 1.16rem;
+  line-height: 1.78;
+  color: var(--paper);
+  white-space: pre-wrap;
+  word-spacing: 0.02em;
+}
+
+.page-text::first-letter {
+  font-size: 1.55em;
+  line-height: 1;
+}
+
+.page-edit {
+  width: 100%;
+  font-family: var(--serif);
+  font-size: 1.1rem;
+  line-height: 1.7;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  padding: 0.8rem;
+}
+
+.direction-chips {
+  margin: 0.6rem 0;
+}
+
+.version-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.version-nav .btn {
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.tweak-row {
+  align-items: center;
+}
+
+.tweak-row .input {
+  flex: 1;
+  min-width: 240px;
+}
+
+/* ---- Generation in progress -------------------------------------------- */
+
+.gen-panel {
+  margin: 1rem 0;
+}
+
+.gen-stream {
+  font-family: var(--serif);
+  font-size: 1.1rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  color: var(--paper-dim);
+  background: rgb(0 0 0 / 0.18);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 1rem;
+  min-height: 6rem;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.gen-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---- The turn ----------------------------------------------------------- */
+
+.faded-page {
+  position: relative;
+  margin-bottom: 0.4rem;
+}
+
+.faded-page::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 55%;
+  background: linear-gradient(transparent, var(--bg) 92%);
+  pointer-events: none;
+}
+
+.faded-text {
+  color: var(--muted);
+  max-height: 11.5rem;
+  overflow: hidden;
+}
+
+.turn-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.2rem 1.3rem;
+  box-shadow: var(--shadow);
+}
+
+.turn-title {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.3rem;
+  color: var(--accent);
+  margin: 0 0 0.7rem;
+}
+
+.direction-input {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
+.suggest-area {
+  margin: 0.4rem 0 0.2rem;
+  min-height: 0.4rem;
+}
+
+/* ---- Settings ----------------------------------------------------------- */
+
+.scan-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.6rem 0;
+}
+
+.scan-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.88rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px dashed var(--line);
+  flex-wrap: wrap;
+}
+
+.scan-row-fresh {
+  animation: fadein 0.3s ease-out;
+}
+
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.scan-label {
+  color: var(--paper-dim);
+  flex: 1;
+  min-width: 200px;
+}
+
+.scan-detail {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.card-help p {
+  color: var(--paper-dim);
+  font-size: 0.9rem;
+}
+
+/* ---- Reader ------------------------------------------------------------- */
+
+.view-reader {
+  max-width: 660px;
+}
+
+.title-page {
+  text-align: center;
+  padding: 2rem 0 1rem;
+}
+
+/* ---- The End ------------------------------------------------------------ */
+
+.theend-head {
+  text-align: center;
+  padding-top: 1.2rem;
+}
+
+.theend-kicker {
+  letter-spacing: 0.5em;
+  color: var(--accent);
+  font-size: 0.85rem;
+  margin: 0 0 0.8rem;
+}
+
+.view-theend .page-text {
+  margin: 1.4rem 0;
+}
+
+/* ---- Responsive --------------------------------------------------------- */
+
+@media (max-width: 560px) {
+  .grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .book-card {
+    flex-direction: column;
+  }
+
+  .book-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .nav {
+    gap: 0.6rem;
+  }
+
+  .model-chip {
+    max-width: 130px;
+  }
+}

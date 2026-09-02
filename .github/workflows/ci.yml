@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: typecheck · lint · format · test · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Full check (typecheck, lint, format, tests, build)
+        run: pnpm check
+
+      - name: Verify the single-file contract
+        run: |
+          test -s dist/page-turn.html
+          test "$(grep -c '</script' dist/page-turn.html)" -eq 1
+          ! grep -qE '(src|href)="https?://' dist/page-turn.html
+          ! grep -q 'type="module"' dist/page-turn.html
+
+      - name: Publish the single-file build
+        uses: actions/upload-artifact@v4
+        with:
+          name: page-turn-html
+          path: dist/page-turn.html
+          if-no-files-found: error

@@ -1,0 +1,35 @@
+{
+  "name": "page-turn",
+  "version": "0.1.0",
+  "description": "The One-Page AI Book — a single-file web app that talks to local LLMs and reads/writes local files. You write a seed; the AI writes one page at a time; you direct every page turn; every version is remembered as a branchable tree.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "node build/serve.mjs",
+    "build": "node build/build.mjs",
+    "preview": "node build/serve.mjs --preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "fmt": "prettier --write .",
+    "fmt:check": "prettier --check .",
+    "check": "npm run typecheck && npm run lint && npm run fmt:check && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.22.0",
+    "@types/node": "^22.13.10",
+    "esbuild": "^0.25.1",
+    "eslint": "^9.22.0",
+    "globals": "^16.0.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.26.1",
+    "vitest": "^3.2.2"
+  }
+}

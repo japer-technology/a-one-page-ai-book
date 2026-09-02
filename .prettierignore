@@ -1,0 +1,8 @@
+dist/
+dev/
+.build/
+node_modules/
+coverage/
+pnpm-lock.yaml
+docs/PRODUCT.md
+build/template.html

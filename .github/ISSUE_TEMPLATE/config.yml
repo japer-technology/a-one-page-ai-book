@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Product vision
+    url: https://github.com/thefederation/a-one-page-ai-book/blob/main/docs/PRODUCT.md
+    about:
+      Read the full product spec before proposing ideas — many futures are already sketched there.
+  - name: Architecture
+    url: https://github.com/thefederation/a-one-page-ai-book/blob/main/docs/ARCHITECTURE.md
+    about: How the many-files-to-one-file build works, and where features should land.

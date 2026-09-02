@@ -1,0 +1,37 @@
+name: Bug report
+description: Something is broken — file it here with enough detail to reproduce.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what did you see instead?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser + version, how you opened the app (file:// vs dev server vs preview), OS.
+      placeholder: |
+        - Browser: Chrome 126
+        - Opened: file:// (double-clicked page-turn.html)
+        - OS: Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: llm
+    attributes:
+      label: LLM server and model
+      description: e.g. LM Studio / qwen2.5-7b-instruct, or Ollama / llama3.2:3b
+    validations:
+      required: false
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: Any browser console errors (F12 → Console).
+      render: shell
+    validations:
+      required: false

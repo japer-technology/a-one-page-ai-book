@@ -1,0 +1,31 @@
+/* styles/tokens.css — the design tokens. One place to retheme the whole book. */
+
+:root {
+  --paper: #f2e9d8;
+  --paper-dim: #d8cdb8;
+  --ink: #1c1712;
+  --ink-soft: #4a4138;
+
+  --bg: #14100e;
+  --bg-raised: #1e1915;
+  --bg-card: #211b16;
+  --line: #372d24;
+
+  --accent: #e8c47a;
+  --accent-strong: #d9a94e;
+  --accent-ink: #241a09;
+
+  --danger: #e0766a;
+  --ok: #7fbf7f;
+  --warn: #e0b25c;
+  --muted: #9c8f7d;
+
+  --serif: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 8px 30px rgb(0 0 0 / 0.45);
+  --max-width: 760px;
+}

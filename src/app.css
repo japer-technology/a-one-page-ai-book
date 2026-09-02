@@ -1,0 +1,6 @@
+/* app.css — the single stylesheet root. esbuild inlines the @imports at build
+ * time, so the shipped file contains every rule with zero external requests. */
+
+@import './styles/tokens.css';
+@import './styles/base.css';
+@import './styles/views.css';
