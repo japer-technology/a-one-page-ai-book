@@ -75,3 +75,14 @@ function modelLabel(api: AppApi): string {
 function toastNode(toast: Toast): HTMLElement {
   return h('div', { class: `toast toast-${toast.kind}`, text: toast.message });
 }
+
+/**
+ * Update ONLY the toast stack in place. Toasts must never trigger a full
+ * re-render: views hold live DOM references (form inputs, scan progress) that
+ * a re-render would detach and reset.
+ */
+export function renderToastStack(toasts: Toast[]): void {
+  const stack = document.getElementById('toasts');
+  if (!stack) return;
+  mount(stack, ...toasts.map(toastNode));
+}

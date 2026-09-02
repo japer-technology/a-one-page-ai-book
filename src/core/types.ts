@@ -102,11 +102,13 @@ export type EndpointVendor = 'openai-compat' | 'ollama';
 
 export interface EndpointSettings {
   name: string;
-  /** e.g. "http://127.0.0.1:1234" — no trailing slash, no /v1. */
+  /** e.g. "http://127.0.0.1:1234" — no trailing slash, no /v1. May include a path prefix. */
   baseUrl: string;
   vendor: EndpointVendor;
   model: string;
   temperature: number;
+  /** Optional bearer key, sent as Authorization only to this endpoint. */
+  apiKey: string;
 }
 
 export interface Settings {

@@ -37,7 +37,7 @@ import { loadLibrary, requestPersistence, saveLibrary } from './store/db';
 import { readOpfsLibrary, writeOpfsLibrary } from './store/files';
 import { newId } from './core/id';
 import type { AppApi, ToastKind, ViewName } from './ui/ctx';
-import { renderShell, type Toast } from './ui/shell';
+import { renderShell, renderToastStack, type Toast } from './ui/shell';
 import { renderLibrary } from './ui/views/library';
 import { renderSeed } from './ui/views/seed';
 import { maybeAutoGenerate, renderTitles } from './ui/views/titles';
@@ -55,6 +55,25 @@ interface AppState {
   toasts: Toast[];
   genCounter: number;
   abort: AbortController | null;
+  genTimer: ReturnType<typeof setTimeout> | null;
+}
+
+/** Hard ceiling for one LLM call — local CPU inference can be slow, but never this slow. */
+const GENERATION_TIMEOUT_MS = 120_000;
+
+/** Views that make sense as deep links (#/settings, #/library, …). */
+const HASH_VIEWS: ReadonlySet<string> = new Set([
+  'library',
+  'seed',
+  'settings',
+  'reader',
+  'theend',
+]);
+
+function viewFromHash(): ViewName | null {
+  if (typeof location === 'undefined') return null;
+  const hash = location.hash.replace(/^#\/?/, '');
+  return HASH_VIEWS.has(hash) ? (hash as ViewName) : null;
 }
 
 let toastSeq = 0;
@@ -63,15 +82,16 @@ class App implements AppApi {
   private state: AppState;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(lib: Library) {
+  constructor(lib: Library, initialView: ViewName = 'library') {
     this.state = {
       lib,
       book: null,
-      view: 'library',
+      view: initialView,
       params: {},
       toasts: [],
       genCounter: 0,
       abort: null,
+      genTimer: null,
     };
   }
 
@@ -97,6 +117,10 @@ class App implements AppApi {
     this.abortGeneration();
     this.state.view = view;
     this.state.params = params;
+    // Keep deep-linkable views in sync with the URL hash (no history noise).
+    if (HASH_VIEWS.has(view) && typeof history !== 'undefined') {
+      history.replaceState(null, '', `#/${view}`);
+    }
     this.render();
   }
 
@@ -128,10 +152,12 @@ class App implements AppApi {
     const toast: Toast = { id: ++toastSeq, message, kind };
     this.state.toasts.push(toast);
     if (this.state.toasts.length > 4) this.state.toasts.shift();
-    this.render();
+    // Overlay-only update: a full re-render here would detach live view DOM
+    // (form inputs, scan progress) and silently reset what the user is doing.
+    renderToastStack(this.state.toasts);
     setTimeout(() => {
       this.state.toasts = this.state.toasts.filter((t) => t.id !== toast.id);
-      this.render();
+      renderToastStack(this.state.toasts);
     }, 5000);
   }
 
@@ -154,17 +180,17 @@ class App implements AppApi {
   ): Promise<string> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    this.state.abort = new AbortController();
+    const controller = this.armGeneration();
     return chat(
       {
         endpoint,
         model,
         temperature: endpoint.temperature,
-        signal: this.state.abort.signal,
+        signal: controller.signal,
         onToken: opts.onToken,
       },
       messages,
-    );
+    ).finally(() => this.disarmGeneration(controller));
   }
 
   generateJSON<T>(
@@ -173,11 +199,29 @@ class App implements AppApi {
   ): Promise<T> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    this.state.abort = new AbortController();
+    const controller = this.armGeneration();
     return chatJSON<T>(
-      { endpoint, model, temperature: endpoint.temperature, signal: this.state.abort.signal },
+      { endpoint, model, temperature: endpoint.temperature, signal: controller.signal },
       messages,
+    ).finally(() => this.disarmGeneration(controller));
+  }
+
+  /** One in-flight request at a time, with a hard timeout so a hung server can't stall the app. */
+  private armGeneration(): AbortController {
+    this.state.abort?.abort();
+    const controller = new AbortController();
+    this.state.abort = controller;
+    this.state.genTimer = setTimeout(
+      () => controller.abort(new DOMException('Generation timed out', 'TimeoutError')),
+      GENERATION_TIMEOUT_MS,
     );
+    return controller;
+  }
+
+  private disarmGeneration(controller: AbortController): void {
+    if (this.state.genTimer !== null) clearTimeout(this.state.genTimer);
+    this.state.genTimer = null;
+    if (this.state.abort === controller) this.state.abort = null;
   }
 
   beginGen(): number {
@@ -189,12 +233,18 @@ class App implements AppApi {
   }
 
   abortGeneration(): void {
+    // Incrementing the token marks every in-flight generation as stale, so
+    // cancel/navigation can never leave a stuck "busy" panel behind.
+    this.state.genCounter++;
     this.state.abort?.abort();
     this.state.abort = null;
   }
 
   genError(err: unknown): string {
     if (err instanceof DOMException && err.name === 'AbortError') return 'Generation cancelled.';
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      return `Generation timed out after ${GENERATION_TIMEOUT_MS / 1000}s — the model may be busy or the request too large. Try again, or pick a smaller model.`;
+    }
     const message = err instanceof Error ? err.message : String(err);
     const base = this.state.lib.settings.endpoint.baseUrl;
     if (
@@ -202,9 +252,10 @@ class App implements AppApi {
       message.includes('NetworkError') ||
       message.includes('Load failed')
     ) {
-      return `Can't reach ${base}. Is your local LLM server running? If it is, it may be refusing this page's origin (CORS) — see the help note in Settings.`;
+      return `Can't reach ${base}. Is the server running? If it is, it may be refusing this page's origin (CORS) — see the help note in Settings.`;
     }
     if (message.includes('No model selected')) return 'No model selected — pick one in Settings.';
+    if (message.includes('API key')) return message; // already actionable
     return message;
   }
 
@@ -395,27 +446,41 @@ function replaceBook(lib: Library, book: Book): Book[] {
 
 // ---- Boot -----------------------------------------------------------------
 
+/** Storage must NEVER block boot: race it and fall back after a short grace period. */
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
 async function boot(): Promise<void> {
   let lib: Library | null = null;
-  try {
-    lib = await loadLibrary();
-  } catch {
-    lib = null;
-  }
-  try {
-    const opfs = await readOpfsLibrary();
-    if (opfs && (!lib || lib.books.length === 0) && opfs.books.length > 0) lib = opfs;
-  } catch {
-    // OPFS optional
-  }
+  lib = await withTimeout(loadLibrary(), 1500, null);
+  const opfs = await withTimeout(readOpfsLibrary(), 1500, null);
+  if (opfs && (!lib || lib.books.length === 0) && opfs.books.length > 0) lib = opfs;
   try {
     lib = lib ? normalizeLibrary(lib) : defaultLibrary();
   } catch {
     lib = defaultLibrary();
   }
 
-  const app = new App(lib);
+  const app = new App(lib, viewFromHash() ?? 'library');
   app.render();
+
+  window.addEventListener('hashchange', () => {
+    const view = viewFromHash();
+    if (view && view !== app.view) app.navigate(view);
+  });
 
   void requestPersistence();
   window.addEventListener('beforeunload', () => void app.persistNow());

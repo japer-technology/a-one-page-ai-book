@@ -67,9 +67,11 @@ if (preview) {
     target: ['es2022', 'chrome105', 'firefox110', 'safari16'],
   });
 
-  const { host, port } = await ctx.serve({ servedir: devDir, port: 4173 });
+  const { port } = await ctx.serve({ servedir: devDir, port: 4173, host: '127.0.0.1' });
+  // Always advertise the localhost hostname: an Origin of http://localhost:4173
+  // satisfies the default CORS allow-lists of Ollama and most local servers.
   console.log(
-    `\n  Page Turn dev server:  http://${host}:${port}/\n  (rebuilds on save; Ctrl-C to stop)\n`,
+    `\n  Page Turn dev server:  http://localhost:${port}/\n  (rebuilds on save; Ctrl-C to stop)\n`,
   );
 
   // Keep dev/index.html in sync if the template changes.

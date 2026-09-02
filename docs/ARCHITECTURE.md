@@ -52,7 +52,8 @@ emit** a file that violates the single-file contract (see §5).
 │   │   └── views/          one module per view (library, seed, titles, page,
 │   │                       turn, settings, reader, theend)
 │   └── styles/           tokens.css · base.css · views.css
-├── tests/                vitest: tree, prompt, compile, parsers, schema, endpoints
+├── tests/                vitest: tree, prompt, compile, parsers, schema, endpoints, probe
+├── scripts/e2e/          optional browser harness: mock LLM + CDP driver (pnpm test:e2e)
 ├── docs/                 PRODUCT.md (vision) · ARCHITECTURE.md (this file)
 └── .github/              CI (pnpm check + artifact), issue templates
 ```
@@ -99,6 +100,10 @@ File formats: `.ptlibrary.json` (whole library), `.ptbook.json` (one book + its 
 `format: "page-turn-book"`), compiled `.txt`/`.md`. Import accepts all of them and validates hard —
 a corrupt file is an error message, never a crash.
 
+**Boot can never hang on storage.** IndexedDB/OPFS reads are raced against a 1.5 s grace period — if
+a browser profile refuses storage (private browsing, quirky `file://` environments), the app still
+boots with a fresh in-memory library. Persistence is best-effort by design; rendering is not.
+
 ## 5. The build: many files → one file
 
 `build/build.mjs` is the single-file guarantee, in four steps:
@@ -124,17 +129,27 @@ allow-lists of most local LLM servers — useful when debugging a `file://` CORS
 Discovery (`llm/probe.ts`) works within a browser's hard CORS reality:
 
 1. **CORS fetch** `GET {base}/v1/models` (and Ollama's native `GET /api/tags`) with a short timeout,
-   per candidate in the catalog (`llm/endpoints.ts`).
-2. On network _or_ CORS failure (browsers report both as `TypeError`), a **`no-cors` fetch**
-   distinguishes "nothing is listening" from "a server answered but refused this page's origin" —
-   reported to the user as `cors-blocked` with actionable fixes (enable CORS for localhost origins,
-   or run from a localhost URL).
-3. `reachable` endpoints contribute their model lists to the settings picker; the user can always
-   type a base URL and model name manually.
+   per candidate in the catalog (`llm/endpoints.ts`). Candidates are probed with **bounded
+   parallelism (4 workers)** so a full scan finishes in seconds, not a minute.
+2. **A response that resolves is a clean signal** — any HTTP status proves the server is reachable
+   AND CORS works (browsers throw `TypeError` for both connection failures and missing CORS
+   headers). A 404 on the model list is reported as "reachable, server answered HTTP 404" — not
+   misdiagnosed as a CORS problem.
+3. Only after pure `TypeError`s does a **`no-cors` fetch** distinguish "nothing is listening" from
+   "a server answered but refused this page's origin" — reported as `cors-blocked` with actionable
+   fixes (enable CORS for localhost origins, or run from a localhost URL).
+4. `reachable` endpoints contribute their model lists to the settings picker. **Manual entry is
+   first-class**: any base URL (host + port + optional path prefix, `/v1` optional), either
+   protocol, any model name, an optional **API key** (sent as `Authorization: Bearer …` only to that
+   endpoint), a one-off **"Probe this URL"** for LAN addresses the catalog doesn't know
+   (`http://192.168.1.50:1234`), and preset port hints from the catalog.
 
 Generation (`llm/client.ts`) speaks two dialects behind one interface — **OpenAI-compatible**
 (`POST /v1/chat/completions`) and **Ollama native** (`POST /api/chat`, with automatic `/v1` fallback
 on 404) — and streams both via server-sent events so pages write themselves onto the screen.
+Streaming is detected by the response's `content-type`, so a server that ignores `stream: true`
+degrades to a plain JSON read instead of failing. Every request carries a hard 120 s timeout; HTTP
+401/403 errors explain themselves ("add the API key in Settings").
 
 ## 7. Prompt engineering: calibrated, not adjectival
 
@@ -172,11 +187,26 @@ No framework — on purpose. The UI layer is:
 This is deliberately "framework-shaped without a framework": one-way data flow (state → render), no
 direct DOM writes outside a view's own elements, and a contract that keeps the 8 views honest.
 
+Two hard-won rules keep this layer from biting itself:
+
+- **Toasts never re-render.** A toast updates only the toast stack in place. A full re-render would
+  detach live form inputs and scan-progress rows mid-interaction (a real bug this caught in the scan
+  → "Use" → save flow).
+- **Cancellation always marks staleness.** Cancel/navigation increments the generation token, so any
+  in-flight `await` wakes up stale, cleans its busy state, and can never leave a stuck panel.
+
 ## 9. Testing & quality gates
 
 - **Vitest** covers everything that doesn't need a browser: tree graph ops (paths, versions, forks,
   clones), prompt assembly (calibration tables, budgets, ending directives), compilation/export,
-  tolerant parsers, schema validation, and the endpoint catalog.
+  tolerant parsers, schema validation, and the endpoint catalog — plus every diagnosis path of the
+  probe (reachable, reachable-without-models, non-OK response, CORS-blocked, absent, parallel
+  discovery) with a stubbed `fetch`.
+- **Optional end-to-end harness** (`pnpm test:e2e`, requires `chromium` in PATH): a mock
+  OpenAI-compatible server on :1234 plus the real built file in headless Chromium, driven over CDP —
+  boot → `#/settings` → Scan → reachable row with models → Use → Save → Test connection → a real
+  generation round-trip. This is the check that catches browser-only regressions (CORS, the datalist
+  attribute crash, boot hangs).
 - **TypeScript strict** with `noUncheckedIndexedAccess` and `verbatimModuleSyntax`; **ESLint**
   (typescript-eslint recommended) + **Prettier**; **CI** runs `pnpm check` (typecheck → lint →
   format → test → build) on every push and PR, and publishes the built single file as an artifact.

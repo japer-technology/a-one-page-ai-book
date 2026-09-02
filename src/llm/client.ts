@@ -22,7 +22,25 @@ const MAX_TOKENS = 2400;
 
 function httpError(status: number, body: string): Error {
   const short = body.slice(0, 300).replace(/\s+/g, ' ').trim();
+  if (status === 401 || status === 403) {
+    return new Error(
+      `LLM server rejected the request (HTTP ${status}${short ? `: ${short}` : ''}). If this endpoint requires an API key, add it in Settings.`,
+    );
+  }
   return new Error(`LLM server responded ${status}${short ? `: ${short}` : ''}`);
+}
+
+/** Headers shared by both dialects, including the optional bearer key. */
+function buildHeaders(endpoint: EndpointSettings, stream: boolean): Record<string, string> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (endpoint.apiKey.trim().length > 0) headers.authorization = `Bearer ${endpoint.apiKey.trim()}`;
+  if (stream) headers.accept = 'text/event-stream';
+  return headers;
+}
+
+/** Is this response an SSE stream, or a plain JSON body? (Some servers ignore stream:true.) */
+function isEventStream(response: Response): boolean {
+  return (response.headers.get('content-type') ?? '').includes('text/event-stream');
 }
 
 /** Parse one SSE stream from either dialect; invoke onToken per text delta. */
@@ -82,7 +100,7 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
   if (endpoint.vendor === 'ollama') {
     const response = await fetch(`${base}/api/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: buildHeaders(endpoint, stream),
       body: JSON.stringify({
         model,
         messages,
@@ -92,7 +110,7 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
       signal,
     });
     if (response.ok) {
-      if (stream) {
+      if (stream && isEventStream(response)) {
         let full = '';
         await readSSE(response, (t) => {
           full += t;
@@ -114,7 +132,7 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
 
   const response = await fetch(`${base}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: buildHeaders(endpoint, stream),
     body: JSON.stringify({
       model,
       messages,
@@ -127,7 +145,7 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
 
   if (!response.ok) throw httpError(response.status, await readJSONError(response));
 
-  if (stream) {
+  if (stream && isEventStream(response)) {
     let full = '';
     await readSSE(response, (t) => {
       full += t;

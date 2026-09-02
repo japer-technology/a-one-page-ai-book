@@ -12,6 +12,7 @@ export const DEFAULT_ENDPOINT: EndpointSettings = {
   vendor: 'openai-compat',
   model: '',
   temperature: 0.9,
+  apiKey: '',
 };
 
 export function defaultSettings() {
@@ -121,6 +122,7 @@ function normalizeSettings(raw: unknown): Library['settings'] {
         endpoint.temperature <= 2
           ? endpoint.temperature
           : base.endpoint.temperature,
+      apiKey: typeof endpoint.apiKey === 'string' ? endpoint.apiKey : '',
     },
     defaultLength:
       raw.defaultLength === 'shorter' || raw.defaultLength === 'longer'

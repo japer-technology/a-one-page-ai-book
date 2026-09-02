@@ -20,9 +20,11 @@ files, and never talks to a cloud.
 ## What it does
 
 - **🔍 Finds your local LLM.** One click probes the well-known local inference ports (LM Studio,
-  Ollama, llama.cpp, KoboldCpp, text-generation-webui, GPT4All, vLLM, LocalAI, Jan, AnythingLLM,
-  Msty) and reports _reachable with models_, _CORS-blocked_, or _not found_ — with actionable
-  guidance.
+  Ollama, llama.cpp, KoboldCpp, text-generation-webui, GPT4All, vLLM, Jan, AnythingLLM, Msty) and
+  reports _reachable with models_, _CORS-blocked_, or _not found_ — with actionable guidance.
+- **⌨️ Manual entry is first-class.** Any base URL and port (e.g. `http://192.168.1.50:1234`),
+  either protocol (OpenAI-compatible or Ollama native), any model name, optional **API key** (sent
+  as a bearer token only to that endpoint), a one-off "Probe this URL", and preset port hints.
 - **✍️ The core loop.** Seed → 5 proposed titles → page 1 → _the page turn_ → next page → … until
   you say _The End_. Titles and endings iterate like pages.
 - **🎛️ The page turn is the product.** Direction, page length, tone dials (calibrated into
@@ -52,16 +54,17 @@ runtime. Open **Settings → Scan for local LLMs**, pick a model, and write your
 
 ### Scripts
 
-| Command          | What it does                                                   |
-| ---------------- | -------------------------------------------------------------- |
-| `pnpm dev`       | Dev server with watch rebuild (real ESM modules, sourcemaps)   |
-| `pnpm build`     | Bundle + inline → `dist/page-turn.html` (+ `index.html`)       |
-| `pnpm preview`   | Static server for the built single file                        |
-| `pnpm test`      | Unit tests (vitest) over the pure domain layer                 |
-| `pnpm typecheck` | `tsc --noEmit` in strict mode (`noUncheckedIndexedAccess`)     |
-| `pnpm lint`      | ESLint (typescript-eslint)                                     |
-| `pnpm fmt`       | Prettier                                                       |
-| `pnpm check`     | typecheck + lint + format check + tests + build — what CI runs |
+| Command          | What it does                                                              |
+| ---------------- | ------------------------------------------------------------------------- |
+| `pnpm dev`       | Dev server with watch rebuild (real ESM modules, sourcemaps)              |
+| `pnpm build`     | Bundle + inline → `dist/page-turn.html` (+ `index.html`)                  |
+| `pnpm preview`   | Static server for the built single file                                   |
+| `pnpm test`      | Unit tests (vitest) over the pure domain layer                            |
+| `pnpm test:e2e`  | Browser end-to-end check (needs `chromium`): scan → use → save → generate |
+| `pnpm typecheck` | `tsc --noEmit` in strict mode (`noUncheckedIndexedAccess`)                |
+| `pnpm lint`      | ESLint (typescript-eslint)                                                |
+| `pnpm fmt`       | Prettier                                                                  |
+| `pnpm check`     | typecheck + lint + format check + tests + build — what CI runs            |
 
 ## How it works, briefly
 

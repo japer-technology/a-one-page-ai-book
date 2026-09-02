@@ -32,6 +32,10 @@ all devDependencies are tooling (esbuild, typescript, vitest, eslint, prettier).
 - **Lint** — ESLint with typescript-eslint recommended. No unused code.
 - **Format** — Prettier (config in `.prettierrc.json`). `pnpm fmt` before committing.
 - **Tests** — pure domain changes require or update unit tests in `tests/`. Run `pnpm test`.
+- **E2E (when touching discovery/settings/generation)** — `pnpm build && pnpm test:e2e` drives the
+  real built file in headless Chromium (requires `chromium` in PATH) against a mock LLM server: boot
+  → scan → use → save → test connection. Run it before merging anything in `src/llm`,
+  `src/ui/views/settings.ts`, or `src/main.ts`.
 - **Build** — the single-file build must succeed and pass its emit-time safety checks.
 
 ## Architecture rules (from [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md))

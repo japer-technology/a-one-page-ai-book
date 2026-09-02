@@ -35,7 +35,7 @@ export const CANDIDATES: EndpointCandidate[] = [
     label: 'llama.cpp server',
     baseUrl: 'http://127.0.0.1:8080',
     vendor: 'openai-compat',
-    note: 'llama-server --port 8080',
+    note: 'llama-server --port 8080 (also LocalAI / llamafile default port)',
   },
   {
     id: 'llamacpp-8081',
@@ -71,13 +71,6 @@ export const CANDIDATES: EndpointCandidate[] = [
     baseUrl: 'http://127.0.0.1:8000',
     vendor: 'openai-compat',
     note: 'vllm serve',
-  },
-  {
-    id: 'localai',
-    label: 'LocalAI',
-    baseUrl: 'http://127.0.0.1:8080',
-    vendor: 'openai-compat',
-    note: 'LocalAI default port',
   },
   {
     id: 'jan',
@@ -139,11 +132,19 @@ export function parseModelsResponse(vendor: EndpointVendor, json: unknown): stri
   return parseOpenAIModels(json);
 }
 
-/** "http://127.0.0.1:1234/v1/" -> "http://127.0.0.1:1234" */
+/** "http://127.0.0.1:1234/v1/" -> "http://127.0.0.1:1234" (keeps deeper path prefixes). */
 export function normalizeBaseUrl(input: string): string {
   return input.trim().replace(/\/+$/, '').replace(/\/v1$/, '');
 }
 
 export function vendorName(vendor: EndpointVendor): string {
   return vendor === 'ollama' ? 'Ollama (native)' : 'OpenAI-compatible';
+}
+
+/** Presets for manual entry — one per candidate, for the Base URL datalist. */
+export function presetBaseUrls(): Array<{ label: string; url: string }> {
+  return CANDIDATES.map((c) => ({
+    label: `${c.label} · ${c.baseUrl.replace('http://127.0.0.1:', ':')}`,
+    url: c.baseUrl,
+  }));
 }

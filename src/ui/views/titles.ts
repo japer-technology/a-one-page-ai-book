@@ -154,7 +154,10 @@ async function generate(
   api.refresh();
   try {
     const raw = await api.generateText(titlesMessages(text, options, 5));
-    if (api.staleGen(token)) return;
+    if (api.staleGen(token)) {
+      busy.delete(seedId);
+      return;
+    }
     const parsed = parseTitleOptions(raw);
     if (parsed.length === 0) throw new Error('The model returned no titles');
     api.appendTitles(seedId, parsed.slice(0, 5));
@@ -166,6 +169,7 @@ async function generate(
     }
     api.refresh();
   } catch (err) {
+    busy.delete(seedId);
     if (api.staleGen(token)) return;
     busy.set(seedId, { token, error: api.genError(err) });
     api.refresh();

@@ -61,6 +61,17 @@ describe('normalizeLibrary', () => {
     expect(lib.settings.endpoint.temperature).toBeGreaterThanOrEqual(0);
     expect(lib.settings.endpoint.temperature).toBeLessThanOrEqual(2);
   });
+
+  it('carries the API key through normalization and defaults it when absent', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: { endpoint: { apiKey: 'sk-test' } },
+    });
+    expect(lib.settings.endpoint.apiKey).toBe('sk-test');
+    const fresh = normalizeLibrary({ books: [], nodes: {} });
+    expect(fresh.settings.endpoint.apiKey).toBe('');
+  });
 });
 
 describe('book bundles', () => {

@@ -15,6 +15,7 @@
     "preview": "node build/serve.mjs --preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "bash scripts/e2e/run.sh",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "fmt": "prettier --write .",

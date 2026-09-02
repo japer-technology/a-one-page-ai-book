@@ -27,6 +27,10 @@ export function h<K extends keyof HTMLElementTagNameMap>(
         node.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
       } else if (key === 'text') {
         node.textContent = String(value);
+      } else if (key === 'list') {
+        // HTMLInputElement.list is a READONLY property — assigning to it throws
+        // in strict mode. The datalist linkage must go through the attribute.
+        node.setAttribute('list', String(value));
       } else if (key in node) {
         (node as unknown as Record<string, unknown>)[key] = value;
       } else {

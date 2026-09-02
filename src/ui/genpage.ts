@@ -46,7 +46,10 @@ export async function generatePage(
         if (state) state.stream += piece;
       },
     });
-    if (api.staleGen(token)) return null;
+    if (api.staleGen(token)) {
+      genStates.delete(key);
+      return null;
+    }
     let node: StoryNode;
     if (target.kind === 'new') {
       node = api.attachPage(book, target.parentId, direction, text, book.model);
@@ -62,7 +65,13 @@ export async function generatePage(
     api.refresh();
     return node;
   } catch (err) {
-    if (api.staleGen(token)) return null;
+    genStates.delete(key);
+    if (api.staleGen(token)) {
+      // Cancelled (cancel button or navigation) or superseded by a newer
+      // generation — leave no stuck "busy" panel behind.
+      api.refresh();
+      return null;
+    }
     genStates.set(key, { token, status: 'error', label, stream: '', error: api.genError(err) });
     api.refresh();
     return null;
