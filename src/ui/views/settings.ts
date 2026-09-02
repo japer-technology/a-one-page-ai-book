@@ -10,11 +10,26 @@
  * token only to this endpoint.
  */
 import type { AppApi } from '../ctx';
-import { button, field, h } from '../dom';
-import { CANDIDATES, normalizeBaseUrl, presetBaseUrls, vendorName } from '../../llm/endpoints';
+import { button, field, h, spinner } from '../dom';
+import {
+  CANDIDATES,
+  llmPorts,
+  normalizeBaseUrl,
+  presetBaseUrls,
+  vendorName,
+} from '../../llm/endpoints';
 import type { EndpointCandidate } from '../../llm/endpoints';
 import { bestReachable, discover, probeCandidate } from '../../llm/probe';
 import type { ProbeResult } from '../../llm/probe';
+import {
+  commonSubnets,
+  detectLocalIp,
+  identifyLanServer,
+  normalizeSubnetBase,
+  scanLan,
+  subnetBaseOf,
+} from '../../llm/lan';
+import type { LanServer } from '../../llm/lan';
 import { clearLibrary, estimateStorage, requestPersistence } from '../../store/db';
 import { exportLibraryFile, hasFilePicker, hasOpfs, importLibraryFile } from '../../store/files';
 import { defaultLibrary } from '../../core/schema';
@@ -23,6 +38,13 @@ import type { EndpointSettings, EndpointVendor } from '../../core/types';
 // Session view state.
 const scan = { running: false, results: [] as ProbeResult[] };
 const discoveredModels: string[] = [];
+const lan = {
+  running: false,
+  results: [] as LanServer[],
+  base: '',
+  abort: null as AbortController | null,
+};
+let lanDetected = false;
 
 interface Controls {
   nameInput: HTMLInputElement;
@@ -174,6 +196,57 @@ export function renderSettings(api: AppApi): HTMLElement {
     api.toast('Settings saved', 'success');
   };
 
+  // ---- LAN scan controls ---------------------------------------------------
+  const lanSubnetInput = h('input', {
+    id: 'lan-subnet',
+    class: 'input lan-subnet',
+    type: 'text',
+    value: lan.base,
+    placeholder: 'e.g. 192.168.1',
+    spellcheck: false,
+    oninput: (event: Event) => {
+      lan.base = (event.target as HTMLInputElement).value;
+    },
+  });
+  const lanChips = h(
+    'div',
+    { class: 'row gap' },
+    ...commonSubnets().map((subnet) =>
+      button(
+        subnet,
+        () => {
+          lan.base = subnet;
+          lanSubnetInput.value = subnet;
+        },
+        'chip',
+      ),
+    ),
+  );
+  const lanProgress = h('span', {
+    class: 'field-hint',
+    text: lan.base
+      ? `subnet: ${lan.base}.1–254`
+      : 'auto-detects your subnet where the browser allows it',
+  });
+  const lanResultsBox = h('div', { class: 'scan-results' });
+  const lanButton = button(
+    lan.running ? 'Cancel scan' : '🌐 Scan local network',
+    () => void runLanScan(api, controls, lanSubnetInput, lanResultsBox, lanButton, lanProgress),
+    lan.running ? 'danger' : 'primary',
+  );
+  for (const server of lan.results) lanResultsBox.appendChild(lanServerRow(api, server, controls));
+
+  if (!lanDetected) {
+    lanDetected = true;
+    void detectLocalIp(1200).then((ip) => {
+      if (ip && !lan.base) {
+        lan.base = subnetBaseOf(ip);
+        if (lanSubnetInput.isConnected) lanSubnetInput.value = lan.base;
+        lanProgress.textContent = `subnet: ${lan.base}.1–254 (auto-detected)`;
+      }
+    });
+  }
+
   return h(
     'div',
     { class: 'view view-settings' },
@@ -232,6 +305,19 @@ export function renderSettings(api: AppApi): HTMLElement {
         button('💾 Save', save, 'primary'),
         button('Test connection', () => void testConnection(api, controls)),
       ),
+    ),
+
+    h(
+      'section',
+      { class: 'card' },
+      h('h2', { text: 'Local network (LAN)' }),
+      h('p', {
+        class: 'field-hint',
+        text: 'Scan nearby computers: probes every address in a subnet (…1–254) on the standard LLM ports and identifies what answers. The server must listen on the LAN interface (LM Studio: “Serve on Local Network”; Ollama: OLLAMA_HOST=0.0.0.0) and the same CORS rules apply.',
+      }),
+      h('div', { class: 'row gap' }, lanSubnetInput, lanChips),
+      h('div', { class: 'row gap' }, lanButton, lanProgress),
+      lanResultsBox,
     ),
 
     h(
@@ -424,6 +510,113 @@ async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
     }
     refreshModelDatalist(controls.modelInput);
   }
+}
+
+async function runLanScan(
+  api: AppApi,
+  controls: Controls,
+  subnetInput: HTMLInputElement,
+  box: HTMLElement,
+  btn: HTMLButtonElement,
+  progress: HTMLElement,
+): Promise<void> {
+  if (lan.running) {
+    lan.abort?.abort();
+    return;
+  }
+  const base = normalizeSubnetBase(subnetInput.value || lan.base);
+  if (!base) {
+    api.toast('Enter a subnet first — e.g. 192.168.1', 'error');
+    return;
+  }
+  lan.running = true;
+  lan.base = base;
+  subnetInput.value = base;
+  lan.results = [];
+  box.replaceChildren();
+  btn.textContent = 'Cancel scan';
+  lan.abort = new AbortController();
+  const ports = llmPorts();
+  progress.textContent = `scanning ${base}.1–254 on ${ports.length} ports…`;
+
+  await scanLan({
+    base,
+    ports,
+    signal: lan.abort.signal,
+    onHit: (hit) => {
+      if (!box.isConnected) {
+        lan.abort?.abort();
+        return;
+      }
+      const row = h(
+        'div',
+        { class: 'scan-row lan-row' },
+        spinner(),
+        h('span', { class: 'scan-label', text: `http://${hit.host}:${hit.port}` }),
+        h('span', { class: 'scan-detail', text: 'identifying…' }),
+      );
+      box.appendChild(row);
+      void identifyLanServer(hit).then((server) => {
+        lan.results.push(server);
+        row.replaceWith(lanServerRow(api, server, controls));
+        if (!lan.running) {
+          progress.textContent = `${lan.results.length} responder(s) on ${base}.1–254`;
+        }
+      });
+    },
+    onProgress: (done, total, hits) => {
+      progress.textContent = `scanned ${done}/${total} hosts · ${hits.length} responder(s)`;
+    },
+  });
+
+  lan.running = false;
+  lan.abort = null;
+  btn.textContent = '🌐 Scan local network';
+  progress.textContent =
+    lan.results.length > 0
+      ? `done: ${lan.results.length} responder(s) on ${base}.1–254`
+      : `done: nothing answered on ${base}.1–254`;
+  if (lan.results.length === 0) {
+    api.toast(
+      `No LLM servers found on ${base}.1–254. The server must listen on the LAN interface (0.0.0.0) and pass the firewall.`,
+      'info',
+    );
+  }
+}
+
+function lanServerRow(api: AppApi, server: LanServer, controls: Controls): HTMLElement {
+  const status = server.corsOk
+    ? h('span', { class: 'badge badge-ok', text: '✓ reachable' })
+    : h('span', { class: 'badge badge-warn', text: 'CORS-blocked' });
+
+  const use = () => {
+    controls.nameInput.value = `LAN · ${server.host}`;
+    controls.urlInput.value = server.baseUrl;
+    controls.vendorInput.value = server.vendor;
+    for (const model of server.models) {
+      if (!discoveredModels.includes(model)) discoveredModels.push(model);
+    }
+    if (server.models.length > 0) controls.modelInput.value = server.models[0] ?? '';
+    refreshModelDatalist(controls.modelInput);
+    api.toast(`Using LAN server ${server.baseUrl}. Press Save to keep it.`, 'success');
+  };
+
+  return h(
+    'div',
+    { class: 'scan-row lan-row' },
+    status,
+    h('span', {
+      class: 'scan-label',
+      text: `${server.host}:${server.port} — ${server.baseUrl}`,
+    }),
+    h('span', {
+      class: 'scan-detail',
+      text: server.corsOk
+        ? `${server.models.length} model(s) · ${server.latencyMs ?? '?'} ms`
+        : server.detail,
+    }),
+    button('Use', use, 'chip'),
+  );
 }
 
 function refreshModelDatalist(modelInput: HTMLInputElement): void {

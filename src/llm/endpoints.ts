@@ -148,3 +148,17 @@ export function presetBaseUrls(): Array<{ label: string; url: string }> {
     url: c.baseUrl,
   }));
 }
+
+/** The ports the catalog knows about, in popularity order — the LAN-scan grid uses these. */
+export function llmPorts(): number[] {
+  const ports: number[] = [];
+  for (const candidate of CANDIDATES) {
+    try {
+      const port = Number(new URL(candidate.baseUrl).port);
+      if (Number.isFinite(port) && !ports.includes(port)) ports.push(port);
+    } catch {
+      // skip malformed URLs
+    }
+  }
+  return ports;
+}

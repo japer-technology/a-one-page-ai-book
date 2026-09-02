@@ -313,6 +313,11 @@
   margin: 0.6rem 0;
 }
 
+.lan-subnet {
+  flex: 0 1 200px;
+  min-width: 140px;
+}
+
 .scan-row {
   display: flex;
   align-items: center;

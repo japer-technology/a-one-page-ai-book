@@ -22,6 +22,10 @@ files, and never talks to a cloud.
 - **🔍 Finds your local LLM.** One click probes the well-known local inference ports (LM Studio,
   Ollama, llama.cpp, KoboldCpp, text-generation-webui, GPT4All, vLLM, Jan, AnythingLLM, Msty) and
   reports _reachable with models_, _CORS-blocked_, or _not found_ — with actionable guidance.
+- **🌐 Scans the local network.** Probes every address in your subnet (`192.168.1.1–254`) on the
+  standard LLM ports, identifies what answers (with model lists), and adopts a nearby machine's
+  server in one click. Auto-detects your subnet where the browser allows it; manual entry +
+  common-subnet chips otherwise.
 - **⌨️ Manual entry is first-class.** Any base URL and port (e.g. `http://192.168.1.50:1234`),
   either protocol (OpenAI-compatible or Ollama native), any model name, optional **API key** (sent
   as a bearer token only to that endpoint), a one-off "Probe this URL", and preset port hints.

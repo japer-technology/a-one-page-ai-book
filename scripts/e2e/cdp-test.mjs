@@ -92,11 +92,39 @@ out.modelField = await evaluate(
   'document.querySelector(\'input[list="discovered-models"]\').value',
 );
 out.urlField = await evaluate('document.querySelector(\'input[list="endpoint-presets"]\').value');
+
+// ---- LAN scan over the loopback subnet (proves the grid logic in-browser) ----
+out.lanSubnetTyped = await evaluate(
+  "(() => { const i = document.getElementById('lan-subnet'); if (!i) return 'missing'; i.value = '127.0.0'; return 'typed'; })()",
+);
+out.lanClicked = await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Scan local network')).click(); 'clicked'",
+);
+try {
+  out.lanHitAppeared = await waitFor(
+    "[...document.querySelectorAll('.lan-row')].some(r => r.textContent.includes('127.0.0.1') && r.textContent.includes('reachable'))",
+    60000,
+    'a LAN row for 127.0.0.1',
+  );
+} catch {
+  out.lanHitAppeared = false;
+}
+out.lanRows = await evaluate(
+  "[...document.querySelectorAll('.lan-row')].map(r => r.textContent.replace(/\\s+/g, ' ').trim())",
+);
+out.lanUsed = await evaluate(
+  "[...document.querySelectorAll('.lan-row')].find(r => r.textContent.includes('127.0.0.1')).querySelector('button').click(); 'used'",
+);
+out.modelAfterLanUse = await evaluate(
+  'document.querySelector(\'input[list="discovered-models"]\').value',
+);
 console.log(JSON.stringify(out, null, 2));
 
 const ok =
   out.connectedToast === true &&
   out.modelField.length > 0 &&
-  out.urlField === 'http://127.0.0.1:1234';
+  out.urlField === 'http://127.0.0.1:1234' &&
+  out.lanHitAppeared === true &&
+  out.modelAfterLanUse === 'mock-poet-3b';
 ws.close();
 process.exit(ok ? 0 : 1);

@@ -143,6 +143,14 @@ Discovery (`llm/probe.ts`) works within a browser's hard CORS reality:
    protocol, any model name, an optional **API key** (sent as `Authorization: Bearer …` only to that
    endpoint), a one-off **"Probe this URL"** for LAN addresses the catalog doesn't know
    (`http://192.168.1.50:1234`), and preset port hints from the catalog.
+5. **LAN scanning** (`llm/lan.ts`): browsers can't enumerate a network (no raw sockets/ARP/ICMP), so
+   "scanning" means probing the grid {subnet base} × {`.1`–`.254`} × {catalog ports} with a
+   `no-cors` GET (any HTTP answer = a responder), then identifying responders with the standard CORS
+   model-list probe. Per host the scan stops at the first responder; 16 parallel workers and a 600
+   ms per-probe timeout keep a full /24 to seconds, with live progress and cancel. The subnet
+   auto-detects via WebRTC ICE where the browser allows it (Chrome mDNS-obfuscates, so manual
+   entry + common-subnet chips are the reliable path), and identified servers feed the same "Use"
+   flow as localhost discoveries (vendor guessed by port: 11434 → Ollama).
 
 Generation (`llm/client.ts`) speaks two dialects behind one interface — **OpenAI-compatible**
 (`POST /v1/chat/completions`) and **Ollama native** (`POST /api/chat`, with automatic `/v1` fallback
