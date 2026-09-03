@@ -28,4 +28,60 @@
   --radius-sm: 6px;
   --shadow: 0 8px 30px rgb(0 0 0 / 0.45);
   --max-width: 760px;
+
+  /* Chrome surfaces that must follow the theme. */
+  --chrome: rgb(20 16 14 / 0.9);
+  --inset: rgb(0 0 0 / 0.18);
+}
+
+/* ---- Reading themes ------------------------------------------------------ */
+
+:root[data-theme='sepia'] {
+  --paper: #3d3122;
+  --paper-dim: #5a4a33;
+  --ink: #f0e6d2;
+  --ink-soft: #8a755a;
+
+  --bg: #eadfc8;
+  --bg-raised: #f2e9d8;
+  --bg-card: #f4ecdc;
+  --line: #d3c3a3;
+
+  --accent: #8a5a1e;
+  --accent-strong: #6f4714;
+  --accent-ink: #f7ecd8;
+
+  --danger: #a33b2f;
+  --ok: #4c7a4c;
+  --warn: #8a6a1e;
+  --muted: #8a755a;
+
+  --chrome: rgb(234 223 200 / 0.92);
+  --inset: rgb(0 0 0 / 0.05);
+  --shadow: 0 8px 30px rgb(61 49 34 / 0.25);
+}
+
+:root[data-theme='light'] {
+  --paper: #22201c;
+  --paper-dim: #4c463d;
+  --ink: #ffffff;
+  --ink-soft: #7a7264;
+
+  --bg: #f7f5f0;
+  --bg-raised: #ffffff;
+  --bg-card: #ffffff;
+  --line: #d8d3c8;
+
+  --accent: #7a5c1e;
+  --accent-strong: #5f4713;
+  --accent-ink: #ffffff;
+
+  --danger: #b3403a;
+  --ok: #3e7a3e;
+  --warn: #7d6217;
+  --muted: #7a7264;
+
+  --chrome: rgb(255 255 255 / 0.92);
+  --inset: rgb(0 0 0 / 0.04);
+  --shadow: 0 8px 30px rgb(34 32 28 / 0.14);
 }

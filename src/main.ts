@@ -10,6 +10,7 @@ import type {
   EndpointSettings,
   Library,
   SeedOptions,
+  StoryBible,
   StoryNode,
   TitleOption,
   TurnInput,
@@ -18,21 +19,29 @@ import {
   addNode,
   appendPageVersion,
   appendTitleOptions,
+  attachBible,
+  attachSummary,
+  branchTip,
+  childrenOf,
   finishBook,
   getNode,
   makeBook,
+  titleOf,
   makeEndingNode,
   makePageNode,
   makeSeedNode,
   makeTitleNode,
   makeTurnNode,
   removeSubtree,
+  setBookRules,
   setChosenVersion,
   setFrontier,
+  setVersionPinned,
   cloneSubtree,
 } from './core/tree';
-import { defaultLibrary, normalizeLibrary } from './core/schema';
+import { defaultLibrary, emptySeedOptions, normalizeLibrary } from './core/schema';
 import { chat, chatJSON } from './llm/client';
+import { compileBook } from './core/compile';
 import { loadLibrary, requestPersistence, saveLibrary } from './store/db';
 import { readOpfsLibrary, writeOpfsLibrary } from './store/files';
 import { newId } from './core/id';
@@ -43,11 +52,13 @@ import { genStates } from './ui/genpage';
 import { audit, auditLog } from './ui/audit';
 import { renderSeed } from './ui/views/seed';
 import { maybeAutoGenerate, renderTitles } from './ui/views/titles';
-import { renderPage } from './ui/views/page';
+import { clearSpanToolbar, renderPage } from './ui/views/page';
 import { renderTurn } from './ui/views/turn';
 import { renderSettings } from './ui/views/settings';
 import { renderReader } from './ui/views/reader';
 import { renderTheEnd } from './ui/views/theend';
+import { renderArchive } from './ui/views/archive';
+import { renderAbout } from './ui/views/about';
 
 interface AppState {
   lib: Library;
@@ -56,11 +67,21 @@ interface AppState {
   params: Record<string, string>;
   toasts: Toast[];
   genCounter: number;
+  renderCount: number;
   abort: AbortController | null;
+  controllers: Set<AbortController>;
 }
 
-/** Hard ceiling for one LLM call — local CPU inference can be slow, but never this slow. */
-const GENERATION_TIMEOUT_MS = 120_000;
+/**
+ * Hard ceiling for one LLM call. Local CPU inference genuinely needs minutes:
+ * a page request carries ~2600 words of context plus a few hundred output
+ * words, which a 7–13B model on a laptop CPU can take 5–10 minutes to finish.
+ * The probe ("Reply with exactly: OK") finishes in seconds — which is exactly
+ * why Settings can say "Connected" while a real generation still needs time.
+ * There is always a Cancel button and navigation aborts, so a generous
+ * ceiling costs nothing.
+ */
+const GENERATION_TIMEOUT_MS = 600_000;
 
 /** Views that make sense as deep links (#/settings, #/library, …). */
 const HASH_VIEWS: ReadonlySet<string> = new Set([
@@ -69,6 +90,8 @@ const HASH_VIEWS: ReadonlySet<string> = new Set([
   'settings',
   'reader',
   'theend',
+  'archive',
+  'about',
 ]);
 
 function viewFromHash(): ViewName | null {
@@ -91,7 +114,9 @@ class App implements AppApi {
       params: {},
       toasts: [],
       genCounter: 0,
+      renderCount: 0,
       abort: null,
+      controllers: new Set(),
     };
   }
 
@@ -115,6 +140,7 @@ class App implements AppApi {
 
   navigate(view: ViewName, params: Record<string, string> = {}): void {
     audit(`navigate→${view}`);
+    clearSpanToolbar();
     this.abortGeneration();
     this.state.view = view;
     this.state.params = params;
@@ -184,12 +210,14 @@ class App implements AppApi {
   /** Support/debug snapshot (exposed as window.__PAGE_TURN__). */
   debug(): {
     genCounter: number;
+    renderCount: number;
     view: ViewName;
     params: Record<string, string>;
     bookId: string | null;
   } {
     return {
       genCounter: this.state.genCounter,
+      renderCount: this.state.renderCount,
       view: this.state.view,
       params: { ...this.state.params },
       bookId: this.state.book?.id ?? null,
@@ -200,11 +228,16 @@ class App implements AppApi {
 
   generateText(
     messages: ChatMessage[],
-    opts: { model?: string; endpoint?: EndpointSettings; onToken?: (token: string) => void } = {},
+    opts: {
+      model?: string;
+      endpoint?: EndpointSettings;
+      onToken?: (token: string) => void;
+      parallel?: boolean;
+    } = {},
   ): Promise<string> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    const armed = this.armGeneration();
+    const armed = this.armGeneration(opts.parallel === true);
     return chat(
       {
         endpoint,
@@ -219,21 +252,32 @@ class App implements AppApi {
 
   generateJSON<T>(
     messages: ChatMessage[],
-    opts: { model?: string; endpoint?: EndpointSettings } = {},
+    opts: { model?: string; endpoint?: EndpointSettings; parallel?: boolean } = {},
   ): Promise<T> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    const armed = this.armGeneration();
+    const armed = this.armGeneration(opts.parallel === true);
     return chatJSON<T>(
       { endpoint, model, temperature: endpoint.temperature, signal: armed.controller.signal },
       messages,
     ).finally(() => this.disarmGeneration(armed));
   }
 
-  /** One in-flight request at a time, each with its own hard timeout. */
-  private armGeneration(): { controller: AbortController; timer: ReturnType<typeof setTimeout> } {
-    this.state.abort?.abort();
+  /**
+   * One in-flight request at a time by default (a new request supersedes the
+   * old one); `parallel: true` registers alongside instead of superseding —
+   * used by the multi-candidate fan-out.
+   */
+  private armGeneration(parallel = false): {
+    controller: AbortController;
+    timer: ReturnType<typeof setTimeout>;
+  } {
+    if (!parallel) {
+      for (const controller of this.state.controllers) controller.abort();
+      this.state.controllers.clear();
+    }
     const controller = new AbortController();
+    this.state.controllers.add(controller);
     this.state.abort = controller;
     const timer = setTimeout(
       () => controller.abort(new DOMException('Generation timed out', 'TimeoutError')),
@@ -248,6 +292,7 @@ class App implements AppApi {
   }): void {
     // Clear OUR timer only — a newer request may have armed its own by now.
     clearTimeout(armed.timer);
+    this.state.controllers.delete(armed.controller);
     if (this.state.abort === armed.controller) this.state.abort = null;
   }
 
@@ -265,14 +310,16 @@ class App implements AppApi {
     // cancel/navigation can never leave a stuck "busy" panel behind.
     audit('abortGeneration');
     this.state.genCounter++;
-    this.state.abort?.abort();
+    for (const controller of this.state.controllers) controller.abort();
+    this.state.controllers.clear();
     this.state.abort = null;
   }
 
   genError(err: unknown): string {
     if (err instanceof DOMException && err.name === 'AbortError') return 'Generation cancelled.';
     if (err instanceof DOMException && err.name === 'TimeoutError') {
-      return `Generation timed out after ${GENERATION_TIMEOUT_MS / 1000}s — the model may be busy or the request too large. Try again, or pick a smaller model.`;
+      const minutes = Math.round(GENERATION_TIMEOUT_MS / 60_000);
+      return `Generation timed out after ${minutes} minutes — the model may be busy or the request too large. Try again, or pick a smaller model.`;
     }
     const message = err instanceof Error ? err.message : String(err);
     const base = this.state.lib.settings.endpoint.baseUrl;
@@ -290,8 +337,8 @@ class App implements AppApi {
 
   // ---- Tree mutations -----------------------------------------------------
 
-  newSeed(text: string, options: SeedOptions): StoryNode {
-    const node = makeSeedNode(text, options);
+  newSeed(text: string, options: SeedOptions, brief = ''): StoryNode {
+    const node = makeSeedNode(text, options, brief);
     this.update((lib) => ({ ...lib, nodes: addNode(lib.nodes, node) }));
     return node;
   }
@@ -323,9 +370,10 @@ class App implements AppApi {
     direction: TurnInput,
     text: string,
     model: string,
+    by: 'ai' | 'user' = 'ai',
   ): StoryNode {
-    audit(`attachPage book=${book.id} parent=${parentId}`);
-    const node = makePageNode(parentId, direction, model, text);
+    audit(`attachPage book=${book.id} parent=${parentId} by=${by}`);
+    const node = makePageNode(parentId, direction, model, text, by);
     this.update((lib) => ({
       ...lib,
       nodes: addNode(lib.nodes, node),
@@ -386,6 +434,184 @@ class App implements AppApi {
     }));
   }
 
+  openPageAt(book: Book, pageNodeId: string): void {
+    const node = getNode(this.state.lib.nodes, pageNodeId);
+    if (!node || node.kind !== 'page') return;
+    audit(`openPageAt book=${book.id} page=${pageNodeId}`);
+    const reopened = book.status === 'finished';
+    this.update((lib) => ({
+      ...lib,
+      books: replaceBook(lib, {
+        ...setFrontier(book, pageNodeId),
+        status: 'in-progress', // walking back re-opens the book for branching
+      }),
+    }));
+    this.navigate('page');
+    if (reopened) {
+      this.toast(
+        'Back in the story — the finished path is kept; keeping a page here forks a new branch.',
+        'info',
+      );
+    }
+  }
+
+  saveBible(pageNodeId: string, bible: StoryBible): void {
+    this.update((lib) => {
+      const node = getNode(lib.nodes, pageNodeId);
+      if (!node || node.kind !== 'page') return lib;
+      return { ...lib, nodes: { ...lib.nodes, [node.id]: attachBible(node, bible) } };
+    });
+  }
+
+  saveSummary(pageNodeId: string, summary: string): void {
+    this.update((lib) => {
+      const node = getNode(lib.nodes, pageNodeId);
+      if (!node || node.kind !== 'page') return lib;
+      return { ...lib, nodes: { ...lib.nodes, [node.id]: attachSummary(node, summary) } };
+    });
+  }
+
+  /** Find the title node for a proposed option, creating it on first entry. */
+  ensureTitleNode(seedNodeId: string, option: TitleOption): StoryNode {
+    const existing = childrenOf(this.state.lib.nodes, seedNodeId).find(
+      (n) => n.kind === 'title' && n.data.kind === 'title' && n.data.title === option.title,
+    );
+    if (existing) return existing;
+    const node = makeTitleNode(seedNodeId, option);
+    this.update((lib) => ({ ...lib, nodes: addNode(lib.nodes, node) }));
+    return node;
+  }
+
+  /**
+   * Re-enter the book from any proposed title (§5): the frontier moves to
+   * wherever writing last stopped under that title — or to the title itself,
+   * ready for page 1. Nothing on any other branch is touched.
+   */
+  openBranch(book: Book, option: TitleOption): void {
+    const titleNode = this.ensureTitleNode(book.seedNodeId, option);
+    audit(`openBranch book=${book.id} title=${titleNode.id}`);
+    let tip = branchTip(this.state.lib.nodes, titleNode.id);
+    if (tip.kind === 'ending') {
+      const parent = getNode(this.state.lib.nodes, tip.parentId ?? '');
+      if (parent) tip = parent;
+    }
+    this.update((lib) => ({
+      ...lib,
+      books: replaceBook(lib, { ...setFrontier(book, tip.id), status: 'in-progress' }),
+    }));
+    if (tip.kind === 'page') this.navigate('page');
+    else if (tip.kind === 'turn') this.navigate('turn', { from: tip.parentId ?? titleNode.id });
+    else this.navigate('page', { auto: '1' });
+  }
+
+  setRules(book: Book, rules: string[]): void {
+    this.update((lib) => ({
+      ...lib,
+      books: replaceBook(lib, setBookRules(book, rules)),
+    }));
+  }
+
+  togglePin(pageId: string, version: number): void {
+    this.update((lib) => {
+      const node = getNode(lib.nodes, pageId);
+      if (!node || node.kind !== 'page' || node.data.kind !== 'page') return lib;
+      const current = node.data.versions[version - 1];
+      if (!current) return lib;
+      const pinned = !current.pinned;
+      return {
+        ...lib,
+        nodes: { ...lib.nodes, [node.id]: setVersionPinned(node, version, pinned) },
+      };
+    });
+    void this.pinToast(pageId, version);
+  }
+
+  private pinToast(pageId: string, version: number): void {
+    const node = getNode(this.state.lib.nodes, pageId);
+    const isPinned =
+      node && node.data.kind === 'page' ? node.data.versions[version - 1]?.pinned === true : false;
+    const toast: Toast = {
+      id: ++toastSeq,
+      message: isPinned ? `📌 Version ${version} pinned` : `Version ${version} unpinned`,
+      kind: 'success',
+    };
+    this.state.toasts.push(toast);
+    if (this.state.toasts.length > 4) this.state.toasts.shift();
+    renderToastStack(this.state.toasts);
+    setTimeout(() => {
+      this.state.toasts = this.state.toasts.filter((t) => t.id !== toast.id);
+      renderToastStack(this.state.toasts);
+    }, 5000);
+  }
+
+  seedFromBook(bookId: string): void {
+    const book = this.state.lib.books.find((b) => b.id === bookId);
+    if (!book) return;
+    const title = titleOf(this.state.lib.nodes, book);
+    const compiled = compileBook(this.state.lib.nodes, book);
+    const cast = compiled.cast;
+    const castLines: string[] = [];
+    if (cast) {
+      const names = (list: Array<{ name: string }>) => list.map((e) => e.name).join(', ');
+      if (cast.people.length > 0) castLines.push(`The cast carries over: ${names(cast.people)}.`);
+      if (cast.places.length > 0) castLines.push(`Places: ${names(cast.places)}.`);
+      if (cast.things.length > 0) castLines.push(`Significant things: ${names(cast.things)}.`);
+      if (cast.threads.length > 0)
+        castLines.push(`Threads the sequel may pick up: ${names(cast.threads)}.`);
+    }
+    const brief =
+      `This is a sequel to "${title}" (a book directed page by page in Page Turn). Original seed: ${compiled.seed}. ${castLines.join(' ')} Continue the story onward — same world, new pages, the reader directs every turn.`.trim();
+    const node = makeSeedNode(`Sequel to "${title}"`, emptySeedOptions(), brief);
+    this.update((lib) => ({ ...lib, nodes: addNode(lib.nodes, node) }));
+    this.navigate('titles', { seed: node.id });
+    this.toast('Sequel seeded — the cast rides along as the brief', 'success');
+  }
+
+  setReadingPosition(bookId: string, position: number): void {
+    const existing = this.state.lib.settings.readingPositions ?? {};
+    if (position <= 0) {
+      const { [bookId]: _dropped, ...rest } = existing;
+      void _dropped;
+      this.update((lib) => ({
+        ...lib,
+        settings: { ...lib.settings, readingPositions: rest },
+      }));
+      return;
+    }
+    this.update((lib) => ({
+      ...lib,
+      settings: {
+        ...lib.settings,
+        readingPositions: { ...(lib.settings.readingPositions ?? {}), [bookId]: position },
+      },
+    }));
+  }
+
+  applyAppearance(): void {
+    const settings = this.state.lib.settings;
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    root.dataset.theme = settings.theme;
+    root.style.setProperty('--font-scale', String(settings.fontScale));
+  }
+
+  renameTitle(book: Book, title: string): void {
+    const clean = title.trim();
+    if (!clean) return;
+    this.update((lib) => {
+      const node = getNode(lib.nodes, book.chosenTitleId);
+      if (!node || node.kind !== 'title' || node.data.kind !== 'title') return lib;
+      return {
+        ...lib,
+        nodes: {
+          ...lib.nodes,
+          [node.id]: { ...node, data: { ...node.data, title: clean } },
+        },
+      };
+    });
+    this.toast('Title renamed', 'success');
+  }
+
   removeBook(bookId: string): void {
     const book = this.state.lib.books.find((b) => b.id === bookId);
     if (!book) return;
@@ -441,6 +667,8 @@ class App implements AppApi {
   // ---- Render -------------------------------------------------------------
 
   render(): void {
+    this.state.renderCount++;
+    this.applyAppearance();
     const content = dispatchView(this);
     renderShell(this, content, this.state.toasts);
   }
@@ -465,6 +693,10 @@ function dispatchView(api: AppApi): HTMLElement {
       return renderReader(api);
     case 'theend':
       return renderTheEnd(api);
+    case 'archive':
+      return renderArchive(api);
+    case 'about':
+      return renderAbout(api);
     case 'library':
     default:
       return renderLibrary(api);
@@ -533,6 +765,7 @@ async function boot(): Promise<void> {
     bookId: () => app.book?.id ?? null,
     model: () => app.lib.settings.endpoint,
     genCounter: () => app.debug().genCounter,
+    renders: () => app.debug().renderCount,
     genStateKeys: () => [...genStates.keys()],
     audit: () => [...auditLog],
   };

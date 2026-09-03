@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { compileBook, countWords, slugify, toMarkdown, toPlainText } from '../src/core/compile';
 import {
+  compileBook,
+  countWords,
+  joinParagraphs,
+  moodLine,
+  moodOf,
+  paragraphsOf,
+  slugify,
+  toMarkdown,
+  toPlainText,
+} from '../src/core/compile';
+import {
+  attachBible,
   finishBook,
   makeBook,
   makePageNode,
@@ -75,5 +86,70 @@ describe('compileBook', () => {
     const md = toMarkdown(compileBook(nodes, book));
     expect(md).toContain("# The Lighthouse Keeper's Grandson");
     expect(md).toContain('> The seed sentence.');
+  });
+});
+
+describe('paragraph helpers', () => {
+  it('splits on blank lines and rejoins losslessly', () => {
+    const text = 'First paragraph.\n\nSecond paragraph.\nThird line.\n\n\nFourth.';
+    const paras = paragraphsOf(text);
+    expect(paras).toEqual(['First paragraph.', 'Second paragraph.\nThird line.', 'Fourth.']);
+    expect(joinParagraphs(paras)).toBe(
+      'First paragraph.\n\nSecond paragraph.\nThird line.\n\nFourth.',
+    );
+  });
+
+  it('treats a single block as one paragraph', () => {
+    expect(paragraphsOf('One block.')).toEqual(['One block.']);
+  });
+});
+
+describe('cast in exports', () => {
+  it('appends the cast appendix to markdown and plain text when present', () => {
+    const { nodes, book, page1 } = bookFixture();
+    const bible = {
+      people: [{ name: 'Elin', note: 'the keeper' }],
+      places: [],
+      things: [],
+      threads: [],
+      at: 1,
+      updatedAt: 1,
+    };
+    const paged = attachBible(page1, bible);
+    const compiled = compileBook({ ...nodes, [page1.id]: paged }, book);
+    expect(compiled.cast?.people[0]?.name).toBe('Elin');
+    expect(toMarkdown(compiled)).toContain('## The cast');
+    expect(toMarkdown(compiled)).toContain('**Elin** — the keeper');
+    expect(toPlainText(compiled)).toContain('THE CAST');
+  });
+
+  it('omits the cast appendix when there is none', () => {
+    const { nodes, book } = bookFixture();
+    const compiled = compileBook(nodes, book);
+    expect(toMarkdown(compiled)).not.toContain('The cast');
+  });
+});
+
+describe('mood map', () => {
+  it('derives the dominant emotion dial per page', () => {
+    expect(moodOf({ ...DEFAULT_TURN, emotions: { dread: 2, joy: 1 } })).toEqual({
+      icon: '🕳️',
+      label: 'dread',
+      value: 2,
+    });
+    expect(moodOf({ ...DEFAULT_TURN, emotions: { joy: -2 } })?.label).toBe('joy');
+    expect(moodOf(DEFAULT_TURN)).toBeNull();
+  });
+
+  it('prints the mood map line in exports', () => {
+    const { nodes, book, page1 } = bookFixture();
+    const directed = {
+      ...page1,
+      data: { ...page1.data, direction: { ...DEFAULT_TURN, emotions: { dread: 2 } } },
+    };
+    const compiled = compileBook({ ...nodes, [page1.id]: directed }, book);
+    expect(moodLine(compiled)).toContain('Mood map');
+    expect(moodLine(compiled)).toContain('🕳️');
+    expect(toMarkdown(compiled)).toContain('Mood map');
   });
 });

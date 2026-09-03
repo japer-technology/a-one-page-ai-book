@@ -48,9 +48,11 @@ emit** a file that violates the single-file contract (see §5).
 │   │   ├── dom.ts          hyperscript h() — no framework, text-safe by default
 │   │   ├── ctx.ts          the AppApi contract every view programs against
 │   │   ├── genpage.ts      the generation ritual: token → stream → attach
+│   │   ├── cast.ts         the living cast panel + background bible updater
+│   │   ├── story.ts        the rolling summary panel + background memory updater
 │   │   ├── shell.ts        header, nav, toast stack
 │   │   └── views/          one module per view (library, seed, titles, page,
-│   │                       turn, settings, reader, theend)
+│   │                       turn, settings, reader, theend, archive)
 │   └── styles/           tokens.css · base.css · views.css
 ├── tests/                vitest: tree, prompt, compile, parsers, schema, endpoints, probe
 ├── scripts/e2e/          optional browser harness: mock LLM + CDP driver (pnpm test:e2e)
@@ -60,7 +62,7 @@ emit** a file that violates the single-file contract (see §5).
 
 **Dependency rule:** `core` depends on nothing but itself; `llm` and `store` depend on `core`; `ui`
 depends on all three; `main.ts` wires them. Nothing in `core/llm/store` touches the DOM. This
-layering is what makes the 49 unit tests meaningful — the whole domain can be tested without a
+layering is what makes the 137 unit tests meaningful — the whole domain can be tested without a
 browser.
 
 ## 3. The domain model: a tree, append-only
@@ -73,13 +75,18 @@ seed ── title A ── page 1 ── turn ── page 2 ── turn ── p
    └── title B (proposed, never chosen — remembered)
 ```
 
-- **Kinds:** `seed` (holds _every_ proposed title), `title`, `page` (holds _every_ version), `turn`
-  (holds the reader's direction verbatim), `ending`.
+- **Kinds:** `seed` (holds _every_ proposed title), `title`, `page` (holds _every_ version, plus its
+  `direction`, an optional `bible` cast snapshot and an optional rolling `summary`), `turn` (holds
+  the reader's direction verbatim — including emotion dials and chapter intent), `ending`.
 - **Append-only:** regenerating adds a version or a sibling node — it never destroys. "Forking" is
   not a feature, it's emergent: a new child under an old node is a new branch; the old path remains
-  addressable.
+  addressable. `openPageAt` moves the frontier to any past page: the future stays intact, and the
+  next keep grows a sibling branch.
 - **The chosen path** is just "walk parents from the frontier". `core/compile.ts` turns it into a
-  linear book for reading and export; `core/tree.ts` computes stats over the whole subtree.
+  linear book for reading and export (with the cast as an appendix); `core/tree.ts` computes stats
+  over the whole subtree and walks the cast (`bibleUpTo`) and the spine.
+- **Standing rules** live on the `Book` — they persist across every branch until removed, and every
+  generation prompt carries them verbatim.
 - **Every node is metadata-rich** (direction, model, timestamps, authorship) — the model-agnostic
   promise of the product spec falls out of the data model: the model is recorded per page, never
   assumed globally.
@@ -167,16 +174,42 @@ errors explain themselves ("add the API key in Settings").
 
 - **One stable system prompt** ("exactly ONE page… output ONLY the page text… end on a deliberate
   beat") shared by every phase.
-- **A context budget** (~2,600 words): seed + title + as many recent chosen pages as fit. The
-  full-text budget is the MVP stand-in for the rolling summary/character bible of the spec (see
-  §10).
+- **Two-tier memory, budget-first** (~2,600 words): the fixed blocks — seed, title, brief, summary,
+  cast, rules — are sized FIRST, and the verbatim recent chosen pages fill whatever remains (with a
+  floor). The rolling summary (`page.data.summary`, maintained in the background by `ui/story.ts`
+  and injected as `STORY SO FAR (SUMMARY)`) replaces the _oldest_ pages, never the recent ones — so
+  a 500-page book's prompt always carries the whole story compactly plus the last pages verbatim.
 - **Calibrated direction language:** a tone dial maps to _structural_ instructions ("darker" →
   _withhold information, shorten sentences, imagery, nothing overt_), length maps to word budgets,
-  and the ending flag injects an explicit closing-page directive. The mapping table is data
-  (`TONE_GUIDANCE`, `LENGTH_GUIDANCE`) — tunable without touching logic.
-- **Structured phases** (titles, suggested directions) ask for bare JSON; `core/parsers.ts`
-  tolerates fences and surrounding prose. A model that returns garbage is a typed error with a retry
-  button, never a stuck screen.
+  and the ending flag injects an explicit closing-page directive. The mapping tables are data
+  (`TONE_GUIDANCE`, `LENGTH_GUIDANCE`, `EMOTION_META`) — tunable without touching logic.
+- **Emotion dials (§7.3)** compile the same way: each of the ten dials has a `more`/`less` pair of
+  structural instructions, with a magnitude ladder (slightly / clearly / strongly) so "+dread"
+  tilts, never jump-cuts. Chapter break/close intents inject explicit structure directives. The
+  dominant dial per page becomes the **mood map** (chips in the reader, a line in every export).
+- **Precise page sizing** (`sizeTarget`: words / paragraphs / characters) overrides the length
+  preset with a numeric target — `sizeTargetInstruction` calibrates it.
+- **The pre-writing chat** (`CHAT_SYSTEM_PROMPT`, `chatMessages`) runs in the seed view; a
+  distillation pass (`briefMessages`) produces the brief, stored on the seed node and injected as
+  `THE BRIEF` into titles and every page/paragraph prompt.
+- **Standing rules (§7.2E)** live on the `Book` (`book.rules`) and are injected verbatim into every
+  page-generation prompt by `pageMessages` — they persist until removed, exactly as the spec asks.
+- **Targeted regeneration (§6)** ships as `paragraphMessages` / `insertParagraphMessages`: one
+  paragraph of a page can be rewritten or inserted by the model with the rest of the page as fixed
+  context, under a dedicated system prompt that asks for ONLY the paragraph.
+- **The living cast (§12.1)** is `bibleMessages`: a structured JSON extraction
+  (`{"people":[…] "places":[…] "things":[…] "threads":[…]}`) over the story so far, carrying the
+  previous cast forward so it accumulates instead of resets. The snapshot is stored ON the page node
+  (`page.data.bible`), so every branch owns its own cast; `bibleUpTo` reads "the cast as of this
+  page" (and reports the carrying node, so edits save back to it). Updates run in the background
+  after each page — deliberately outside the staleness token, so they can never invalidate in-flight
+  page work — and `ui/cast.ts` renders a **fully editable** panel (add / rename / annotate /
+  character sheets / delete, plus the open-threads tracker) on the page, turn, reader and archive
+  views. `castText` injects the curated names into every generation prompt, so renames stick.
+- **Structured phases** (titles, suggested directions, endings) ask for bare JSON; `core/parsers.ts`
+  tolerates fences and surrounding prose (`parseBible` is extra-tolerant: a wobbling model can never
+  regress the cast to empty). A model that returns garbage is a typed error with a retry button,
+  never a stuck screen.
 
 ## 8. UI: views as pure functions over a contract
 
@@ -187,15 +220,31 @@ No framework — on purpose. The UI layer is:
 - **`ctx.ts`:** the `AppApi` — the only surface a view may touch: live state getters,
   `navigate`/`refresh`/`toast`, the single `update(recipe)` mutation funnel (autosave + re-render in
   one place), generation primitives with **staleness tokens** (any `await` must re-check `staleGen`
-  before touching state), and the tree mutators.
+  before touching state), and the tree mutators (including `openPageAt` — re-enter any page of the
+  past to fork, `saveBible`, `setRules`).
 - **`views/*`:** one module per screen, each a function `(api) → HTMLElement`. Transient input state
   lives in session-scoped module maps (survives re-renders, dies with the tab); everything durable
   flows through `api.update`.
 - **`genpage.ts`:** the generation ritual — begin token → busy panel → token stream painted into the
-  page live → attach to tree → re-render — shared by the page and turn views.
+  page live → attach to tree → background cast update → re-render — shared by the page and turn
+  views.
+- **The page is a workshop.** Every paragraph of a kept page is a craftable unit: hover it to
+  rewrite (model, streaming into place), edit word by word, insert after, move, or delete — each
+  change becomes a new page version (`by: 'user' | 'ai'`), so the version picker and the story map
+  remember every draft. Versions flip with ◀▶ (shift+←/→); the story spine walks pages (←/→) and the
+  archive view (`views/archive.ts`) shows the whole tree as a **visual SVG graph** — every discarded
+  version and every road not taken, clickable to re-enter and fork — plus **side-by-side
+  comparison** of any two moments.
+- **Parallel candidates** (`generateCandidates`) fan out N page requests at once; the arming logic
+  keeps them alive via `parallel: true` and each stream lands in its own panel, attaching as a new
+  version. **Write-it-myself** attaches a `by: 'user'` page straight from the turn console.
+- **Turn templates** (saved mood recipes) live in settings and apply with one click; the turn also
+  proposes **possible endings** (bittersweet / triumphant / twist) when closing the story.
+- **EPUB export** (`core/epub.ts`) writes a real EPUB 3 (dependency-free store-only ZIP with CRC-32)
+  — title page, one chapter per page, cast appendix, and the mood map.
 
 This is deliberately "framework-shaped without a framework": one-way data flow (state → render), no
-direct DOM writes outside a view's own elements, and a contract that keeps the 8 views honest.
+direct DOM writes outside a view's own elements, and a contract that keeps the 9 views honest.
 
 Two hard-won rules keep this layer from biting itself:
 
@@ -208,9 +257,10 @@ Two hard-won rules keep this layer from biting itself:
   inside `lib.books` (new frontier, status, …); `update()` re-derives the session's open book from
   the library, so no view ever renders against a stale frontier — the classic "it generated but the
   screen didn't change" bug.
-- **`window.__PAGE_TURN__`** is a debug handle: live view/params/book/model, the generation counter
-  and state keys, and a rolling **audit trail** (`audit()` — navigations, begin/abort, page attach)
-  for diagnosing exactly this kind of failure from the devtools console or the e2e driver.
+- **`window.__PAGE_TURN__`** is a debug handle: live view/params/book/model, the generation counter,
+  a render counter (asserted by the e2e to catch render loops), the generation state keys, and a
+  rolling **audit trail** (`audit()` — navigations, begin/abort, page attach) for diagnosing exactly
+  this kind of failure from the devtools console or the e2e driver.
 
 ## 9. Testing & quality gates
 
@@ -232,19 +282,35 @@ Two hard-won rules keep this layer from biting itself:
 - The contract nobody can see: `build.mjs`'s emit-time checks (single `</script>`, zero external
   refs by construction).
 
-## 10. What's deliberately deferred (mapped to the spec)
+## 10. What ships now vs. what's deliberately deferred (mapped to the spec)
 
-The MVP implements the spec's soul — one page at a time, generate until it's good, the page turn
-takes the wheel, everything remembered. Deliberately deferred, with their natural landing spots:
+The app implements the spec's soul — one page at a time, generate until it's good, the page turn
+takes the wheel, everything remembered — plus the V2 layer: the living cast, emotion dials, standing
+rules, targeted paragraph regeneration, the story map, and read-aloud. What remains deferred, with
+its natural landing spot:
 
-| Spec feature (§ in docs/PRODUCT.md)                     | Where it lands                                                              |
-| ------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Rolling story bible / character tracking (§12.1)        | `core/prompt.ts` — swap the fixed page window for a maintained summary node |
-| Suggested directions already ship; emotion dials (§7.3) | extend `TONE_GUIDANCE`-style tables + a dials array on `TurnInput`          |
-| Tree/archive visual view (§8.4)                         | a new `ui/views/archive.ts` over `collectSubtree`                           |
-| Standing rules vs one-shot (§7.2E)                      | new node kind `rule`, injected by `pageMessages`                            |
-| Streaming already ships; parallel candidates (§12.2)    | `genpage.ts` fan-out; picker UI                                             |
-| Illustrations, read-aloud, sharing (§13, §11)           | new modules behind the same AppApi                                          |
+| Spec feature (§ in docs/PRODUCT.md)   | Status                                                                                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Living cast, curated (CRUD) + threads | ✅ `page.data.bible` + `bibleMessages` + editable `ui/cast.ts`                                                                       |
+| Rolling story summary (§12.1)         | ✅ `page.data.summary` + background updater in `ui/story.ts` + `summaryText` injected into every prompt; budget = fixed blocks first |
+| Re-enter from any title (§5)          | ✅ `branchTip` + `openBranch`: every proposed title is an enterable doorway (story map)                                              |
+| Character sheets (§12.1)              | ✅ `details` on cast people, injected as canon                                                                                       |
+| Emotion dials (§7.3)                  | ✅ `EMOTION_META` + `emotions` on `TurnInput` + dial UI                                                                              |
+| Mood map (§7.3, §16)                  | ✅ reader chips + export line; ⏳ printed margin sparkline                                                                           |
+| Precise page size (§7.2B)             | ✅ `sizeTarget` in words / paragraphs / characters                                                                                   |
+| Story map / visual tree (§8.4)        | ✅ `ui/views/archive.ts`: SVG graph + timeline + compare                                                                             |
+| Branch comparison (§8.3)              | ✅ pick any two moments, side by side                                                                                                |
+| Standing rules vs one-shot (§7.2E)    | ✅ `book.rules`, injected by `pageMessages`                                                                                          |
+| Targeted paragraph regeneration (§6)  | ✅ `paragraphMessages` + per-paragraph craft UI                                                                                      |
+| Chapter break / chapter close (§7.2B) | ✅ `chapter` intent on `TurnInput`                                                                                                   |
+| Pre-writing chat (§4)                 | ✅ seed-view chat + distilled brief, injected everywhere                                                                             |
+| Write-it-myself pages (§7)            | ✅ `by: 'user'` pages straight from the turn                                                                                         |
+| Parallel candidate pages (§12.2, §19) | ✅ `generateCandidates` fan-out, keep the one you love                                                                               |
+| Proposed endings gallery (§9)         | ✅ bittersweet / triumphant / twist at the closing turn                                                                              |
+| Turn templates (§7.4)                 | ✅ saved mood recipes in settings                                                                                                    |
+| EPUB export (§9)                      | ✅ `core/epub.ts`, dependency-free EPUB 3                                                                                            |
+| Read-aloud (§11)                      | ✅ reader view, browser speech synthesis                                                                                             |
+| Illustrations, sharing, co-authoring  | ⏳ new modules behind the same AppApi                                                                                                |
 
 ## 11. Conventions
 

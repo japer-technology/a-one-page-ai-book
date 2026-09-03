@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   addNode,
   appendPageVersion,
+  attachBible,
+  attachSummary,
+  bibleUpTo,
+  branchTip,
   childrenOf,
   cloneSubtree,
   collectSubtree,
   finishBook,
+  latestBible,
   makeBook,
   makeEndingNode,
   makePageNode,
@@ -15,9 +20,12 @@ import {
   pageNumberAt,
   pathToRoot,
   removeSubtree,
+  setBookRules,
   setChosenVersion,
+  setVersionPinned,
   spinePages,
   statsOf,
+  summaryUpTo,
   titleOf,
 } from '../src/core/tree';
 import { emptySeedOptions } from '../src/core/schema';
@@ -143,5 +151,135 @@ describe('factories and book state', () => {
     const { book, page2 } = fixture();
     expect(book.status).toBe('finished');
     expect(book.frontierId).toBe(page2.id);
+  });
+});
+
+describe('living cast and standing rules', () => {
+  it('attaches a bible to a page and finds the latest along the path', () => {
+    const { nodes, page1, page2, book } = fixture();
+    const bible1 = { people: [], places: [], things: [], threads: [], at: 1, updatedAt: 1 };
+    const bible2 = { people: [], places: [], things: [], threads: [], at: 2, updatedAt: 2 };
+    const p1 = attachBible(page1, bible1);
+    const p2 = attachBible(page2, bible2);
+    const withBibles = { ...nodes, [page1.id]: p1, [page2.id]: p2 };
+    const latest = latestBible(withBibles, book);
+    expect(latest?.pageNumber).toBe(2);
+    const upTo1 = bibleUpTo(withBibles, page1.id);
+    expect(upTo1?.pageNumber).toBe(1);
+  });
+
+  it('returns null when no page carries a bible', () => {
+    const { nodes, book } = fixture();
+    expect(latestBible(nodes, book)).toBeNull();
+  });
+
+  it('setBookRules replaces the standing rules immutably', () => {
+    const { book } = fixture();
+    const next = setBookRules(book, ['Don’t kill anyone']);
+    expect(next.rules).toEqual(['Don’t kill anyone']);
+    expect(book.rules).toEqual([]);
+    expect(next.updatedAt).toBeGreaterThanOrEqual(book.updatedAt);
+  });
+
+  it('new books start with no standing rules', () => {
+    const { book } = fixture();
+    expect(book.rules).toEqual([]);
+  });
+});
+
+describe('authoring additions', () => {
+  it('makeSeedNode carries a pre-writing brief', () => {
+    const seed = makeSeedNode('x', emptySeedOptions(), 'A quiet gothic mystery.');
+    expect(seed.data.kind === 'seed' && seed.data.brief).toBe('A quiet gothic mystery.');
+    const plain = makeSeedNode('x', emptySeedOptions());
+    expect(plain.data.kind === 'seed' && plain.data.brief).toBe('');
+  });
+
+  it('makePageNode records hand-written pages as authored by the user', () => {
+    const title = makeTitleNode('root', { title: 'T', tagline: '' });
+    const page = makePageNode(title.id, DEFAULT_TURN, 'm', 'my own words', 'user');
+    expect(page.data.kind === 'page' && page.data.versions[0]?.by).toBe('user');
+  });
+
+  it('bibleUpTo reports the carrying node id', () => {
+    const { nodes, page1, book } = fixture();
+    const bible = { people: [], places: [], things: [], threads: [], at: 1, updatedAt: 1 };
+    const withBible = { ...nodes, [page1.id]: attachBible(page1, bible) };
+    const found = bibleUpTo(withBible, book.frontierId);
+    expect(found?.nodeId).toBe(page1.id);
+    expect(found?.pageNumber).toBe(1);
+  });
+});
+
+describe('pinning and ledger stats', () => {
+  it('pins and unpins a version immutably', () => {
+    const { page1 } = fixture();
+    const withTwo = appendPageVersion(page1, 'second draft', 'ai');
+    const pinned = setVersionPinned(withTwo, 1, true);
+    expect(pinned.data.kind === 'page' && pinned.data.versions[0]?.pinned).toBe(true);
+    const unpinned = setVersionPinned(pinned, 1, false);
+    expect(unpinned.data.kind === 'page' && unpinned.data.versions[0]?.pinned).toBeUndefined();
+    expect(withTwo.data.kind === 'page' && withTwo.data.versions[0]?.pinned).toBeUndefined();
+  });
+
+  it('stats separate words generated from words kept and hand-written', () => {
+    const { nodes, book, page1 } = fixture();
+    const withTwo = appendPageVersion(page1, 'rewritten by hand words here', 'user');
+    const merged = { ...nodes, [page1.id]: withTwo };
+    const stats = statsOf(merged, book);
+    expect(stats.words).toBeGreaterThan(0);
+    expect(stats.wordsGenerated).toBeGreaterThan(stats.words);
+    expect(stats.wordsByUser).toBe(5);
+  });
+});
+
+describe('rolling story summary', () => {
+  it('attaches a summary to a page and finds the latest along the path', () => {
+    const { nodes, page1, page2, book } = fixture();
+    const p1 = attachSummary(page1, 'The keeper finds a letter.');
+    const p2 = attachSummary(page2, 'A stranger arrives as the storm gathers.');
+    const withSummaries = { ...nodes, [page1.id]: p1, [page2.id]: p2 };
+    const latest = summaryUpTo(withSummaries, book.frontierId);
+    expect(latest?.summary).toBe('A stranger arrives as the storm gathers.');
+    expect(latest?.pageNumber).toBe(2);
+    expect(latest?.nodeId).toBe(page2.id);
+    const upTo1 = summaryUpTo(withSummaries, page1.id);
+    expect(upTo1?.summary).toBe('The keeper finds a letter.');
+    expect(upTo1?.pageNumber).toBe(1);
+  });
+
+  it('carries the previous page’s summary when a page has none', () => {
+    const { nodes, page1, page2 } = fixture();
+    const withSummary = {
+      ...nodes,
+      [page1.id]: attachSummary(page1, 'The keeper finds a letter.'),
+    };
+    const found = summaryUpTo(withSummary, page2.id);
+    expect(found?.summary).toBe('The keeper finds a letter.');
+    expect(found?.nodeId).toBe(page1.id);
+    expect(found?.pageNumber).toBe(1);
+  });
+
+  it('returns null when no page carries a summary and ignores empty ones', () => {
+    const { nodes, page1, book } = fixture();
+    expect(summaryUpTo(nodes, book.frontierId)).toBeNull();
+    const withEmpty = { ...nodes, [page1.id]: attachSummary(page1, '   ') };
+    expect(summaryUpTo(withEmpty, book.frontierId)).toBeNull();
+  });
+});
+
+describe('branchTip', () => {
+  it('walks down the most recent child chain to the branch frontier', () => {
+    const { nodes, title, page2, page2b } = fixture();
+    // The latest child of the turn is page2b, so the tip is that branch's end.
+    expect(branchTip(nodes, title.id).id).toBe(page2b.id);
+    expect(branchTip(nodes, page2.id).id).toBe(page2.id);
+  });
+
+  it('returns the root itself for a leaf', () => {
+    const { nodes, seed } = fixture();
+    const freshTitle = makeTitleNode(seed.id, { title: 'Dormant', tagline: '' });
+    const withFresh = { ...nodes, [freshTitle.id]: freshTitle };
+    expect(branchTip(withFresh, freshTitle.id).id).toBe(freshTitle.id);
   });
 });

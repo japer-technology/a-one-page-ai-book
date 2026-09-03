@@ -29,18 +29,44 @@ files, and never talks to a cloud.
 - **⌨️ Manual entry is first-class.** Any base URL and port (e.g. `http://192.168.1.50:1234`),
   either protocol (OpenAI-compatible or Ollama native), any model name, optional **API key** (sent
   as a bearer token only to that endpoint), a one-off "Probe this URL", and preset port hints.
+- **💬 Talk it through first.** Before the seed, chat with the model about the book you want
+  (protagonist, setting, mood, don'ts), then distill the conversation into a **brief** that steers
+  the titles and every page afterwards.
 - **✍️ The core loop.** Seed → 5 proposed titles → page 1 → _the page turn_ → next page → … until
   you say _The End_. Titles and endings iterate like pages.
-- **🎛️ The page turn is the product.** Direction, page length, tone dials (calibrated into
-  structural instructions, not adjectives), and "bring the story to a close" — or just _Continue
-  naturally_: zero inputs is still a decision.
+- **🎛️ The page turn is the product.** Direction, page length — presets **or a precise target in
+  words, paragraphs, or characters** — tone dials, ten **emotion dials** (calibrated into structural
+  instructions, not adjectives), chapter breaks, **standing rules** ("don't touch" constraints that
+  persist until removed), AI-proposed next beats you can step through back and forth, a
+  **proposed-endings gallery**, saved **turn templates**, and **"✍️ I'll write it myself"** for full
+  control — or just _Continue naturally_: zero inputs is still a decision.
+- **🔧 Every page is a workshop.** Hover any paragraph to **rewrite it with the model** (streaming
+  into place), edit it **word by word**, insert, move, or delete paragraphs — every change becomes a
+  remembered version, and you flip back and forth through versions (and pages) with a key press.
+- **📇 The living cast.** A people · places · things panel that follows the story — quietly updated
+  by the model after every page (or on demand), stored per branch, viewable at the page, the turn,
+  in the reader and on the story map.
 - **🌳 Everything is remembered.** Immutable-ish tree: every discarded version, every fork, every
   turn decision. Regenerating an old page forks a new branch; the old path is untouched.
+- **🗺️ The story map.** The whole tree as a timeline: the chosen spine, every version of every page,
+  every road not taken — ghosted but clickable, to re-enter and fork from any moment.
+- **🔊 Read-aloud.** The reader reads one page at a time, aloud, with the browser's on-device voice
+  — the one-page rhythm becomes a bedtime story.
 - **💾 Real local files.** The library lives in IndexedDB and is mirrored to an OPFS workspace file;
   portable `.ptlibrary.json` / `.ptbook.json` import-export via the File System Access API (with
-  download/upload fallbacks); compiled books export as `.txt` or `.md`.
+  download/upload fallbacks); compiled books export as **real EPUB e-books** (plus `.txt` / `.md`,
+  cast appendix and mood map included).
+- **📊 About this book.** The full creative ledger: words kept vs. generated vs. written by hand,
+  versions, branch points, the decision log, models used, and the mood map.
+- **▶ Time-lapse replay.** Watch the story map relive the chosen path, page by page.
+- **➡️ Sequels.** A finished book seeds its sequel with the cast and open threads riding along as
+  the brief.
+- **🎨 Reading themes.** Dark candlelight, sepia, or light — plus a text-size scale — from Settings.
+  A **fast model** can be assigned to the cheap phases (titles, chat, cast, beats) while the main
+  model writes the pages.
 - **📕 The library.** A bookshelf of spines; re-enter any book at its frontier, read the compiled
-  path, duplicate, search, delete.
+  path, open the story map, duplicate, search, delete — and a friendly three-step tour greets the
+  empty shelf.
 
 ## Quick start
 
@@ -76,7 +102,7 @@ runtime. Open **Settings → Scan for local LLMs**, pick a model, and write your
 src/core     pure domain: the story tree, prompt assembly, compile/export, schema
 src/llm      endpoint catalog, port probing/discovery, chat client (OpenAI-compat + Ollama)
 src/store    IndexedDB database, File System Access + OPFS + download fallbacks
-src/ui       hyperscript DOM layer, shell, and one module per view
+src/ui       hyperscript DOM layer, shell, living cast, and one module per view
 build/       the inliner: esbuild bundles JS+CSS → one HTML file (no runtime deps)
 tests/       vitest over everything that doesn't need a browser
 ```

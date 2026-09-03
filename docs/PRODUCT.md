@@ -657,6 +657,85 @@ the page turn is where you take the wheel.**
 
 ---
 
+## 18b. Implementation status (what the app does today)
+
+The code in this repository implements the MVP **and** most of V2, on top of the single-file
+architecture in [ARCHITECTURE.md](ARCHITECTURE.md):
+
+| Vision (§)                                   | Status |
+| -------------------------------------------- | ------ |
+| Seed + optional starting notes (§4)          | ✅ |
+| **Pre-writing chat + distilled brief** (§4)  | ✅ chat before the seed; the brief steers titles & every page |
+| Titles: 5 at a time, regenerate, edit, all remembered (§5) | ✅ |
+| One-page generator: keep / regenerate / tweak (§6) | ✅ |
+| **Paragraph & word crafting**: rewrite any paragraph, edit inline, insert, move, delete — each change a remembered version (§6 targeted regeneration) | ✅ |
+| **Parallel candidate pages** — generate 2+ at once, pick (§19) | ✅ |
+| Version flipping (◀▶, all-versions picker, keyboard) (§6) | ✅ |
+| The page turn console: direction, length, tone, suggested beats (§7) | ✅ |
+| **Precise page size: words / paragraphs / characters** (§7.2B) | ✅ |
+| **Emotion dials** with calibrated structural language (§7.3) | ✅ |
+| **Mood map** — per-page chips in the reader + a line in every export (§7.3, §16) | ✅ (printed margin sparkline ⏳) |
+| **Standing rules vs. one-shot directions** (§7.2E) | ✅ |
+| **"Write it myself"** — author the next page by hand (§7) | ✅ |
+| **Turn templates** — save & reuse console setups (§7.4) | ✅ |
+| **Proposed endings gallery** — bittersweet / triumphant / twist (§9) | ✅ |
+| Chapter breaks / chapter closes (§7.2B) | ✅ |
+| **Living cast — people · places · things · open threads**, auto-updated AND fully editable (rename, annotate, character sheets, delete) (§12.1) | ✅ |
+| **Open-threads tracker** — promises the book owes the reader (§12.1) | ✅ |
+| **Rolling story summary** — compact long-term memory, folded after each page in the background and injected into every prompt, so long books never drift (§12.1) | ✅ |
+| **Re-enter from any title** — every proposed title is a doorway on the story map; enter any of them and write (§5) | ✅ |
+| **Character sheets** — details per person, injected as canon (§12.1) | ✅ |
+| Story spine: walk back/forth through pages, re-enter and fork any moment (§8.3) | ✅ |
+| **Story map** — visual tree graph, roads not taken, side-by-side comparison (§8.4) | ✅ |
+| **Rename the book anywhere** (§5, §10) | ✅ |
+| Endings: bring to a close, iterate, keep branching after The End (§9) | ✅ |
+| Compiled book export: **EPUB** + .txt/.md, cast appendix + mood map (§9) | ✅ |
+| Library bookshelf: search, duplicate, rename, import/export (§10) | ✅ |
+| **About-this-book ledger** — "you wrote 142 words and directed 11,283" (§9) | ✅ |
+| **Pin versions** — favorites never lost (§13) | ✅ |
+| **Selection rewriting** — rewrite/edit any chosen span, word by word (§6) | ✅ |
+| **Time-lapse replay** of the tree (§16) | ✅ |
+| **Sequels** — finished book seeds its sequel, inheriting the cast (§16) | ✅ |
+| **Reading themes** (dark/sepia/light) + text size (§13) | ✅ |
+| **Fast model per phase** (§12.3) | ✅ |
+| Read-aloud — voice, speed, bedtime auto-advance (§11) | ✅ (browser voice) |
+| **Diegetic document pages** — letters, diary entries, clippings, map notes, recipes (§16) | ✅ |
+| **Version diff** — word-level red/green between drafts (§6) | ✅ |
+| **Full-text search + shelf sorting** — recent/mood/length/branches (§10) | ✅ |
+| **Persistent reading position** (§10) | ✅ |
+| **Quote cards** — share a page as a beautiful image (§11) | ✅ |
+| **Print-ready PDF** export (§9) | ✅ |
+| **Ambient soundscape** keyed to the emotion dials (§16) | ✅ |
+| **Editable chapter headings** (§7.2B) | ✅ |
+| Illustrations, sharing, co-authoring, print-on-demand (§11, §13, §15) | ⏳ stretch |
+
+-------------------------------------------- | ------ |
+| Seed + optional starting notes (§4)          | ✅ |
+| Titles: 5 at a time, regenerate, edit, all remembered (§5) | ✅ |
+| One-page generator: keep / regenerate / tweak (§6) | ✅ |
+| **Paragraph & word crafting**: rewrite any paragraph, edit inline, insert, move, delete — each change a remembered version (§6 targeted regeneration) | ✅ |
+| Version flipping (◀▶, all-versions picker, keyboard) (§6) | ✅ |
+| The page turn console: direction, length, tone, suggested beats (§7) | ✅ |
+| **Emotion dials** with calibrated structural language (§7.3) | ✅ |
+| **Standing rules vs. one-shot directions** (§7.2E) | ✅ |
+| Chapter breaks / chapter closes (§7.2B) | ✅ |
+| **Living cast — people · places · things** up to the current page, on every view (§12.1) | ✅ |
+| **Rolling story summary** — the real §12.1 summarizer, maintained in the background and injected everywhere | ✅ |
+| Story spine: walk back/forth through pages, re-enter and fork any moment (§8.3) | ✅ |
+| **Story map** — the tree as a timeline with roads not taken (§8.4) | ✅ |
+| Endings: bring to a close, iterate, keep branching after The End (§9) | ✅ |
+| Compiled book export (.txt/.md, cast appendix) (§9) | ✅ |
+| Library bookshelf: search, duplicate, import/export (§10) | ✅ |
+| Read-aloud (§11) | ✅ (browser voice) |
+| Parallel candidate pages (§12.2, §19) | ⏳ |
+| Mood map printed in the compiled book (§7.3) | ⏳ (dial chips ship; sparkline deferred) |
+| Illustrations, sharing, co-authoring, print-on-demand (§11, §13, §15) | ⏳ stretch |
+
+Everything remembered, everything re-enterable, everything local — that part is not deferred; it is
+the foundation the whole app stands on.
+
+---
+
 ## 19. Open Questions (to keep brainstorming)
 
 - Should the reader be able to _change_ a past page in place (editing history) or only ever fork?

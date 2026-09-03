@@ -1,11 +1,16 @@
 /**
  * ui/views/seed.ts — the spark. One line (or a lucky one), a few optional
  * starting notes, and the book begins. None of these are locked in later.
+ *
+ * There is also a pre-writing chat: talk through what you want from the book
+ * with the local model, then distill the conversation into a brief that
+ * steers the titles and every page afterwards.
  */
 import type { AppApi } from '../ctx';
-import { button, field, h } from '../dom';
+import { button, field, h, spinner } from '../dom';
 import { emptySeedOptions } from '../../core/schema';
-import type { SeedOptions } from '../../core/types';
+import { briefMessages, chatMessages } from '../../core/prompt';
+import type { ChatMessage, SeedOptions } from '../../core/types';
 
 const LUCKY_SEEDS = [
   'A lighthouse keeper finds a letter addressed to someone who died a hundred years ago.',
@@ -26,6 +31,13 @@ function luckySeed(): string {
   const seed = LUCKY_SEEDS[Math.floor(Math.random() * LUCKY_SEEDS.length)];
   return seed ?? LUCKY_SEEDS[0] ?? 'Something wonderful, and a little strange, begins.';
 }
+
+// Session-scoped chat state: one pre-writing conversation at a time.
+const chat = {
+  messages: [] as ChatMessage[],
+  busy: false,
+  brief: '',
+};
 
 export function renderSeed(api: AppApi): HTMLElement {
   const textarea = h('textarea', {
@@ -91,16 +103,6 @@ export function renderSeed(api: AppApi): HTMLElement {
     ['let-it-run', 'let it run'],
   ]);
 
-  const begin = (options: SeedOptions) => {
-    const text = textarea.value.trim();
-    if (text.length === 0) {
-      api.toast('The seed can be anything — write one line, or roll the dice.', 'info');
-      return;
-    }
-    const seedNode = api.newSeed(text, options);
-    api.navigate('titles', { seed: seedNode.id });
-  };
-
   const collect = (): SeedOptions => ({
     ...emptySeedOptions(),
     genre: genre.value.trim(),
@@ -110,6 +112,123 @@ export function renderSeed(api: AppApi): HTMLElement {
     audience: audience.value as SeedOptions['audience'],
     lengthHint: lengthHint.value as SeedOptions['lengthHint'],
   });
+
+  const begin = (options: SeedOptions) => {
+    const text = textarea.value.trim();
+    if (text.length === 0) {
+      api.toast('The seed can be anything — write one line, or roll the dice.', 'info');
+      return;
+    }
+    const seedNode = api.newSeed(text, options, chat.brief.trim());
+    api.navigate('titles', { seed: seedNode.id });
+  };
+
+  // ---- The pre-writing chat ------------------------------------------------
+  const chatBox = h('div', { class: 'chat-log' });
+  for (const message of chat.messages) {
+    chatBox.appendChild(
+      h(
+        'div',
+        { class: `chat-bubble chat-${message.role}` },
+        h('span', { class: 'chat-who', text: message.role === 'user' ? 'you' : 'writing partner' }),
+        h('div', { class: 'chat-text', text: message.content }),
+      ),
+    );
+  }
+  if (chat.busy) {
+    chatBox.appendChild(h('div', { class: 'chat-bubble chat-assistant' }, spinner(), ' thinking…'));
+  }
+
+  const chatInput = h('input', {
+    class: 'input chat-input',
+    type: 'text',
+    placeholder: '“I want a quiet gothic mystery with a twist ending…”',
+    onkeydown: (event: KeyboardEvent) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        void send(api, chatInput);
+      }
+    },
+  });
+
+  const send = async (api: AppApi, input: HTMLInputElement): Promise<void> => {
+    const text = input.value.trim();
+    if (!text || chat.busy) return;
+    input.value = '';
+    chat.messages.push({ role: 'user', content: text });
+    chat.busy = true;
+    api.refresh();
+    try {
+      const fast = api.lib.settings.fastModel || api.lib.settings.endpoint.model;
+      const reply = await api.generateText(chatMessages([...chat.messages]), { model: fast });
+      chat.messages.push({ role: 'assistant', content: reply.trim() });
+    } catch (err) {
+      chat.messages.push({
+        role: 'assistant',
+        content: `(The model didn't answer: ${api.genError(err)})`,
+      });
+    }
+    chat.busy = false;
+    api.refresh();
+  };
+
+  const distill = async (api: AppApi): Promise<void> => {
+    if (chat.messages.length < 2 || chat.busy) return;
+    chat.busy = true;
+    api.refresh();
+    try {
+      const fast = api.lib.settings.fastModel || api.lib.settings.endpoint.model;
+      const brief = await api.generateText(briefMessages([...chat.messages]), { model: fast });
+      chat.brief = brief.trim();
+      api.toast(
+        'Brief distilled — it will steer the titles and every page. Edit it below.',
+        'success',
+      );
+    } catch (err) {
+      api.toast(api.genError(err), 'error');
+    }
+    chat.busy = false;
+    api.refresh();
+  };
+
+  const briefArea = chat.brief
+    ? h('textarea', {
+        class: 'input brief-input',
+        rows: 4,
+        value: chat.brief,
+        oninput: (event: Event) => {
+          chat.brief = (event.target as HTMLTextAreaElement).value;
+        },
+      })
+    : null;
+
+  const chatSection = h(
+    'details',
+    { class: 'folds chat', open: chat.messages.length > 0 ? true : undefined },
+    h('summary', { text: '💬 Talk it through first (optional)' }),
+    h(
+      'p',
+      { class: 'field-hint' },
+      'Chat about the book you want — protagonist, setting, mood, what you don’t want. Then distill the conversation into a brief that rides along into every page.',
+    ),
+    chatBox,
+    h(
+      'div',
+      { class: 'row gap' },
+      chatInput,
+      button('Send', () => void send(api, chatInput), 'primary', { disabled: chat.busy }),
+    ),
+    h(
+      'div',
+      { class: 'row gap' },
+      button('✨ Distill into a brief', () => void distill(api), 'ghost', {
+        disabled: chat.messages.length < 2 || chat.busy,
+        title: 'Condense this conversation into a story brief the model will follow',
+      }),
+      chat.brief ? h('span', { class: 'field-hint', text: 'brief ready — edit it above' }) : null,
+    ),
+    briefArea,
+  );
 
   return h(
     'div',
@@ -132,6 +251,7 @@ export function renderSeed(api: AppApi): HTMLElement {
         textarea.focus();
       }),
     ),
+    chatSection,
     h(
       'details',
       { class: 'folds' },

@@ -153,7 +153,12 @@ async function generate(
   busy.set(seedId, { token, error: null });
   api.refresh();
   try {
-    const raw = await api.generateText(titlesMessages(text, options, 5));
+    const seedNode = getNode(api.nodes, seedId);
+    const brief = seedNode && seedNode.data.kind === 'seed' ? seedNode.data.brief : '';
+    const fast = api.lib.settings.fastModel;
+    const raw = await api.generateText(titlesMessages(text, options, 5, brief), {
+      model: fast || api.lib.settings.endpoint.model,
+    });
     if (api.staleGen(token)) {
       busy.delete(seedId);
       return;

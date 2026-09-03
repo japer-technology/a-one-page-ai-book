@@ -3,8 +3,8 @@
 #   pnpm build && pnpm test:e2e
 #
 # Starts the mock LLM on :1234 and headless Chromium on the built single file,
-# then drives the real UI over CDP: scan → reachable row → Use → Save →
-# Test connection. Exits non-zero on any failure.
+# then drives the real UI over CDP: scan → reachable row → Use →
+# Test connection (persists the endpoint). Exits non-zero on any failure.
 set -u
 cd "$(dirname "$0")/../.."
 

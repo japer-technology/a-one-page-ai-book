@@ -4,6 +4,7 @@
  * Local models are loosely tuned and often wrap JSON in prose or code fences.
  * These helpers extract structured data without trusting the model.
  */
+import type { BibleEntry, StoryBible } from './types';
 
 /** Strip a markdown code fence (```json ... ``` or ``` ... ```) if present. */
 export function stripCodeFence(text: string): string {
@@ -15,13 +16,15 @@ export function stripCodeFence(text: string): string {
 
 /**
  * Parse JSON from text that may contain surrounding prose: try the whole
- * string, then the first balanced {...} or [...] slice.
+ * string, then the first balanced {...} or [...] slice. Small local models
+ * also love trailing commas — drop the last comma before } or ] when present
+ * (string-aware, so prose inside strings is never touched).
  */
 export function parseJSONLoose<T>(text: string): T {
   const candidates = [text.trim(), stripCodeFence(text)];
   for (const candidate of candidates) {
     try {
-      return JSON.parse(candidate) as T;
+      return JSON.parse(repairTrailingCommas(candidate)) as T;
     } catch {
       // keep looking
     }
@@ -29,12 +32,42 @@ export function parseJSONLoose<T>(text: string): T {
   const slice = firstBalanced(text);
   if (slice !== null) {
     try {
-      return JSON.parse(slice) as T;
+      return JSON.parse(repairTrailingCommas(slice)) as T;
     } catch {
       // fall through to error
     }
   }
   throw new Error(`Model output was not valid JSON. Got: ${text.slice(0, 120)}…`);
+}
+
+/** Remove a trailing comma before } or ] — the most common small-model JSON defect. */
+function repairTrailingCommas(text: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i] ?? '';
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === ',') {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j] ?? '')) j++;
+      const next = text[j] ?? '';
+      if (next === '}' || next === ']') continue; // drop this comma
+    }
+    out += ch;
+  }
+  return out;
 }
 
 function firstBalanced(text: string): string | null {
@@ -90,29 +123,175 @@ export function parseStringList(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-/** Parse a list of {title, tagline} objects, tolerating plain strings or {titles:[...]} wrappers. */
+/**
+ * Parse a list of {title, tagline} objects, tolerating plain strings or
+ * {titles:[...]} wrappers. When the model ignored the JSON instruction and
+ * wrote a numbered list instead ("1. The Dead Letter — A story of…"), fall
+ * back to line-based extraction so the title phase still gets its titles.
+ */
 export function parseTitleOptions(text: string): Array<{ title: string; tagline: string }> {
-  const raw = parseJSONLoose<unknown>(text);
-  const list = Array.isArray(raw)
-    ? raw
-    : raw && typeof raw === 'object'
-      ? (Object.values(raw).find((v) => Array.isArray(v)) ?? [])
-      : [];
-  return (list as unknown[])
-    .map((item) => {
-      if (typeof item === 'string') return { title: item, tagline: '' };
-      if (item && typeof item === 'object') {
-        const record = item as Record<string, unknown>;
-        const title =
-          typeof record.title === 'string'
-            ? record.title
-            : typeof record.name === 'string'
-              ? record.name
-              : '';
-        if (!title) return null;
-        return { title, tagline: typeof record.tagline === 'string' ? record.tagline : '' };
-      }
-      return null;
-    })
-    .filter((x): x is { title: string; tagline: string } => x !== null);
+  let parsed: Array<{ title: string; tagline: string }> = [];
+  try {
+    const raw = parseJSONLoose<unknown>(text);
+    const list = Array.isArray(raw)
+      ? raw
+      : raw && typeof raw === 'object'
+        ? (Object.values(raw).find((v) => Array.isArray(v)) ?? [])
+        : [];
+    parsed = (list as unknown[])
+      .map((item) => {
+        if (typeof item === 'string') return { title: item, tagline: '' };
+        if (item && typeof item === 'object') {
+          const record = item as Record<string, unknown>;
+          const title =
+            typeof record.title === 'string'
+              ? record.title
+              : typeof record.name === 'string'
+                ? record.name
+                : '';
+          if (!title) return null;
+          return { title, tagline: typeof record.tagline === 'string' ? record.tagline : '' };
+        }
+        return null;
+      })
+      .filter((x): x is { title: string; tagline: string } => x !== null);
+  } catch {
+    parsed = [];
+  }
+  if (parsed.length > 0) return parsed;
+  return parseTitleLines(text);
+}
+
+/**
+ * Line-based salvage for prose answers: strips list markers, understands
+ * "Title — tagline", "Title - tagline", "Title: tagline" and bare titles,
+ * and skips the filler lines models wrap around lists.
+ */
+function parseTitleLines(text: string): Array<{ title: string; tagline: string }> {
+  const out: Array<{ title: string; tagline: string }> = [];
+  for (const raw of text.split('\n')) {
+    const line = raw
+      .trim()
+      .replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '')
+      .replaceAll('**', '')
+      .trim();
+    if (line.length === 0 || line.length > 90) continue; // prose, not a title
+    if (/^(here(?:'s| are)?|sure!?|certainly|of course|i propose|the following)\b/i.test(line))
+      continue;
+    if (line.endsWith(':')) continue;
+
+    const clean = (s: string): string => s.replace(/^["'“”]+|["'“”]+$/g, '').trim();
+
+    let match = line.match(/^["'“]([^"'”]+)["'”]\s*[—–-]\s*(.+)$/);
+    if (match && match[1] && match[2]) {
+      out.push({ title: clean(match[1]), tagline: clean(match[2]) });
+      continue;
+    }
+    match = line.match(/^(.+?)\s*[—–]\s*(.+)$/);
+    if (match && match[1] && match[2]) {
+      out.push({ title: clean(match[1]), tagline: clean(match[2]) });
+      continue;
+    }
+    match = line.match(/^(.+?)\s*[-:]\s*(.+)$/);
+    if (match && match[1] && match[2]) {
+      out.push({ title: clean(match[1]), tagline: clean(match[2]) });
+      continue;
+    }
+    // A bare line counts as a title only when it looks like one: it starts
+    // capitalized and is not a full sentence (no trailing period) — that
+    // keeps refusal prose ("I cannot help with that request.") out.
+    if (/^[A-Z0-9"“]/.test(line) && !line.endsWith('.')) {
+      out.push({ title: clean(line), tagline: '' });
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse the living-cast JSON the model returns for the bible update:
+ * {"people": [{"name","note"}], "places": [...], "things": [...]}.
+ * Tolerates wrappers, string entries, and prose around the object. Falls back
+ * to the previous cast (merged with whatever names the model did return)
+ * rather than throwing — the cast must never regress to empty on a wobble.
+ */
+export function parseBible(text: string, previous: StoryBible | null = null): StoryBible {
+  const base = {
+    people: previous?.people ?? [],
+    places: previous?.places ?? [],
+    things: previous?.things ?? [],
+    threads: previous?.threads ?? [],
+  };
+  let raw: unknown = null;
+  try {
+    raw = parseJSONLoose<unknown>(text);
+  } catch {
+    raw = null;
+  }
+  let object: Record<string, unknown> | null = null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    object = raw as Record<string, unknown>;
+  } else if (raw && typeof raw === 'object' && Array.isArray(raw)) {
+    // Some models answer with a bare array of objects carrying a "kind" field.
+    object = { people: raw };
+  }
+  if (!object) {
+    if (previous) return { ...base, at: previous.at, updatedAt: Date.now() };
+    throw new Error('The model did not return a cast object — try again.');
+  }
+  const entries = (key: 'people' | 'places' | 'things' | 'threads'): BibleEntry[] => {
+    const value = object?.[key] ?? object?.cast?.[key as never];
+    const list: BibleEntry[] = Array.isArray(value) ? coerceEntries(value) : [];
+    if (list.length === 0 && previous) {
+      // Keep the previous entries for this group — never regress to empty.
+      return base[key];
+    }
+    return list;
+  };
+  const caps: Record<'people' | 'places' | 'things' | 'threads', number> = {
+    people: 12,
+    places: 8,
+    things: 10,
+    threads: 12,
+  };
+  const people = entries('people').slice(0, caps.people);
+  const places = entries('places').slice(0, caps.places);
+  const things = entries('things').slice(0, caps.things);
+  const threads = entries('threads').slice(0, caps.threads);
+  if (people.length === 0 && places.length === 0 && things.length === 0) {
+    if (previous) return { ...base, at: previous.at, updatedAt: Date.now() };
+    throw new Error('The model returned an empty cast — try again.');
+  }
+  return { people, places, things, threads, at: previous?.at ?? 1, updatedAt: Date.now() };
+}
+
+function coerceEntries(list: unknown[]): BibleEntry[] {
+  const out: BibleEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    if (typeof item === 'string' && item.trim().length > 0) {
+      pushEntry(out, seen, { name: item.trim(), note: '' });
+      continue;
+    }
+    if (item && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      const name =
+        typeof record.name === 'string'
+          ? record.name.trim()
+          : typeof record.title === 'string'
+            ? record.title.trim()
+            : '';
+      if (!name) continue;
+      const note = typeof record.note === 'string' ? record.note.trim() : '';
+      const details = typeof record.details === 'string' ? record.details.trim() : '';
+      pushEntry(out, seen, { name, note, details: details.length > 0 ? details : undefined });
+    }
+  }
+  return out;
+}
+
+function pushEntry(out: BibleEntry[], seen: Set<string>, entry: BibleEntry): void {
+  const key = entry.name.toLowerCase();
+  if (key.length === 0 || seen.has(key)) return;
+  seen.add(key);
+  out.push(entry);
 }

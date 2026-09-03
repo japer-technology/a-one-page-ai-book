@@ -1,20 +1,53 @@
 /**
  * ui/views/page.ts — the page phase. One page, short, on screen. Generate until
- * it's good: keep, regenerate, regenerate with a tweak, flip through versions,
- * or edit it yourself. Every version is kept forever.
+ * it's good — and then CRAFT it: every paragraph can be rewritten by the model,
+ * edited word by word, inserted, moved, or deleted. Every change becomes a new
+ * version (all kept forever) and you can flip back and forth through versions
+ * and pages. The living cast follows along.
  */
 import type { AppApi } from '../ctx';
-import { button, fmtNumber, h } from '../dom';
-import { countWords } from '../../core/compile';
-import { childrenOf, getNode, pageNumberAt, seedTextOf, titleNodeOf } from '../../core/tree';
+import { button, fmtDate, fmtNumber, h } from '../dom';
+import { compileBook, countWords, joinParagraphs, paragraphsOf } from '../../core/compile';
+import {
+  childrenOf,
+  getNode,
+  pageNumberAt,
+  pathToRoot,
+  seedTextOf,
+  spinePages,
+  titleNodeOf,
+} from '../../core/tree';
 import type { Book, StoryNode, TurnInput } from '../../core/types';
 import { DEFAULT_TURN } from '../../core/types';
-import { generatePage, genStates, renderGenPanel } from '../genpage';
+import type { EmotionName } from '../../core/types';
+import {
+  buildContext,
+  EMOTION_META,
+  insertParagraphMessages,
+  paragraphMessages,
+  rewriteSpanMessages,
+} from '../../core/prompt';
+import { generateCandidates, generatePage, genStates, renderGenPanel } from '../genpage';
+import { maybeUpdateBible, renderCast } from '../cast';
+import { maybeUpdateSummary, renderStoryMemory } from '../story';
+import { quoteCardFor } from '../quote';
+import { ambienceOn, setAmbienceMood, toggleAmbience } from '../sound';
+import { diffWords } from '../../core/diff';
 import { audit } from '../audit';
 
 // Session view state.
 const editState = new Map<string, { open: boolean; text: string }>();
+/** Inline paragraph editing: key `${pageId}:${index}` (replace) or `${pageId}:after${index}` / `${pageId}:append`. */
+const paraEdit = new Map<string, { text: string }>();
+/** AI paragraph panels: key `${pageId}:${index}` with mode rewrite|insert, or `${pageId}:add`. */
+const paraPanel = new Map<string, { mode: 'rewrite' | 'insert' | 'add'; instruction: string }>();
+const showVersions = new Set<string>();
 const autoStarted = new Set<string>();
+const renaming = new Map<string, string>();
+const diffOpen = new Set<string>();
+const headingEdit = new Map<string, string>();
+/** Previous chosen version per page, for the one-click Undo. */
+const lastCommit = new Map<string, number>();
 
 const TONE_LABEL: Record<string, string> = {
   inherit: 'tone unchanged',
@@ -64,6 +97,8 @@ export function renderPage(api: AppApi): HTMLElement {
   const chosen = data.versions[data.chosenVersion - 1];
   if (!chosen) return h('div', { class: 'view' }, h('p', { text: 'No version selected.' }));
 
+  installKeys(api, book, page);
+
   const key = `page:${book.id}`;
   const busy = genStates.get(key);
   if (busy) {
@@ -92,20 +127,6 @@ export function renderPage(api: AppApi): HTMLElement {
   const forked = childrenOf(api.nodes, page.id).length > 0;
   const edit = editState.get(page.id) ?? { open: false, text: chosen.text };
 
-  const directionChips = h(
-    'div',
-    { class: 'direction-chips' },
-    data.direction.direction
-      ? h('span', { class: 'chip', text: `direction: ${truncate(data.direction.direction, 90)}` })
-      : null,
-    data.direction.tone !== 'inherit'
-      ? h('span', { class: 'chip', text: TONE_LABEL[data.direction.tone] })
-      : null,
-    data.direction.length !== 'standard'
-      ? h('span', { class: 'chip', text: `${data.direction.length} page` })
-      : null,
-  );
-
   const body = edit.open
     ? h(
         'div',
@@ -126,6 +147,8 @@ export function renderPage(api: AppApi): HTMLElement {
             () => {
               api.appendVersion(page.id, edit.text, 'user');
               editState.set(page.id, { open: false, text: '' });
+              maybeUpdateBible(api, book, page.id);
+              maybeUpdateSummary(api, book, page.id);
               api.toast('Saved as a version edited by you', 'success');
             },
             'primary',
@@ -136,7 +159,7 @@ export function renderPage(api: AppApi): HTMLElement {
           }),
         ),
       )
-    : h('div', { class: 'page-text', text: chosen.text });
+    : craftBody(api, book, page, chosen.text);
 
   const tweakInput = h('input', {
     class: 'input',
@@ -147,6 +170,37 @@ export function renderPage(api: AppApi): HTMLElement {
   const keepLabel = data.direction.ending
     ? '✔ The End — keep this closing page'
     : '✔ Keep this page →';
+
+  setAmbienceMood(
+    data.direction.emotions && Object.keys(data.direction.emotions).length > 0
+      ? (() => {
+          const mood = (() => {
+            let best: { label: string; value: number } | null = null;
+            for (const [name, value] of Object.entries(data.direction.emotions)) {
+              if (!value) continue;
+              if (!best || Math.abs(value) > Math.abs(best.value)) {
+                best = { label: name, value };
+              }
+            }
+            return best;
+          })();
+          return mood ? { icon: '', label: mood.label, value: mood.value } : null;
+        })()
+      : null,
+  );
+
+  const ambienceButton = button(
+    ambienceOn() ? '🔊 ambience: on' : '🔊 ambience: off',
+    () => {
+      const on = toggleAmbience();
+      api.toast(on ? 'Ambience on — the room follows the mood' : 'Ambience off', 'info');
+      api.refresh();
+    },
+    'ghost',
+    { title: 'A generated soundscape that follows the mood of each page' },
+  );
+
+  const headingEditor = headingRow(api, page, chosen.text);
 
   return h(
     'div',
@@ -161,18 +215,21 @@ export function renderPage(api: AppApi): HTMLElement {
     forked
       ? h('div', {
           class: 'banner',
-          text: 'This page already has a path growing from it. A new tweak will fork a new branch — the existing path stays intact.',
+          text: 'This page already has a path growing from it. Keeping or tweaking here forks a new branch — the existing path stays intact.',
         })
       : null,
+    undoBar(api, page),
+    headingEditor,
+    spineNav(api, book, page),
     h(
       'div',
       { class: 'page-meta' },
       h('span', { text: `${fmtNumber(countWords(chosen.text))} words` }),
       h('span', { text: `${data.model || book.model || 'model'}` }),
-      versionsNav(api, page),
+      versionPicker(api, page),
     ),
     body,
-    directionChips,
+    directionChips(data.direction),
     h(
       'div',
       { class: 'actions' },
@@ -180,9 +237,13 @@ export function renderPage(api: AppApi): HTMLElement {
         keepLabel,
         () => {
           if (data.direction.ending) {
+            maybeUpdateBible(api, book, page.id);
+            maybeUpdateSummary(api, book, page.id);
             api.finishBook(book, page.id, data.direction.direction || 'The End');
             api.navigate('theend');
           } else {
+            maybeUpdateBible(api, book, page.id);
+            maybeUpdateSummary(api, book, page.id);
             api.navigate('turn', { from: page.id });
           }
         },
@@ -200,7 +261,15 @@ export function renderPage(api: AppApi): HTMLElement {
         editState.set(page.id, { open: true, text: chosen.text });
         api.refresh();
       }),
+      button('🎲 Generate 2 more versions', () => void runCandidates(api, book, page), 'ghost', {
+        title: 'Ask the model for two parallel alternatives, then pick your favorite',
+      }),
+      button('🖼️ Quote card', () => quoteCardFor(compileBook(api.nodes, book), pageNum), 'ghost', {
+        title: 'Render this page as a shareable image',
+      }),
+      ambienceButton,
     ),
+    candidatesSection(api, book, page),
     h(
       'div',
       { class: 'row gap tweak-row' },
@@ -223,11 +292,717 @@ export function renderPage(api: AppApi): HTMLElement {
         { title: 'Forks a new branch from the same moment' },
       ),
     ),
+    renderCast(api, book),
+    renderStoryMemory(api, book),
+    h(
+      'p',
+      { class: 'kbd-hint' },
+      'keys: ←/→ walk pages · shift+←/→ flip versions · hover a paragraph to craft it',
+    ),
   );
 }
 
+// ---- Paragraph crafting ---------------------------------------------------
+
+function craftBody(api: AppApi, book: Book, page: StoryNode, text: string): HTMLElement {
+  if (page.data.kind !== 'page') return h('div');
+  const paras = paragraphsOf(text);
+  const blocks: Array<HTMLElement | null> = [];
+  paras.forEach((para, index) => {
+    blocks.push(paragraphBlock(api, book, page, para, index, paras));
+    blocks.push(insertEditBlock(api, book, page, index, paras));
+  });
+  blocks.push(addParagraphBlock(api, book, page, paras));
+  const container = h(
+    'div',
+    {
+      class: `page-text page-craft doc-${page.data.direction.document}`,
+    },
+    ...blocks,
+  );
+  container.addEventListener('mouseup', () => {
+    setTimeout(() => considerSelection(api, book, page, paras), 0);
+  });
+  container.addEventListener('keyup', (event: KeyboardEvent) => {
+    if (event.shiftKey) setTimeout(() => considerSelection(api, book, page, paras), 0);
+  });
+  container.addEventListener('scroll', () => removeSpanToolbar());
+  return container;
+}
+
+function paragraphBlock(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  para: string,
+  index: number,
+  paras: string[],
+): HTMLElement {
+  if (page.data.kind !== 'page') return h('div');
+  const key = `${page.id}:${index}`;
+  const edit = paraEdit.get(key);
+  const panel = paraPanel.get(key);
+  const genKey = `para:${key}`;
+  const busy = genStates.get(genKey);
+
+  if (edit) {
+    const textarea = h('textarea', {
+      class: 'para-edit',
+      rows: Math.max(2, Math.ceil(para.length / 90)),
+      value: edit.text,
+      oninput: (event: Event) => {
+        edit.text = (event.target as HTMLTextAreaElement).value;
+      },
+    });
+    return h(
+      'div',
+      { class: 'para para-editing' },
+      textarea,
+      h(
+        'div',
+        { class: 'row gap' },
+        button(
+          'Save',
+          () => {
+            const next = [...paras];
+            next[index] = edit.text;
+            commitUserVersion(
+              api,
+              book,
+              page,
+              next,
+              'Paragraph saved — a new version was born',
+              key,
+            );
+          },
+          'primary',
+        ),
+        button('Cancel', () => {
+          paraEdit.delete(key);
+          api.refresh();
+        }),
+      ),
+    );
+  }
+
+  if (busy) {
+    return h(
+      'div',
+      { class: 'para para-busy' },
+      h('p', { class: 'para-body para-dim', text: para }),
+      renderGenPanel(
+        api,
+        genKey,
+        () => void aiParagraph(api, book, page, index, paras, panel?.instruction ?? ''),
+      ),
+    );
+  }
+
+  const spanBusy = genStates.get(`span:${page.id}:${index}`);
+  return h(
+    'div',
+    { class: 'para', dataset: { index: String(index) } },
+    h('p', { class: 'para-body', text: para, title: `${countWords(para)} words` }),
+    spanBusy
+      ? renderGenPanel(api, `span:${page.id}:${index}`, () => {
+          const task = spanTask.get(`span:${page.id}:${index}`) ?? {
+            start: 0,
+            end: para.length,
+            text: para,
+            instruction: '',
+          };
+          void aiSpanRewrite(api, book, page, index, task.start, task.end, task.text);
+        })
+      : null,
+    h(
+      'div',
+      { class: 'para-tools' },
+      paraTool('↻', 'Rewrite this paragraph with the model', () => {
+        paraPanel.set(key, { mode: 'rewrite', instruction: '' });
+        api.refresh();
+      }),
+      paraTool('✎', 'Edit these words yourself', () => {
+        paraEdit.set(key, { text: para });
+        api.refresh();
+      }),
+      paraTool('＋', 'Insert a paragraph after this one', () => {
+        paraPanel.set(key, { mode: 'insert', instruction: '' });
+        api.refresh();
+      }),
+      paraTool('↑', 'Move up', () => {
+        if (index === 0) return;
+        const next = [...paras];
+        const [moved] = next.splice(index, 1);
+        if (moved !== undefined) next.splice(index - 1, 0, moved);
+        commitUserVersion(api, book, page, next, 'Paragraph moved', key);
+      }),
+      paraTool('↓', 'Move down', () => {
+        if (index >= paras.length - 1) return;
+        const next = [...paras];
+        const [moved] = next.splice(index, 1);
+        if (moved !== undefined) next.splice(index + 1, 0, moved);
+        commitUserVersion(api, book, page, next, 'Paragraph moved', key);
+      }),
+      paraTool('✕', 'Delete this paragraph', () => {
+        commitUserVersion(
+          api,
+          book,
+          page,
+          paras.filter((_, i) => i !== index),
+          'Paragraph removed — every version is kept',
+          key,
+        );
+      }),
+    ),
+    panel ? paragraphPanel(api, book, page, index, paras, panel) : null,
+  );
+}
+
+function paragraphPanel(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  index: number,
+  paras: string[],
+  panel: { mode: 'rewrite' | 'insert' | 'add'; instruction: string },
+): HTMLElement {
+  const key = `${page.id}:${index}`;
+  const input = h('input', {
+    class: 'input para-tweak',
+    type: 'text',
+    value: panel.instruction,
+    placeholder:
+      panel.mode === 'rewrite'
+        ? '“more dread”, “shorter sentences”, “his hands shake” — or leave empty'
+        : '“add a line of dialogue”, “a memory of the storm” — or leave empty',
+    oninput: (event: Event) => {
+      panel.instruction = (event.target as HTMLInputElement).value;
+    },
+  });
+  return h(
+    'div',
+    { class: 'para-panel' },
+    input,
+    h(
+      'div',
+      { class: 'row gap' },
+      button(
+        panel.mode === 'rewrite' ? 'Rewrite with AI' : 'Write with AI',
+        () => void aiParagraph(api, book, page, index, paras, panel.instruction),
+        'primary',
+      ),
+      button('⌨ Type it myself', () => {
+        paraEdit.set(`${page.id}:after${index}`, { text: '' });
+        paraPanel.delete(key);
+        api.refresh();
+      }),
+      button('Cancel', () => {
+        paraPanel.delete(key);
+        api.refresh();
+      }),
+    ),
+  );
+}
+
+/** Handles "insert after index" inline editing (Type it myself). */
+function insertEditBlock(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  index: number,
+  paras: string[],
+): HTMLElement | null {
+  const key = `${page.id}:after${index}`;
+  const edit = paraEdit.get(key);
+  if (!edit) return null;
+  const textarea = h('textarea', {
+    class: 'para-edit',
+    rows: 3,
+    placeholder: 'Write the new paragraph…',
+    oninput: (event: Event) => {
+      edit.text = (event.target as HTMLTextAreaElement).value;
+    },
+  });
+  return h(
+    'div',
+    { class: 'para para-editing' },
+    textarea,
+    h(
+      'div',
+      { class: 'row gap' },
+      button(
+        'Insert',
+        () => {
+          const next = [...paras];
+          next.splice(index + 1, 0, edit.text);
+          commitUserVersion(api, book, page, next, 'Paragraph inserted', key);
+        },
+        'primary',
+      ),
+      button('Cancel', () => {
+        paraEdit.delete(key);
+        api.refresh();
+      }),
+    ),
+  );
+}
+
+function addParagraphBlock(api: AppApi, book: Book, page: StoryNode, paras: string[]): HTMLElement {
+  const key = `${page.id}:add`;
+  const panel = paraPanel.get(key);
+  const genKey = `para:${key}`;
+  const busy = genStates.get(genKey);
+  const edit = paraEdit.get(`${page.id}:append`);
+
+  if (edit) {
+    const textarea = h('textarea', {
+      class: 'para-edit',
+      rows: 3,
+      value: edit.text,
+      placeholder: 'Write the new paragraph…',
+      oninput: (event: Event) => {
+        edit.text = (event.target as HTMLTextAreaElement).value;
+      },
+    });
+    return h(
+      'div',
+      { class: 'para-add' },
+      textarea,
+      h(
+        'div',
+        { class: 'row gap' },
+        button(
+          'Append',
+          () => {
+            commitUserVersion(
+              api,
+              book,
+              page,
+              [...paras, edit.text],
+              'Paragraph added',
+              `${page.id}:append`,
+            );
+          },
+          'primary',
+        ),
+        button('Cancel', () => {
+          paraEdit.delete(`${page.id}:append`);
+          api.refresh();
+        }),
+      ),
+    );
+  }
+
+  if (busy) {
+    return h(
+      'div',
+      { class: 'para-add' },
+      renderGenPanel(
+        api,
+        genKey,
+        () => void aiParagraph(api, book, page, paras.length, paras, panel?.instruction ?? ''),
+      ),
+    );
+  }
+
+  if (panel) {
+    const input = h('input', {
+      class: 'input para-tweak',
+      type: 'text',
+      value: panel.instruction,
+      placeholder: '“a moment of doubt”, “describe the kitchen” — or leave empty',
+      oninput: (event: Event) => {
+        panel.instruction = (event.target as HTMLInputElement).value;
+      },
+    });
+    return h(
+      'div',
+      { class: 'para-add' },
+      input,
+      h(
+        'div',
+        { class: 'row gap' },
+        button(
+          '✍ Write with AI',
+          () => void aiParagraph(api, book, page, paras.length, paras, panel.instruction),
+          'primary',
+        ),
+        button('⌨ Type it', () => {
+          paraEdit.set(`${page.id}:append`, { text: '' });
+          paraPanel.delete(key);
+          api.refresh();
+        }),
+        button('Cancel', () => {
+          paraPanel.delete(key);
+          api.refresh();
+        }),
+      ),
+    );
+  }
+
+  return h(
+    'div',
+    { class: 'para-add' },
+    button('＋ Add a paragraph', () => {
+      paraPanel.set(key, { mode: 'add', instruction: '' });
+      api.refresh();
+    }),
+  );
+}
+
+function paraTool(label: string, title: string, onClick: () => void): HTMLElement {
+  return h('button', {
+    class: 'para-tool',
+    type: 'button',
+    text: label,
+    title,
+    onclick: onClick,
+  });
+}
+
+// ---- Parallel candidates ---------------------------------------------------
+
+function candidatesSection(api: AppApi, book: Book, page: StoryNode): HTMLElement | null {
+  const keys = [...genStates.keys()].filter((key) => key.startsWith(`cand:${page.id}:`)).sort();
+  if (keys.length === 0) return null;
+  return h(
+    'section',
+    { class: 'candidates' },
+    h('h3', { class: 'candidates-title', text: 'Parallel alternatives — keep the one you love' }),
+    ...keys.map((key) =>
+      h(
+        'div',
+        { class: 'candidate' },
+        renderGenPanel(api, key, () => retryCandidate(api, book, page, key)),
+      ),
+    ),
+    h(
+      'div',
+      { class: 'row gap' },
+      button('Cancel all', () => api.abortGeneration()),
+    ),
+  );
+}
+
+function retryCandidate(api: AppApi, book: Book, page: StoryNode, key: string): void {
+  genStates.delete(key);
+  void generateCandidates(api, book, page, 1);
+}
+
+async function runCandidates(api: AppApi, book: Book, page: StoryNode): Promise<void> {
+  if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
+  const attached = await generateCandidates(api, book, page, 2);
+  if (attached > 0) {
+    showVersions.add(page.id);
+    api.toast(
+      attached === 1
+        ? 'One new version ready — flip through the version picker'
+        : `${attached} new versions ready — flip through the version picker`,
+      'success',
+    );
+  }
+}
+
+/** Drop transient editing state for a page (version flips, page walks). */
+function clearCraftState(pageId: string): void {
+  for (const key of [...paraEdit.keys()]) {
+    if (key.startsWith(`${pageId}:`)) paraEdit.delete(key);
+  }
+  for (const key of [...paraPanel.keys()]) {
+    if (key.startsWith(`${pageId}:`)) paraPanel.delete(key);
+  }
+}
+
+function commitUserVersion(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  paras: string[],
+  message: string,
+  editKey: string,
+): void {
+  if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
+  api.appendVersion(page.id, joinParagraphs(paras), 'user');
+  paraEdit.delete(editKey);
+  paraPanel.delete(editKey); // rewrite/insert panels share the paragraph key
+  if (editKey === `${page.id}:append`) paraPanel.delete(`${page.id}:add`);
+  maybeUpdateBible(api, book, page.id);
+  maybeUpdateSummary(api, book, page.id);
+  api.toast(message, 'success');
+}
+
+/** Rewrite/insert a paragraph with the model; stream into the block; save as a new version. */
+async function aiParagraph(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  index: number,
+  paras: string[],
+  instruction: string,
+): Promise<void> {
+  if (page.data.kind !== 'page') return;
+  const isAdd = index >= paras.length;
+  const genKey = `para:${isAdd ? `${page.id}:add` : `${page.id}:${index}`}`;
+  const token = api.beginGen();
+  audit(`aiParagraph start key=${genKey}`);
+  genStates.set(genKey, {
+    token,
+    status: 'busy',
+    label: isAdd ? 'Writing a new paragraph…' : `Rewriting paragraph ${index + 1}…`,
+    stream: '',
+    error: '',
+  });
+  api.refresh();
+  try {
+    const ctx = buildContext(api.nodes, book);
+    const pageNumber = pageNumberAt(api.nodes, page.id);
+    const pageText = joinParagraphs(paras);
+    const messages = isAdd
+      ? insertParagraphMessages(ctx, pageNumber, pageText, instruction, book.rules)
+      : paragraphMessages(ctx, pageNumber, pageText, paras[index] ?? '', instruction, book.rules);
+    const model = book.model || api.lib.settings.endpoint.model;
+    const text = await api.generateText(messages, {
+      model,
+      onToken: (piece) => {
+        const state = genStates.get(genKey);
+        if (state) state.stream += piece;
+      },
+    });
+    if (api.staleGen(token)) {
+      genStates.delete(genKey);
+      return;
+    }
+    const cleaned = text.trim();
+    if (cleaned.length === 0) throw new Error('The model returned an empty paragraph');
+    const next = [...paras];
+    if (isAdd) next.push(cleaned);
+    else next[index] = cleaned;
+    genStates.delete(genKey);
+    paraPanel.delete(isAdd ? `${page.id}:add` : `${page.id}:${index}`);
+    if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
+    api.appendVersion(page.id, joinParagraphs(next), 'ai', model);
+    maybeUpdateBible(api, book, page.id);
+    maybeUpdateSummary(api, book, page.id);
+    api.refresh();
+    api.toast('Paragraph written — saved as a new version', 'success');
+  } catch (err) {
+    genStates.delete(genKey);
+    if (api.staleGen(token)) {
+      api.refresh();
+      return;
+    }
+    genStates.set(genKey, {
+      token,
+      status: 'error',
+      label: 'Paragraph generation failed',
+      stream: '',
+      error: api.genError(err),
+    });
+    api.refresh();
+  }
+}
+
+// ---- Version picker -------------------------------------------------------
+
+function versionPicker(api: AppApi, page: StoryNode): HTMLElement {
+  if (page.data.kind !== 'page') return h('span');
+  const { versions, chosenVersion } = page.data;
+  const chosen = versions[chosenVersion - 1];
+  const open = showVersions.has(page.id);
+  const prev = () => {
+    clearCraftState(page.id);
+    api.chooseVersion(page.id, Math.max(1, chosenVersion - 1));
+  };
+  const next = () => {
+    clearCraftState(page.id);
+    api.chooseVersion(page.id, Math.min(versions.length, chosenVersion + 1));
+  };
+
+  const picker = h(
+    'span',
+    { class: 'version-picker' },
+    button('◀', prev, 'ghost', {
+      disabled: chosenVersion <= 1,
+      title: 'Previous version (shift+←)',
+    }),
+    h('span', {
+      class: 'version-now',
+      text: `version ${chosenVersion} of ${versions.length}${chosen?.by === 'user' ? ' · edited by you' : ''}`,
+    }),
+    button('▶', next, 'ghost', {
+      disabled: chosenVersion >= versions.length,
+      title: 'Next version (shift+→)',
+    }),
+    versions.length > 1
+      ? button(
+          open ? '▴ All versions' : '▾ All versions',
+          () => {
+            if (open) showVersions.delete(page.id);
+            else showVersions.add(page.id);
+            api.refresh();
+          },
+          'ghost',
+        )
+      : null,
+  );
+
+  const diff = diffOpen.has(page.id)
+    ? h(
+        'div',
+        { class: 'diff-panel' },
+        ...diffOf(versions[chosenVersion - 2]?.text ?? '', chosen?.text ?? ''),
+      )
+    : null;
+  if (!open) return h('div', { class: 'version-picker-block' }, picker, diff);
+  const ordered = versions
+    .map((version, index) => ({ version, index }))
+    .sort((a, b) => Number(b.version.pinned ?? false) - Number(a.version.pinned ?? false));
+  const list = h(
+    'div',
+    { class: 'version-list' },
+    ...ordered.map(({ version, index }) =>
+      h(
+        'div',
+        { class: `version-row${index + 1 === chosenVersion ? ' on' : ''}` },
+        h('button', {
+          class: 'version-pin',
+          type: 'button',
+          text: version.pinned ? '📌' : '·',
+          title: version.pinned ? 'Unpin this version' : 'Pin this version so it is never lost',
+          onclick: () => {
+            api.togglePin(page.id, index + 1);
+          },
+        }),
+        h(
+          'button',
+          {
+            class: 'version-item',
+            type: 'button',
+            title: version.text.slice(0, 120),
+            onclick: () => {
+              clearCraftState(page.id);
+              api.chooseVersion(page.id, index + 1);
+            },
+          },
+          `${version.pinned ? '📌 ' : ''}v${version.v} · ${version.by === 'user' ? 'you' : 'ai'} · ${fmtNumber(countWords(version.text))} words · ${fmtDate(version.at)}`,
+        ),
+      ),
+    ),
+  );
+  return h('div', { class: 'version-picker-block' }, picker, list);
+}
+
+// ---- Story spine (walk the pages) -----------------------------------------
+
+function spineNav(api: AppApi, book: Book, page: StoryNode): HTMLElement {
+  const spine = spinePages(api.nodes, page.id);
+  const idx = spine.findIndex((p) => p.id === page.id);
+  const frontier = getNode(api.nodes, book.frontierId);
+  const atFrontier = frontier?.id === page.id;
+  const prevPage = idx > 0 ? spine[idx - 1] : null;
+  const nextPage = idx >= 0 && idx < spine.length - 1 ? spine[idx + 1] : null;
+  const nextLabel = nextPage ? `Page ${idx + 2} ▶` : atFrontier ? 'The turn ▶' : 'Frontier ▶';
+  const nextAction = () => {
+    if (nextPage) api.openPageAt(book, nextPage.id);
+    else if (atFrontier) api.navigate('turn', { from: page.id });
+    else if (frontier) api.openPageAt(book, frontier.id);
+  };
+
+  const dots = spine.map((p, i) => {
+    const branches = childrenOf(api.nodes, p.id).length;
+    return h(
+      'button',
+      {
+        class: `spine-dot${i === idx ? ' on' : ''}`,
+        type: 'button',
+        title: `Page ${i + 1}${branches > 1 ? ` · ${branches} paths grow from here` : ''}`,
+        onclick: () => api.openPageAt(book, p.id),
+      },
+      `${i + 1}${branches > 1 ? '·' : ''}`,
+    );
+  });
+
+  return h(
+    'div',
+    { class: 'spine' },
+    button('◀', () => (prevPage ? api.openPageAt(book, prevPage.id) : null), 'ghost', {
+      disabled: !prevPage,
+      title: 'Previous page (←)',
+    }),
+    h('div', { class: 'spine-dots' }, ...dots),
+    button(nextLabel, nextAction, 'ghost', {
+      title: 'Next page (→)',
+    }),
+  );
+}
+
+// ---- Keyboard shortcuts ----------------------------------------------------
+
+let keyApi: AppApi | null = null;
+let keyBook: Book | null = null;
+let keyPage: StoryNode | null = null;
+let keysAttached = false;
+
+function installKeys(api: AppApi, book: Book, page: StoryNode): void {
+  keyApi = api;
+  keyBook = book;
+  keyPage = page;
+  if (keysAttached) return;
+  keysAttached = true;
+  window.addEventListener('keydown', (event) => {
+    const api = keyApi;
+    const book = keyBook;
+    const page = keyPage;
+    if (!api || !book || !page || api.view !== 'page') return;
+    if (page.data.kind !== 'page') return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      (target.closest('input, textarea, select, [contenteditable="true"]') ||
+        target.isContentEditable)
+    )
+      return;
+    if (genStates.get(`page:${book.id}`)) return;
+
+    if (event.key === 'Escape') {
+      editState.delete(page.id);
+      for (const k of [...paraEdit.keys()]) if (k.startsWith(`${page.id}:`)) paraEdit.delete(k);
+      paraPanel.delete(`${page.id}:add`);
+      api.refresh();
+      return;
+    }
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const delta = event.key === 'ArrowRight' ? 1 : -1;
+      if (event.shiftKey) {
+        const current = page.data.chosenVersion;
+        const targetVersion = Math.max(1, Math.min(page.data.versions.length, current + delta));
+        if (targetVersion !== current) {
+          event.preventDefault();
+          api.chooseVersion(page.id, targetVersion);
+        }
+        return;
+      }
+      const spine = spinePages(api.nodes, page.id);
+      const idx = spine.findIndex((p) => p.id === page.id);
+      const targetPage = delta > 0 ? spine[idx + 1] : spine[idx - 1];
+      if (targetPage) {
+        event.preventDefault();
+        api.openPageAt(book, targetPage.id);
+      } else if (delta > 0 && idx === spine.length - 1) {
+        event.preventDefault();
+        api.navigate('turn', { from: page.id });
+      }
+    }
+  });
+}
+
+// ---- First page / begin view ----------------------------------------------
+
 function beginView(api: AppApi, book: Book): HTMLElement {
-  const titleNode = titleNodeOf(api.nodes, book);
+  // The frontier IS a title here — possibly an unchosen one entered via the
+  // story map, so page 1 must grow under THIS title, not the chosen one.
+  const frontier = getNode(api.nodes, book.frontierId);
+  const titleNode = frontier && frontier.kind === 'title' ? frontier : titleNodeOf(api.nodes, book);
   const title = titleNode.data.kind === 'title' ? titleNode.data.title : 'Untitled';
   const tagline = titleNode.data.kind === 'title' ? titleNode.data.tagline : '';
   const seed = seedTextOf(api.nodes, book);
@@ -250,7 +1025,7 @@ function beginView(api: AppApi, book: Book): HTMLElement {
         () =>
           void generatePage(api, book, beginDirection(api), 1, key, 'Writing page 1…', {
             kind: 'new',
-            parentId: book.chosenTitleId,
+            parentId: book.frontierId,
           }),
       ),
     );
@@ -263,7 +1038,7 @@ function beginView(api: AppApi, book: Book): HTMLElement {
       () =>
         void generatePage(api, book, beginDirection(api), 1, key, 'Writing page 1…', {
           kind: 'new',
-          parentId: book.chosenTitleId,
+          parentId: book.frontierId,
         }),
       0,
     );
@@ -287,7 +1062,7 @@ function beginView(api: AppApi, book: Book): HTMLElement {
         () =>
           void generatePage(api, book, beginDirection(api), 1, key, 'Writing page 1…', {
             kind: 'new',
-            parentId: book.chosenTitleId,
+            parentId: book.frontierId,
           }),
         'primary',
       ),
@@ -299,38 +1074,440 @@ function beginDirection(api: AppApi): TurnInput {
   return { ...DEFAULT_TURN, length: api.lib.settings.defaultLength };
 }
 
-function versionsNav(api: AppApi, page: StoryNode): HTMLElement | null {
-  if (page.data.kind !== 'page' || page.data.versions.length < 2) return null;
-  const { versions, chosenVersion } = page.data;
-  const chosen = versions[chosenVersion - 1];
+function directionChips(direction: TurnInput): HTMLElement {
+  const emotionChips = Object.entries(direction.emotions)
+    .filter(([, value]) => value !== 0)
+    .map(([name, value]) =>
+      h('span', {
+        class: 'chip chip-emotion',
+        text: `${EMOTION_META[name as EmotionName]?.icon ?? '🎭'} ${name} ${value > 0 ? '+' : ''}${value}`,
+        title: `${EMOTION_META[name as EmotionName]?.label ?? name}: ${value}`,
+      }),
+    );
+  const chapterChip =
+    direction.chapter === 'start'
+      ? [h('span', { class: 'chip', text: 'chapter break' })]
+      : direction.chapter === 'close'
+        ? [h('span', { class: 'chip', text: 'chapter close' })]
+        : [];
   return h(
-    'span',
-    { class: 'version-nav' },
-    button('◀', () => api.chooseVersion(page.id, Math.max(1, chosenVersion - 1)), 'ghost', {
-      disabled: chosenVersion <= 1,
-    }),
-    ` version ${chosenVersion} of ${versions.length} `,
-    button(
-      '▶',
-      () => api.chooseVersion(page.id, Math.min(versions.length, chosenVersion + 1)),
-      'ghost',
-      { disabled: chosenVersion >= versions.length },
-    ),
-    chosen?.by === 'user' ? ' (edited by you)' : '',
+    'div',
+    { class: 'direction-chips' },
+    direction.direction
+      ? h('span', { class: 'chip', text: `direction: ${truncate(direction.direction, 90)}` })
+      : null,
+    direction.tone !== 'inherit'
+      ? h('span', { class: 'chip', text: TONE_LABEL[direction.tone] })
+      : null,
+    direction.length !== 'standard' && !direction.sizeTarget
+      ? h('span', { class: 'chip', text: `${direction.length} page` })
+      : null,
+    direction.sizeTarget
+      ? h('span', {
+          class: 'chip chip-size',
+          text: `≈ ${direction.sizeTarget.value} ${direction.sizeTarget.kind}`,
+        })
+      : null,
+    ...chapterChip,
+    ...emotionChips,
   );
 }
 
 function pageHeader(api: AppApi, book: Book, pageNum: number): HTMLElement {
-  const title = titleNodeOf(api.nodes, book);
+  // Show the title of the branch being read — re-entering another proposed
+  // title moves the frontier onto that title's branch, and the header follows.
+  const byPath = pathToRoot(api.nodes, book.frontierId).find((n) => n.kind === 'title');
+  const title = byPath ?? titleNodeOf(api.nodes, book);
   const titleText = title.data.kind === 'title' ? title.data.title : 'Untitled';
+  const isRenaming = renaming.has(book.id);
+  const renameInput = h('input', {
+    class: 'input rename-input',
+    type: 'text',
+    value: renaming.get(book.id) ?? titleText,
+    oninput: (event: Event) => {
+      renaming.set(book.id, (event.target as HTMLInputElement).value);
+    },
+  });
   return h(
     'header',
     { class: 'page-head' },
     h('span', { class: 'page-num', text: `Page ${pageNum}` }),
-    h('span', { class: 'page-book', text: titleText }),
+    isRenaming
+      ? h(
+          'span',
+          { class: 'page-book rename-row' },
+          renameInput,
+          button(
+            'Save',
+            () => {
+              api.renameTitle(book, renaming.get(book.id) ?? titleText);
+              renaming.delete(book.id);
+            },
+            'chip',
+          ),
+          button(
+            '✕',
+            () => {
+              renaming.delete(book.id);
+              api.refresh();
+            },
+            'chip',
+          ),
+        )
+      : h(
+          'span',
+          { class: 'page-book' },
+          titleText,
+          button(
+            '✎',
+            () => {
+              renaming.set(book.id, titleText);
+              api.refresh();
+            },
+            'chip',
+            { title: 'Rename this book' },
+          ),
+        ),
   );
 }
 
 function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max - 1) + '…' : text;
+}
+
+// ---- Selection-based span control (word/sentence level) --------------------
+
+const spanTask = new Map<
+  string,
+  { start: number; end: number; text: string; instruction: string }
+>();
+
+function undoBar(api: AppApi, page: StoryNode): HTMLElement | null {
+  if (page.data.kind !== 'page') return null;
+  const previous = lastCommit.get(page.id);
+  if (previous === undefined || previous === page.data.chosenVersion) return null;
+  return h(
+    'div',
+    { class: 'undo-bar' },
+    h('span', { text: 'You just changed this page.' }),
+    button(
+      '↩ Undo',
+      () => {
+        api.chooseVersion(page.id, previous);
+        lastCommit.delete(page.id);
+      },
+      'ghost',
+    ),
+    h('span', { class: 'undo-hint', text: '— or keep it; every version is saved' }),
+  );
+}
+
+function considerSelection(api: AppApi, book: Book, page: StoryNode, paras: string[]): void {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    removeSpanToolbar();
+    return;
+  }
+  const range = selection.getRangeAt(0);
+  const anchorEl = range.startContainer.parentElement;
+  const focusEl = range.endContainer.parentElement;
+  if (!anchorEl || !focusEl) {
+    removeSpanToolbar();
+    return;
+  }
+  const paraBody = anchorEl.closest('.para-body');
+  if (!paraBody || paraBody !== focusEl.closest('.para-body')) {
+    removeSpanToolbar();
+    return;
+  }
+  const paraEl = paraBody.closest('.para');
+  const index = Number((paraEl as HTMLElement | null)?.dataset.index ?? -1);
+  if (index < 0 || index >= paras.length) {
+    removeSpanToolbar();
+    return;
+  }
+  const start = range.startOffset;
+  const end = range.endOffset;
+  if (end <= start) {
+    removeSpanToolbar();
+    return;
+  }
+  const text = paras[index]?.slice(start, end) ?? '';
+  if (!text.trim()) {
+    removeSpanToolbar();
+    return;
+  }
+  const rect = range.getBoundingClientRect();
+  mountSpanToolbar(api, book, page, index, start, end, text, rect.left, rect.top);
+}
+
+let spanToolbarEl: HTMLElement | null = null;
+
+export function clearSpanToolbar(): void {
+  spanTask.clear();
+  removeSpanToolbar();
+}
+
+function removeSpanToolbar(): void {
+  spanToolbarEl?.remove();
+  spanToolbarEl = null;
+}
+
+function mountSpanToolbar(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  index: number,
+  start: number,
+  end: number,
+  text: string,
+  x: number,
+  y: number,
+): void {
+  removeSpanToolbar();
+  const shown = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+  const genKey = `span:${page.id}:${index}`;
+  const isBusy = genStates.has(genKey);
+  const editing = spanEdit.has(genKey);
+  const box = h(
+    'div',
+    { class: 'span-toolbar', style: `left:${Math.round(x)}px; top:${Math.round(y - 46)}px;` },
+    h('div', { class: 'span-caption', title: text, text: `“${shown}”` }),
+    editing
+      ? h(
+          'div',
+          { class: 'span-edit' },
+          h('textarea', {
+            class: 'para-edit',
+            rows: 3,
+            value: spanEdit.get(genKey) ?? text,
+            oninput: (event: Event) => {
+              spanEdit.set(genKey, (event.target as HTMLTextAreaElement).value);
+            },
+          }),
+          h(
+            'div',
+            { class: 'row gap' },
+            button(
+              'Replace',
+              () => {
+                const replacement = spanEdit.get(genKey) ?? text;
+                spanEdit.delete(genKey);
+                applySpanReplacement(api, book, page, index, start, end, replacement);
+              },
+              'primary',
+            ),
+            button('Cancel', () => {
+              spanEdit.delete(genKey);
+              removeSpanToolbar();
+              api.refresh();
+            }),
+          ),
+        )
+      : h(
+          'div',
+          { class: 'row gap' },
+          button(
+            '↻ Rewrite',
+            () => {
+              removeSpanToolbar();
+              spanTask.set(genKey, { start, end, text, instruction: '' });
+              void aiSpanRewrite(api, book, page, index, start, end, text);
+            },
+            'primary',
+            { disabled: isBusy },
+          ),
+          button('✎ Edit', () => {
+            spanEdit.set(genKey, text);
+            api.refresh();
+            const rect2 = window.getSelection()?.getRangeAt(0)?.getBoundingClientRect();
+            if (rect2)
+              mountSpanToolbar(api, book, page, index, start, end, text, rect2.left, rect2.top);
+          }),
+          button('✕', () => removeSpanToolbar()),
+        ),
+  );
+  document.body.appendChild(box);
+  spanToolbarEl = box;
+}
+
+const spanEdit = new Map<string, string>();
+
+function applySpanReplacement(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  index: number,
+  start: number,
+  end: number,
+  replacement: string,
+): void {
+  const paras = paragraphsOf(
+    page.data.kind === 'page' ? (page.data.versions[page.data.chosenVersion - 1]?.text ?? '') : '',
+  );
+  const current = paras[index];
+  if (current === undefined) return;
+  const next = [...paras];
+  next[index] = current.slice(0, start) + replacement + current.slice(end);
+  removeSpanToolbar();
+  commitUserVersion(
+    api,
+    book,
+    page,
+    next,
+    'Selection edited — new version saved',
+    `${page.id}:${index}`,
+  );
+}
+
+async function aiSpanRewrite(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  index: number,
+  start: number,
+  end: number,
+  text: string,
+): Promise<void> {
+  if (page.data.kind !== 'page') return;
+  const genKey = `span:${page.id}:${index}`;
+  const task = spanTask.get(genKey) ?? { start, end, text, instruction: '' };
+  spanTask.set(genKey, task);
+  const token = api.beginGen();
+  genStates.set(genKey, {
+    token,
+    status: 'busy',
+    label: 'Rewriting the selection…',
+    stream: '',
+    error: '',
+  });
+  api.refresh();
+  try {
+    const ctx = buildContext(api.nodes, book);
+    const chosen = page.data.versions[page.data.chosenVersion - 1];
+    const paras = paragraphsOf(chosen?.text ?? '');
+    const paragraph = paras[index] ?? '';
+    const messages = rewriteSpanMessages(
+      ctx,
+      pageNumberAt(api.nodes, page.id),
+      paragraph,
+      task.text,
+      task.instruction,
+      book.rules,
+    );
+    const model = book.model || api.lib.settings.endpoint.model;
+    const rewritten = await api.generateText(messages, {
+      model,
+      onToken: (piece) => {
+        const state = genStates.get(genKey);
+        if (state) state.stream += piece;
+      },
+    });
+    if (api.staleGen(token)) {
+      genStates.delete(genKey);
+      return;
+    }
+    const cleaned = rewritten.trim();
+    if (!cleaned) throw new Error('The model returned an empty span');
+    genStates.delete(genKey);
+    spanTask.delete(genKey);
+    const next = [...paras];
+    next[index] = paragraph.slice(0, task.start) + cleaned + paragraph.slice(task.end);
+    if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
+    api.appendVersion(page.id, joinParagraphs(next), 'ai', model);
+    maybeUpdateBible(api, book, page.id);
+    maybeUpdateSummary(api, book, page.id);
+    api.refresh();
+    api.toast('Selection rewritten — saved as a new version', 'success');
+  } catch (err) {
+    genStates.delete(genKey);
+    if (api.staleGen(token)) {
+      api.refresh();
+      return;
+    }
+    genStates.set(genKey, {
+      token,
+      status: 'error',
+      label: 'Rewrite failed',
+      stream: '',
+      error: api.genError(err),
+    });
+    api.refresh();
+  }
+}
+
+/** Inline editor for the chapter heading (first line) of a chapter-opening page. */
+function headingRow(api: AppApi, page: StoryNode, text: string): HTMLElement | null {
+  if (page.data.kind !== 'page' || page.data.direction.chapter !== 'start') return null;
+  const data = page.data;
+  const lines = text.split('\n');
+  const headingIndex = lines.findIndex((line) => /^\s*chapter\b/i.test(line.trim()));
+  const heading = headingIndex >= 0 ? (lines[headingIndex]?.trim() ?? '') : '';
+  if (!heading) return null;
+  const isEditing = headingEdit.has(page.id);
+  const input = h('input', {
+    class: 'input heading-input',
+    type: 'text',
+    value: headingEdit.get(page.id) ?? heading,
+    oninput: (event: Event) => {
+      headingEdit.set(page.id, (event.target as HTMLInputElement).value);
+    },
+  });
+  const save = () => {
+    const next = [...lines];
+    next[headingIndex] = headingEdit.get(page.id) ?? heading;
+    lastCommit.set(page.id, data.chosenVersion);
+    api.appendVersion(page.id, next.join('\n'), 'user');
+    headingEdit.delete(page.id);
+    api.toast('Chapter heading saved as a new version', 'success');
+  };
+  return h(
+    'div',
+    { class: 'heading-row' },
+    isEditing
+      ? h(
+          'div',
+          { class: 'row gap' },
+          input,
+          button('Save', save, 'primary'),
+          button('✕', () => {
+            headingEdit.delete(page.id);
+            api.refresh();
+          }),
+        )
+      : h(
+          'div',
+          { class: 'row gap heading-display' },
+          h('h2', { class: 'chapter-heading', text: heading }),
+          button(
+            '✎',
+            () => {
+              headingEdit.set(page.id, heading);
+              api.refresh();
+            },
+            'chip',
+            { title: 'Edit this chapter heading' },
+          ),
+        ),
+  );
+}
+
+function diffOf(before: string, after: string): HTMLElement[] {
+  return diffWords(before, after).map((part) =>
+    h('span', {
+      class: part.kind === 'same' ? 'diff-same' : part.kind === 'add' ? 'diff-add' : 'diff-del',
+      text: part.text,
+      title:
+        part.kind === 'add'
+          ? 'added in this version'
+          : part.kind === 'del'
+            ? 'in the previous version'
+            : '',
+    }),
+  );
+}
+
+/** Open the full-page editor for a freshly hand-written page (turn view). */
+export function startEditingPage(pageId: string): void {
+  editState.set(pageId, { open: true, text: '' });
 }

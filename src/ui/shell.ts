@@ -21,6 +21,14 @@ export function renderShell(api: AppApi, viewContent: HTMLElement, toasts: Toast
   const app = document.getElementById('app');
   if (!app) return;
 
+  const bookLinks: Array<{ view: ViewName; label: string; params?: Record<string, string> }> =
+    api.book
+      ? [
+          { view: 'archive', label: 'Story map' },
+          { view: 'reader', label: 'Read' },
+        ]
+      : [];
+
   const nav = h(
     'nav',
     { class: 'nav' },
@@ -38,6 +46,14 @@ export function renderShell(api: AppApi, viewContent: HTMLElement, toasts: Toast
           type: 'button',
           text: item.label,
           onclick: () => api.navigate(item.view),
+        }),
+      ),
+      ...bookLinks.map((item) =>
+        h('button', {
+          class: `nav-link nav-link-book${api.view === item.view ? ' active' : ''}`,
+          type: 'button',
+          text: item.label,
+          onclick: () => api.navigate(item.view, item.params),
         }),
       ),
     ),

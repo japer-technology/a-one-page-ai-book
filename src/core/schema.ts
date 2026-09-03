@@ -3,8 +3,16 @@
  * normalization for files read from disk. The whole library serializes to one
  * JSON document, which makes IndexedDB, OPFS and file import/export trivial.
  */
-import type { Book, EndpointSettings, Library, NodeData, SeedOptions, StoryNode } from './types';
-import { LIBRARY_SCHEMA_VERSION } from './types';
+import type {
+  Book,
+  EndpointSettings,
+  Library,
+  NodeData,
+  SeedOptions,
+  StoryNode,
+  TurnInput,
+} from './types';
+import { DEFAULT_TURN, EMOTION_NAMES, LIBRARY_SCHEMA_VERSION } from './types';
 
 export const DEFAULT_ENDPOINT: EndpointSettings = {
   name: 'LM Studio (default)',
@@ -16,7 +24,19 @@ export const DEFAULT_ENDPOINT: EndpointSettings = {
 };
 
 export function defaultSettings() {
-  return { endpoint: { ...DEFAULT_ENDPOINT }, defaultLength: 'standard' as const };
+  return {
+    endpoint: { ...DEFAULT_ENDPOINT },
+    defaultLength: 'standard' as const,
+    autoBible: true,
+    autoSummary: true,
+    autoSuggest: false,
+    templates: [],
+    fastModel: '',
+    theme: 'dark' as const,
+    fontScale: 1,
+    seenOnboarding: false,
+    readingPositions: {},
+  };
 }
 
 export function defaultLibrary(): Library {
@@ -61,24 +81,110 @@ function normalizeNode(raw: unknown): StoryNode {
       asString(data.text, `node "${id}" seed text`);
       if (!isRecord(data.options)) fail(`node "${id}" seed options missing`);
       if (!Array.isArray(data.titles)) fail(`node "${id}" seed titles must be an array`);
+      if (data.brief === undefined) data.brief = '';
+      else asString(data.brief, `node "${id}" seed brief`);
       break;
     case 'title':
       asString(data.title, `node "${id}" title`);
       break;
-    case 'page':
+    case 'page': {
       if (!Array.isArray(data.versions) || data.versions.length === 0) {
         fail(`node "${id}" page has no versions`);
       }
       if (typeof data.chosenVersion !== 'number') fail(`node "${id}" page chosenVersion missing`);
+      data.direction = normalizeTurnInput(data.direction);
+      // The living-cast snapshot is optional derived data; pass it through,
+      // filling the threads group for bibles saved before it existed.
+      if (data.bible !== undefined) {
+        if (!isRecord(data.bible)) delete data.bible;
+        else if (!Array.isArray(data.bible.threads)) data.bible.threads = [];
+      }
+      // The rolling summary is optional derived data; drop non-string values.
+      if (data.summary !== undefined && typeof data.summary !== 'string') delete data.summary;
       break;
-    case 'turn':
+    }
+    case 'turn': {
       if (!isRecord(data.input)) fail(`node "${id}" turn input missing`);
+      data.input = normalizeTurnInput(data.input);
       break;
+    }
     case 'ending':
       break;
   }
   return { id, kind: kind as StoryNode['kind'], parentId, createdAt: raw.createdAt, data };
 }
+
+/** Tolerate old files and sloppy shapes: fill every TurnInput field safely. */
+export function normalizeTurnInput(raw: unknown): TurnInput {
+  const input = (isRecord(raw) ? raw : {}) as Record<string, unknown>;
+  const length: TurnInput['length'] =
+    input.length === 'shorter' || input.length === 'longer' || input.length === 'standard'
+      ? input.length
+      : DEFAULT_TURN.length;
+  const tone: TurnInput['tone'] =
+    typeof input.tone === 'string' && TONE_NAMES.has(input.tone)
+      ? (input.tone as TurnInput['tone'])
+      : DEFAULT_TURN.tone;
+  const chapter: TurnInput['chapter'] =
+    input.chapter === 'start' || input.chapter === 'close' || input.chapter === 'none'
+      ? input.chapter
+      : 'none';
+  let sizeTarget: TurnInput['sizeTarget'] = null;
+  if (isRecord(input.sizeTarget)) {
+    const kind = input.sizeTarget.kind;
+    const value = input.sizeTarget.value;
+    if (
+      (kind === 'words' || kind === 'paragraphs' || kind === 'chars') &&
+      typeof value === 'number' &&
+      Number.isFinite(value)
+    ) {
+      const clamped = Math.max(1, Math.min(200000, Math.round(value)));
+      sizeTarget = { kind, value: clamped };
+    }
+  }
+  const emotions: TurnInput['emotions'] = {};
+  if (isRecord(input.emotions)) {
+    for (const name of EMOTION_NAMES) {
+      const value = input.emotions[name];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        const clamped = Math.max(-3, Math.min(3, Math.round(value)));
+        if (clamped !== 0) emotions[name] = clamped;
+      }
+    }
+  }
+  const document: TurnInput['document'] =
+    typeof input.document === 'string' &&
+    (input.document === 'story' ||
+      input.document === 'letter' ||
+      input.document === 'diary' ||
+      input.document === 'newspaper' ||
+      input.document === 'mapnote' ||
+      input.document === 'recipe')
+      ? input.document
+      : 'story';
+  return {
+    direction: typeof input.direction === 'string' ? input.direction : '',
+    length,
+    sizeTarget,
+    tone,
+    ending: input.ending === true,
+    emotions,
+    chapter,
+    document,
+  };
+}
+
+const TONE_NAMES: ReadonlySet<string> = new Set([
+  'inherit',
+  'darker',
+  'lighter',
+  'warmer',
+  'colder',
+  'funnier',
+  'more-serious',
+  'more-poetic',
+  'more-plain',
+]);
 
 function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
   if (!isRecord(raw)) fail('book is not an object');
@@ -97,6 +203,9 @@ function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
     frontierId,
     status,
     model: typeof raw.model === 'string' ? raw.model : '',
+    rules: Array.isArray(raw.rules)
+      ? raw.rules.filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+      : [],
     createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
@@ -128,6 +237,36 @@ function normalizeSettings(raw: unknown): Library['settings'] {
       raw.defaultLength === 'shorter' || raw.defaultLength === 'longer'
         ? raw.defaultLength
         : 'standard',
+    autoBible: raw.autoBible !== false,
+    autoSummary: raw.autoSummary !== false,
+    autoSuggest: raw.autoSuggest === true,
+    fastModel: typeof raw.fastModel === 'string' ? raw.fastModel.trim() : '',
+    theme: raw.theme === 'sepia' || raw.theme === 'light' ? raw.theme : 'dark',
+    fontScale:
+      typeof raw.fontScale === 'number' && Number.isFinite(raw.fontScale)
+        ? Math.max(0.8, Math.min(1.4, raw.fontScale))
+        : 1,
+    seenOnboarding: raw.seenOnboarding === true,
+    readingPositions: isRecord(raw.readingPositions)
+      ? Object.fromEntries(
+          Object.entries(raw.readingPositions).filter(
+            (entry): entry is [string, number] =>
+              typeof entry[0] === 'string' &&
+              typeof entry[1] === 'number' &&
+              Number.isFinite(entry[1]),
+          ),
+        )
+      : {},
+    templates: Array.isArray(raw.templates)
+      ? raw.templates
+          .map((t): Library['settings']['templates'][number] | null => {
+            if (!isRecord(t)) return null;
+            const name = typeof t.name === 'string' ? t.name.trim() : '';
+            if (!name) return null;
+            return { name, input: normalizeTurnInput(t.input) };
+          })
+          .filter((t): t is NonNullable<typeof t> => t !== null)
+      : [],
   };
 }
 

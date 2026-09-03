@@ -5,7 +5,8 @@
 import type { AppApi } from '../ctx';
 import { button, fmtDate, fmtNumber, h } from '../dom';
 import { compileBook } from '../../core/compile';
-import { seedTextOf, sortBooks, statsOf, titleNodeOf, titleOf } from '../../core/tree';
+import { getNode, seedTextOf, sortBooks, statsOf, titleNodeOf, titleOf } from '../../core/tree';
+import { EMOTION_NAMES } from '../../core/types';
 import type { Book } from '../../core/types';
 import {
   exportBookBundle,
@@ -14,8 +15,24 @@ import {
   importLibraryFile,
 } from '../../store/files';
 
+// Session-scoped sort choice.
+let sortMode: 'recent' | 'mood' | 'length' | 'branches' = 'recent';
+
 export function renderLibrary(api: AppApi): HTMLElement {
-  const books = sortBooks(api.lib);
+  const all = sortBooks(api.lib);
+  const books = sortBy(all, sortMode, api);
+
+  // Full-text index: titles (chosen AND every proposed one), seeds AND page text (spec §10).
+  const haystacks = new Map<string, string>();
+  for (const book of books) {
+    const compiled = compileBook(api.nodes, book);
+    haystacks.set(
+      book.id,
+      `${titleOf(api.nodes, book)}\n${proposedTitlesText(api, book)}\n${seedTextOf(api.nodes, book)}\n${compiled.pages
+        .map((p) => p.text)
+        .join('\n')}`.toLowerCase(),
+    );
+  }
 
   const search = h('input', {
     class: 'search',
@@ -35,6 +52,7 @@ export function renderLibrary(api: AppApi): HTMLElement {
             class: 'lede',
             text: 'You write one sentence — a seed. A local LLM writes the book with you, one page at a time. You direct every page turn. Every version is remembered forever.',
           }),
+          api.lib.settings.seenOnboarding ? null : onboarding(api),
           noModelBanner(api),
           h(
             'div',
@@ -51,16 +69,34 @@ export function renderLibrary(api: AppApi): HTMLElement {
   search.addEventListener('input', () => {
     const needle = search.value.trim().toLowerCase();
     for (const card of Array.from(list.children)) {
-      const haystack = ((card as HTMLElement).dataset.search ?? '').toLowerCase();
+      const bookId = (card as HTMLElement).dataset.bookId ?? '';
+      const haystack = haystacks.get(bookId) ?? '';
       (card as HTMLElement).style.display =
         needle === '' || haystack.includes(needle) ? '' : 'none';
     }
   });
 
+  const sortSelect = h(
+    'select',
+    { class: 'input sort-select', title: 'Sort the shelf' },
+    ...[
+      ['recent', 'recent'],
+      ['mood', 'by mood'],
+      ['length', 'by length'],
+      ['branches', 'most branched'],
+    ].map(([v, label]) =>
+      h('option', { value: v, selected: v === sortMode ? true : undefined, text: label }),
+    ),
+  );
+  sortSelect.addEventListener('change', () => {
+    sortMode = sortSelect.value as typeof sortMode;
+    api.refresh();
+  });
   const toolbar = h(
     'div',
     { class: 'toolbar' },
     books.length > 0 ? search : null,
+    books.length > 0 ? sortSelect : null,
     h(
       'div',
       { class: 'row gap' },
@@ -93,9 +129,19 @@ function bookCard(api: AppApi, book: Book): HTMLElement {
     h(
       'div',
       { class: 'menu-panel' },
+      menuItem('Continue / fork', () => api.openBook(book.id)),
+      menuItem('✎ Rename', () => {
+        const name = window.prompt('Rename this book:', title);
+        if (name?.trim()) api.renameTitle(book, name.trim());
+      }),
+      menuItem('🗺️ Story map', () => api.navigate('archive', { book: book.id })),
+      menuItem('📊 About this book', () => api.navigate('about', { book: book.id })),
+      menuItem('📖 Read the chosen path', () => api.navigate('reader', { book: book.id })),
+      menuItem('Export as .epub', () => void exportCompiledFile(compileBook(nodes, book), 'epub')),
       menuItem('Export as .txt', () => void exportCompiledFile(compileBook(nodes, book), 'txt')),
       menuItem('Export as .md', () => void exportCompiledFile(compileBook(nodes, book), 'md')),
       menuItem('Save book file (.ptbook.json)', () => void exportBookBundle(book, nodes)),
+      menuItem('➡️ Write a sequel', () => api.seedFromBook(book.id)),
       menuItem('Duplicate', () => api.duplicateBook(book.id)),
       menuItem('Delete', () => deleteBook(api, book), 'danger'),
     ),
@@ -105,7 +151,7 @@ function bookCard(api: AppApi, book: Book): HTMLElement {
     'article',
     {
       class: `book-card${finished ? ' finished' : ''}`,
-      dataset: { search: `${title}\n${seed}\n${tagline}` },
+      dataset: { search: `${title}\n${seed}\n${tagline}\n${proposedTitlesText(api, book)}` },
     },
     h(
       'div',
@@ -146,6 +192,13 @@ function menuItem(
     text: label,
     onclick: () => onClick(),
   });
+}
+
+/** Every proposed title of a seed (with taglines), for library search (§5). */
+function proposedTitlesText(api: AppApi, book: Book): string {
+  const seedNode = getNode(api.nodes, book.seedNodeId);
+  if (!seedNode || seedNode.data.kind !== 'seed') return '';
+  return seedNode.data.titles.map((t) => `${t.title} ${t.tagline}`).join('\n');
 }
 
 function deleteBook(api: AppApi, book: Book): void {
@@ -202,4 +255,91 @@ function noModelBanner(api: AppApi): HTMLElement | null {
       onclick: () => api.navigate('settings'),
     }),
   );
+}
+
+/** A three-step tour for the empty bookshelf, dismissible forever. */
+function onboarding(api: AppApi): HTMLElement {
+  const dismiss = () => {
+    api.update((lib) => ({
+      ...lib,
+      settings: { ...lib.settings, seenOnboarding: true },
+    }));
+  };
+  const step = (icon: string, title: string, text: string): HTMLElement =>
+    h(
+      'div',
+      { class: 'onboard-step' },
+      h('span', { class: 'onboard-icon', text: icon }),
+      h('h3', { text: title }),
+      h('p', { text }),
+    );
+  return h(
+    'section',
+    { class: 'onboarding' },
+    h(
+      'div',
+      { class: 'onboard-grid' },
+      step('🌱', 'Write a seed', 'One sentence is enough — or chat it through first.'),
+      step(
+        '🎛️',
+        'Direct every turn',
+        '“What happens next?” — mood, length, rules, or just continue.',
+      ),
+      step(
+        '🌳',
+        'Keep everything',
+        'Every version and fork is remembered; walk back and branch any time.',
+      ),
+    ),
+    h(
+      'div',
+      { class: 'row gap' },
+      button(
+        'Got it — start my first book',
+        () => {
+          dismiss();
+          api.navigate('seed');
+        },
+        'primary',
+      ),
+      button('Skip tour', dismiss),
+    ),
+  );
+}
+
+function sortBy(
+  books: ReturnType<typeof sortBooks>,
+  mode: 'recent' | 'mood' | 'length' | 'branches',
+  api: AppApi,
+): ReturnType<typeof sortBooks> {
+  if (mode === 'length') {
+    return [...books].sort((a, b) => statsOf(api.nodes, b).words - statsOf(api.nodes, a).words);
+  }
+  if (mode === 'branches') {
+    return [...books].sort(
+      (a, b) => statsOf(api.nodes, b).branches - statsOf(api.nodes, a).branches,
+    );
+  }
+  if (mode === 'mood') {
+    const rank = (book: (typeof books)[number]): number => {
+      const compiled = compileBook(api.nodes, book);
+      const counts = new Map<string, number>();
+      for (const page of compiled.pages) {
+        const mood = page.mood;
+        if (mood) counts.set(mood.label, (counts.get(mood.label) ?? 0) + 1);
+      }
+      let best = '';
+      let bestCount = 0;
+      for (const [label, count] of counts) {
+        if (count > bestCount) {
+          best = label;
+          bestCount = count;
+        }
+      }
+      const index = EMOTION_NAMES.indexOf(best as never);
+      return index < 0 ? EMOTION_NAMES.length : index;
+    };
+    return [...books].sort((a, b) => rank(a) - rank(b));
+  }
+  return books;
 }

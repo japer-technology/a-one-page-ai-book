@@ -19,6 +19,8 @@ import {
 } from '../core/schema';
 import { collectSubtree } from '../core/tree';
 import { bookFileName, toMarkdown, toPlainText, type CompiledBook } from '../core/compile';
+import { epubBytes } from '../core/epub';
+import { pdfBytes } from '../core/pdf';
 
 /**
  * The File System Access picker methods are absent from this TypeScript
@@ -158,17 +160,30 @@ export async function exportBookBundle(
   await saveTextFile(name, JSON.stringify(bundle, null, 2), 'application/json');
 }
 
-export type ExportFormat = 'txt' | 'md';
+export type ExportFormat = 'txt' | 'md' | 'epub' | 'pdf';
 
 export async function exportCompiledFile(
   compiled: CompiledBook,
   format: ExportFormat,
 ): Promise<void> {
-  if (format === 'md') {
+  if (format === 'pdf') {
+    const bytes = pdfBytes(compiled);
+    const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
+    await saveBlobFile(bookFileName(compiled, 'pdf'), blob);
+  } else if (format === 'epub') {
+    const bytes = epubBytes(compiled);
+    const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/epub+zip' });
+    await saveBlobFile(bookFileName(compiled, 'epub'), blob);
+  } else if (format === 'md') {
     await saveTextFile(bookFileName(compiled, 'md'), toMarkdown(compiled), 'text/markdown');
   } else {
     await saveTextFile(bookFileName(compiled, 'txt'), toPlainText(compiled), 'text/plain');
   }
+}
+
+/** Save an already-built blob (EPUB and other binary formats). */
+export async function saveBlobFile(suggestedName: string, blob: Blob): Promise<void> {
+  if (!(await writeWithPicker(suggestedName, blob))) downloadBlob(suggestedName, blob);
 }
 
 /** Mirror the library into the OPFS workspace file (a real local file, no prompts). */

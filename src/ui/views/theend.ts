@@ -7,6 +7,8 @@ import { button, fmtNumber, h } from '../dom';
 import { compileBook } from '../../core/compile';
 import { pathToRoot, statsOf, titleNodeOf } from '../../core/tree';
 import { exportCompiledFile } from '../../store/files';
+import { renderCast } from '../cast';
+import { renderStoryMemory } from '../story';
 
 export function renderTheEnd(api: AppApi): HTMLElement {
   const book = api.book;
@@ -57,6 +59,18 @@ export function renderTheEnd(api: AppApi): HTMLElement {
       'div',
       { class: 'actions' },
       button('📖 Read the book', () => api.navigate('reader', { book: book.id }), 'primary'),
+      button('📊 About this book', () => api.navigate('about', { book: book.id }), 'ghost', {
+        title: 'The full ledger: words, versions, decisions, models',
+      }),
+      button('🗺️ Story map', () => api.navigate('archive', { book: book.id }), 'ghost', {
+        title: 'See every path, version and road not taken',
+      }),
+      button('➡️ Write a sequel', () => api.seedFromBook(book.id), 'ghost', {
+        title: 'Seed a new book that inherits this cast and threads',
+      }),
+      button('⇓ .epub', () => void exportCompiledFile(compiled, 'epub'), 'ghost', {
+        title: 'Export the book as a real EPUB e-book',
+      }),
       button('⇓ .txt', () => void exportCompiledFile(compiled, 'txt')),
       button('⇓ .md', () => void exportCompiledFile(compiled, 'md')),
       button(
@@ -70,5 +84,7 @@ export function renderTheEnd(api: AppApi): HTMLElement {
       ),
       button('← Library', () => api.navigate('library')),
     ),
+    renderCast(api, book),
+    renderStoryMemory(api, book),
   );
 }

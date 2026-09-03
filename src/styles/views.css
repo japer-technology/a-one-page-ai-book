@@ -410,3 +410,1392 @@
     max-width: 130px;
   }
 }
+
+/* ---- Page crafting (paragraphs & words) --------------------------------- */
+
+.page-craft {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.para {
+  position: relative;
+  border-radius: var(--radius-sm);
+  padding: 0.05rem 0.1rem;
+  transition: background 0.15s;
+}
+
+.para-body {
+  margin: 0;
+}
+
+.para:hover,
+.para:focus-within {
+  background: rgb(232 196 122 / 0.045);
+  outline: 1px solid rgb(232 196 122 / 0.18);
+}
+
+.para-tools {
+  display: flex;
+  gap: 0.2rem;
+  margin: 0.25rem 0 0.4rem;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.para:hover .para-tools,
+.para:focus-within .para-tools {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .para-tools {
+    opacity: 0.75;
+  }
+}
+
+.para-tool {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  padding: 0.12rem 0.55rem;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.para-tool:hover {
+  color: var(--accent);
+  border-color: var(--accent-strong);
+}
+
+.para-dim {
+  color: var(--muted);
+}
+
+.para-edit {
+  width: 100%;
+  font-family: var(--serif);
+  font-size: 1.08rem;
+  line-height: 1.7;
+  background: var(--bg);
+  border: 1px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  padding: 0.6rem 0.8rem;
+}
+
+.para-editing,
+.para-add {
+  border: 1px dashed rgb(232 196 122 / 0.35);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem;
+  margin: 0.3rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  animation: fadein 0.25s ease-out;
+}
+
+.para-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.3rem 0 0.6rem;
+  animation: fadein 0.2s ease-out;
+}
+
+.para-tweak {
+  font-family: var(--serif);
+}
+
+/* ---- Version picker ------------------------------------------------------ */
+
+.version-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.version-picker .btn {
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.version-now {
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.version-picker-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+.version-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  animation: fadein 0.2s ease-out;
+}
+
+.version-item {
+  font-size: 0.78rem;
+  border: 1px solid var(--line);
+  background: var(--bg-card);
+  color: var(--paper-dim);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+
+.version-item:hover {
+  border-color: var(--accent-strong);
+  color: var(--paper);
+}
+
+.version-item.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgb(232 196 122 / 0.1);
+}
+
+/* ---- Story spine --------------------------------------------------------- */
+
+.spine {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.7rem 0 0.9rem;
+  flex-wrap: wrap;
+}
+
+.spine-dots {
+  display: flex;
+  gap: 0.25rem;
+  flex: 1;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.spine-dot {
+  min-width: 1.8rem;
+  border: 1px solid var(--line);
+  background: var(--bg-card);
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  padding: 0.12rem 0.45rem;
+  cursor: pointer;
+}
+
+.spine-dot:hover {
+  border-color: var(--accent-strong);
+  color: var(--paper);
+}
+
+.spine-dot.on {
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  color: var(--accent-ink);
+  font-weight: 700;
+  border-color: var(--accent-strong);
+}
+
+.kbd-hint {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+  margin: 1.2rem 0 0;
+}
+
+.chip-emotion {
+  border-color: rgb(232 196 122 / 0.4);
+}
+
+.chip-on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgb(232 196 122 / 0.08);
+}
+
+/* ---- The living cast ----------------------------------------------------- */
+
+.cast {
+  margin: 1.4rem 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+.cast-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  padding: 0.65rem 0.9rem;
+  cursor: pointer;
+  user-select: none;
+  color: var(--paper-dim);
+  font-size: 0.9rem;
+}
+
+.cast-summary:hover {
+  color: var(--paper);
+}
+
+.cast-title {
+  font-family: var(--serif);
+  color: var(--accent);
+}
+
+.cast-count {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.cast-state {
+  font-size: 0.78rem;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.cast-state-error {
+  color: var(--danger);
+}
+
+.cast-actions {
+  margin-left: auto;
+}
+
+.cast-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 1rem;
+  padding: 0.7rem 1rem 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.cast-group-title {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 0.95rem;
+  color: var(--accent);
+  margin: 0.3rem 0 0.4rem;
+}
+
+.cast-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cast-entry {
+  padding: 0.28rem 0;
+  border-bottom: 1px dashed rgb(55 45 36 / 0.6);
+  font-size: 0.88rem;
+}
+
+.cast-entry:last-child {
+  border-bottom: none;
+}
+
+.cast-name {
+  font-family: var(--serif);
+  color: var(--paper);
+  font-weight: 600;
+}
+
+.cast-note {
+  color: var(--muted);
+  margin-left: 0.4rem;
+  font-style: italic;
+}
+
+.cast-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+/* ---- Turn console: dials, rules, suggestions ----------------------------- */
+
+.suggest-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: 0.4rem;
+}
+
+.suggest-count {
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.dials {
+  margin: 0.6rem 0;
+}
+
+.dials-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.dial-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.15rem 1.4rem;
+  margin: 0.6rem 0;
+}
+
+.dial-row {
+  display: grid;
+  grid-template-columns: 118px 1fr 52px;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.22rem 0;
+}
+
+.dial-name {
+  font-size: 0.85rem;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.dial-range {
+  accent-color: var(--accent);
+  width: 100%;
+  cursor: pointer;
+}
+
+.dial-value {
+  font-size: 0.8rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.dial-inherit {
+  color: var(--muted);
+}
+
+.dial-plus {
+  color: var(--warn);
+}
+
+.dial-minus {
+  color: #7fa8bf;
+}
+
+.rules-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  min-height: 1.6rem;
+}
+
+.rule-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.rule-x {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0;
+}
+
+.rule-x:hover {
+  color: var(--danger);
+}
+
+.rule-input {
+  flex: 1;
+  min-width: 220px;
+}
+
+/* ---- Story map (archive) ------------------------------------------------- */
+
+.view-archive {
+  max-width: 720px;
+}
+
+.archive-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+.archive-entry {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  padding: 0.9rem 1rem;
+  animation: fadein 0.3s ease-out;
+}
+
+.archive-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.archive-meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+  flex: 1;
+}
+
+.archive-preview {
+  font-family: var(--serif);
+  font-size: 1.02rem;
+  line-height: 1.65;
+  color: var(--paper);
+  margin: 0.5rem 0 0.3rem;
+  white-space: pre-wrap;
+}
+
+.archive-direction {
+  color: var(--paper-dim);
+  font-size: 0.85rem;
+  margin: 0.2rem 0;
+  font-style: italic;
+}
+
+.archive-versions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+
+.version-chip {
+  cursor: pointer;
+}
+
+.archive-branches {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--line);
+}
+
+.archive-branch-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 0 0 0.4rem;
+}
+
+.archive-branch {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.2rem 0.8rem;
+  width: 100%;
+  text-align: left;
+  background: rgb(232 196 122 / 0.03);
+  border: 1px dashed rgb(232 196 122 / 0.25);
+  border-radius: var(--radius-sm);
+  color: var(--paper-dim);
+  padding: 0.45rem 0.7rem;
+  margin-bottom: 0.4rem;
+  cursor: pointer;
+  font: inherit;
+}
+
+.archive-branch:hover {
+  border-color: var(--accent-strong);
+  color: var(--paper);
+}
+
+.archive-branch-direction {
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.archive-branch-preview {
+  grid-column: 1;
+  font-family: var(--serif);
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.archive-branch-cta {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+  color: var(--accent);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.archive-ending {
+  text-align: center;
+  margin: 1.8rem 0 1rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--line);
+}
+
+.archive-titles .title-card {
+  cursor: default;
+}
+
+.nav-link-book {
+  color: var(--paper-dim);
+  font-style: italic;
+}
+
+/* ---- Pre-writing chat ---------------------------------------------------- */
+
+.chat {
+  margin: 0.9rem 0;
+}
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.6rem 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-bubble {
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.7rem;
+  font-size: 0.92rem;
+  max-width: 88%;
+}
+
+.chat-user {
+  align-self: flex-end;
+  background: rgb(232 196 122 / 0.12);
+  border: 1px solid rgb(232 196 122 / 0.3);
+}
+
+.chat-assistant {
+  align-self: flex-start;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+}
+
+.chat-who {
+  display: block;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.chat-text {
+  white-space: pre-wrap;
+}
+
+.chat-input {
+  flex: 1;
+  min-width: 220px;
+}
+
+.brief-input {
+  margin-top: 0.5rem;
+  font-family: var(--serif);
+}
+
+/* ---- Cast editing -------------------------------------------------------- */
+
+.cast-body {
+  padding: 0 1rem 1rem;
+}
+
+.cast-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: 0 0 0.5rem;
+}
+
+.cast-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.cast-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed rgb(55 45 36 / 0.6);
+}
+
+.cast-entry:last-child {
+  border-bottom: none;
+}
+
+.cast-entry-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.cast-details {
+  color: var(--paper-dim);
+  font-size: 0.82rem;
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
+.cast-entry-tools {
+  display: inline-flex;
+  gap: 0.25rem;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.cast-entry:hover .cast-entry-tools,
+.cast-entry:focus-within .cast-entry-tools {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .cast-entry-tools {
+    opacity: 0.8;
+  }
+}
+
+.cast-tool {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  cursor: pointer;
+}
+
+.cast-tool:hover {
+  color: var(--accent);
+  border-color: var(--accent-strong);
+}
+
+.cast-tool-danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.cast-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  border: 1px dashed rgb(232 196 122 / 0.35);
+  border-radius: var(--radius-sm);
+  margin: 0.4rem 0;
+  animation: fadein 0.2s ease-out;
+}
+
+.cast-input-details {
+  font-family: var(--serif);
+}
+
+/* ---- Turn console: precise size, endings, templates ---------------------- */
+
+.size-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.size-row {
+  align-items: center;
+}
+
+.size-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.size-number {
+  width: 110px;
+  flex: 0 0 auto;
+}
+
+.size-unit {
+  width: 130px;
+  flex: 0 0 auto;
+}
+
+.endings-area {
+  margin: 0.4rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  animation: fadein 0.2s ease-out;
+}
+
+.templates-row {
+  margin: 0.4rem 0;
+}
+
+.templates-row select {
+  flex: 1;
+  min-width: 180px;
+}
+
+/* ---- Parallel candidates ------------------------------------------------- */
+
+.candidates {
+  margin: 1rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgb(232 196 122 / 0.35);
+  border-radius: var(--radius);
+  background: rgb(232 196 122 / 0.04);
+}
+
+.candidates-title {
+  font-family: var(--serif);
+  font-weight: 500;
+  color: var(--accent);
+  margin: 0 0 0.6rem;
+}
+
+.candidate {
+  margin-bottom: 0.7rem;
+}
+
+.candidate .gen-stream {
+  max-height: 22vh;
+}
+
+/* ---- Title rename -------------------------------------------------------- */
+
+.rename-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.rename-input {
+  width: 260px;
+  max-width: 60vw;
+  font-family: var(--serif);
+}
+
+/* ---- Story map: tree + comparison ---------------------------------------- */
+
+.tree-card {
+  overflow-x: auto;
+}
+
+.tree-map {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.tree-line {
+  stroke: var(--line);
+  stroke-width: 2;
+}
+
+.tree-line-ghost {
+  stroke: rgb(156 143 125 / 0.5);
+  stroke-dasharray: 4 4;
+}
+
+.tree-node rect {
+  fill: rgb(232 196 122 / 0.14);
+  stroke: var(--accent-strong);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+
+.tree-ghost rect {
+  fill: rgb(156 143 125 / 0.08);
+  stroke: rgb(156 143 125 / 0.5);
+}
+
+.tree-label {
+  fill: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.tree-ghost .tree-label {
+  fill: var(--muted);
+}
+
+.tree-sub {
+  fill: var(--muted);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.compare-panel {
+  animation: fadein 0.25s ease-out;
+}
+
+.compare-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.compare-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem;
+  background: var(--bg);
+}
+
+.compare-pane-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.compare-text {
+  font-size: 1rem;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+@media (max-width: 720px) {
+  .compare-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- Mood map strip ------------------------------------------------------ */
+
+.mood-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin: 0.7rem 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+
+.mood-strip-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-right: 0.3rem;
+}
+
+.mood-chip {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--paper-dim);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  padding: 0.08rem 0.5rem;
+  cursor: pointer;
+}
+
+.mood-chip:hover {
+  border-color: var(--accent-strong);
+}
+
+.mood-chip.on {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  font-weight: 700;
+}
+
+/* ---- Selection toolbar (word/sentence control) --------------------------- */
+
+.span-toolbar {
+  position: fixed;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 0.5rem 0.6rem;
+  max-width: 340px;
+  animation: fadein 0.15s ease-out;
+}
+
+.span-caption {
+  font-family: var(--serif);
+  font-style: italic;
+  color: var(--muted);
+  font-size: 0.8rem;
+  max-width: 300px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.span-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+/* ---- Undo bar ------------------------------------------------------------ */
+
+.undo-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid rgb(232 196 122 / 0.35);
+  border-radius: var(--radius-sm);
+  background: rgb(232 196 122 / 0.07);
+  font-size: 0.88rem;
+  animation: fadein 0.2s ease-out;
+}
+
+.undo-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* ---- Version rows + pins ------------------------------------------------- */
+
+.version-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  padding: 0.12rem 0.3rem;
+}
+
+.version-row.on {
+  border-color: var(--accent);
+}
+
+.version-pin {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0 0.15rem;
+  color: var(--muted);
+}
+
+.version-pin:hover {
+  color: var(--accent);
+}
+
+/* ---- Read-aloud controls ------------------------------------------------- */
+
+.read-aloud-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin: 0.6rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  font-size: 0.85rem;
+}
+
+.read-aloud-label {
+  color: var(--accent);
+  font-family: var(--serif);
+}
+
+.voice-select {
+  width: auto;
+  max-width: 220px;
+  font-size: 0.85rem;
+}
+
+.rate-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.rate-range {
+  width: 90px;
+  accent-color: var(--accent);
+}
+
+.read-aloud-controls .check-field {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+/* ---- About this book ----------------------------------------------------- */
+
+.about-lede {
+  font-family: var(--serif);
+  font-size: 1.02rem;
+  line-height: 1.7;
+  color: var(--paper-dim);
+  margin: 1rem 0;
+}
+
+.about-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.7rem;
+  margin: 1rem 0;
+}
+
+.about-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.about-stat-value {
+  font-family: var(--serif);
+  font-size: 1.5rem;
+  color: var(--accent);
+}
+
+.about-stat-label {
+  font-size: 0.78rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.about-stat-hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.about-mood {
+  font-size: 1rem;
+  letter-spacing: 0.03em;
+}
+
+.about-decisions {
+  margin: 0.3rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.about-decision {
+  padding: 0.25rem 0;
+}
+
+.about-decision-page {
+  color: var(--accent);
+  font-size: 0.8rem;
+  margin-right: 0.5rem;
+}
+
+.about-decision-text {
+  color: var(--paper-dim);
+}
+
+.about-decision-mood {
+  margin-left: 0.4rem;
+}
+
+.about-iterated {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.about-iterated-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 0.9rem;
+}
+
+/* ---- Time-lapse replay --------------------------------------------------- */
+
+.replay-row {
+  margin: 0.8rem 0;
+}
+
+.archive-entry.replaying {
+  box-shadow: 0 0 0 2px var(--accent);
+  background: rgb(232 196 122 / 0.08);
+  transition:
+    box-shadow 0.3s,
+    background 0.3s;
+}
+
+/* ---- Onboarding ---------------------------------------------------------- */
+
+.onboarding {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  padding: 1.1rem 1.2rem;
+  margin: 1.2rem auto;
+  max-width: 46rem;
+  text-align: left;
+}
+
+.onboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.onboard-step h3 {
+  font-family: var(--serif);
+  font-weight: 500;
+  color: var(--accent);
+  margin: 0.3rem 0 0.2rem;
+}
+
+.onboard-step p {
+  color: var(--paper-dim);
+  font-size: 0.88rem;
+  margin: 0;
+}
+
+.onboard-icon {
+  font-size: 1.5rem;
+}
+
+/* ---- Settings: appearance ------------------------------------------------ */
+
+.font-scale {
+  width: 200px;
+  max-width: 50vw;
+}
+
+/* ---- Diegetic document pages --------------------------------------------- */
+
+.page-text.doc-letter {
+  font-style: italic;
+  padding: 0.4rem 1.2rem;
+  border-left: 2px solid var(--accent-strong);
+}
+
+.page-text.doc-letter::first-letter {
+  font-size: 1.55em;
+}
+
+.page-text.doc-diary {
+  font-family: 'Segoe Script', 'Bradley Hand', 'Comic Sans MS', cursive, var(--serif);
+  line-height: 1.9;
+}
+
+.page-text.doc-newspaper {
+  column-count: 2;
+  column-gap: 1.6rem;
+  font-size: 1.02rem;
+  line-height: 1.55;
+  text-align: justify;
+}
+
+.page-text.doc-newspaper::first-letter {
+  font-size: 1.9em;
+  float: left;
+  margin: 0.05em 0.12em 0 0;
+  line-height: 0.95;
+}
+
+.page-text.doc-mapnote {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+.page-text.doc-recipe {
+  font-family: var(--serif);
+  line-height: 1.85;
+}
+
+@media (max-width: 560px) {
+  .page-text.doc-newspaper {
+    column-count: 1;
+  }
+}
+
+/* ---- Version diff -------------------------------------------------------- */
+
+.diff-panel {
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-family: var(--serif);
+  font-size: 0.98rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  max-height: 34vh;
+  overflow-y: auto;
+  animation: fadein 0.2s ease-out;
+}
+
+.diff-add {
+  background: rgb(127 191 127 / 0.18);
+  color: var(--ok);
+  border-radius: 2px;
+}
+
+.diff-del {
+  background: rgb(224 118 106 / 0.18);
+  color: var(--danger);
+  text-decoration: line-through;
+  border-radius: 2px;
+}
+
+/* ---- Chapter heading editor ---------------------------------------------- */
+
+.heading-row {
+  margin: 0.6rem 0 0.4rem;
+}
+
+.heading-display {
+  align-items: baseline;
+}
+
+.chapter-heading {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.35rem;
+  color: var(--accent);
+  margin: 0;
+}
+
+.heading-input {
+  flex: 1;
+  min-width: 240px;
+  font-family: var(--serif);
+  font-size: 1.15rem;
+}
+
+/* ---- Library sort -------------------------------------------------------- */
+
+.sort-select {
+  width: auto;
+  min-width: 150px;
+  flex: 0 0 auto;
+}
+
+/* ---- Story memory (the rolling summary panel) ---------------------------- */
+
+.memory {
+  margin: 1.4rem 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+.memory-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  padding: 0.65rem 0.9rem;
+  cursor: pointer;
+  user-select: none;
+  color: var(--paper-dim);
+  font-size: 0.9rem;
+}
+
+.memory-summary:hover {
+  color: var(--paper);
+}
+
+.memory-title {
+  font-family: var(--serif);
+  color: var(--accent);
+}
+
+.memory-count {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.memory-state {
+  font-size: 0.78rem;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.memory-state-error {
+  color: var(--danger);
+}
+
+.memory-actions {
+  margin-left: auto;
+}
+
+.memory-body {
+  padding: 0.7rem 1rem 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.memory-text {
+  margin: 0;
+  font-family: var(--serif);
+  color: var(--paper);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.memory-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-style: italic;
+}
+
+/* Title cards as enterable doorways (story map) */
+
+.title-actions {
+  align-items: center;
+  margin-top: 0.4rem;
+}

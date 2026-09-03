@@ -52,6 +52,7 @@ interface Controls {
   vendorInput: HTMLSelectElement;
   modelInput: HTMLInputElement;
   keyInput: HTMLInputElement;
+  tempInput: HTMLInputElement;
   resultsBox: HTMLElement;
   scanButton: HTMLButtonElement;
 }
@@ -143,6 +144,7 @@ export function renderSettings(api: AppApi): HTMLElement {
     vendorInput,
     modelInput,
     keyInput,
+    tempInput,
     resultsBox,
     scanButton: undefined as unknown as HTMLButtonElement,
   };
@@ -167,30 +169,70 @@ export function renderSettings(api: AppApi): HTMLElement {
     ),
   );
 
+  const autoBibleBox = h('input', {
+    type: 'checkbox',
+    checked: api.lib.settings.autoBible ? true : undefined,
+  });
+  const autoSummaryBox = h('input', {
+    type: 'checkbox',
+    checked: api.lib.settings.autoSummary ? true : undefined,
+  });
+  const fastModelInput = h('input', {
+    class: 'input',
+    type: 'text',
+    list: 'discovered-models',
+    value: api.lib.settings.fastModel,
+    placeholder: 'optional — e.g. a small quick model for titles, chat & the cast',
+    spellcheck: false,
+  });
+  const autoSuggestBox = h('input', {
+    type: 'checkbox',
+    checked: api.lib.settings.autoSuggest ? true : undefined,
+  });
+
+  const themeControl = segmentedTheme(api.lib.settings.theme, (theme) => {
+    themeValue = theme;
+  });
+  let themeValue = api.lib.settings.theme;
+  const fontScaleInput = h('input', {
+    class: 'dial-range font-scale',
+    type: 'range',
+    min: '0.85',
+    max: '1.35',
+    step: '0.05',
+    value: String(api.lib.settings.fontScale),
+    title: 'Reading text size',
+  });
+  const fontScaleLabel = h('span', {
+    class: 'field-hint',
+    text: `×${Number(api.lib.settings.fontScale).toFixed(2)}`,
+  });
+  fontScaleInput.addEventListener('input', () => {
+    fontScaleLabel.textContent = `×${Number(fontScaleInput.value).toFixed(2)}`;
+  });
+
   const persistButton = button('Request persistent storage', () => void persist(api));
   const storageLine = h('span', { class: 'field-hint', text: 'checking…' });
   void fillStorageLine(storageLine);
 
   const save = () => {
-    const baseUrl = normalizeBaseUrl(urlInput.value);
-    const model = modelInput.value.trim();
-    if (model) {
-      discoveredModels.push(model);
+    const endpoint = collectEndpoint(controls);
+    if (endpoint.model) {
+      discoveredModels.push(endpoint.model);
       refreshModelDatalist(modelInput);
     }
     api.update((lib) => ({
       ...lib,
       settings: {
         ...lib.settings,
-        endpoint: {
-          name: nameInput.value.trim() || 'Local LLM',
-          baseUrl,
-          vendor: vendorInput.value as EndpointVendor,
-          model,
-          temperature: Number(tempInput.value),
-          apiKey: keyInput.value.trim(),
-        },
+        endpoint,
         defaultLength: defaultLength.value as 'shorter' | 'standard' | 'longer',
+        autoBible: autoBibleBox.checked,
+        autoSummary: autoSummaryBox.checked,
+        autoSuggest: autoSuggestBox.checked,
+        fastModel: fastModelInput.value.trim(),
+        theme: themeValue,
+        fontScale: Number(fontScaleInput.value),
       },
     }));
     api.toast('Settings saved', 'success');
@@ -318,6 +360,68 @@ export function renderSettings(api: AppApi): HTMLElement {
       h('div', { class: 'row gap' }, lanSubnetInput, lanChips),
       h('div', { class: 'row gap' }, lanButton, lanProgress),
       lanResultsBox,
+    ),
+
+    h(
+      'section',
+      { class: 'card' },
+      h('h2', { text: 'Writing' }),
+      field(
+        'Default page length',
+        defaultLength,
+        'The starting length for every new page — changeable at each turn.',
+      ),
+      h(
+        'label',
+        { class: 'field check-field' },
+        autoBibleBox,
+        h('span', { text: ' Keep the living cast up to date' }),
+      ),
+      h('p', {
+        class: 'field-hint',
+        text: 'After each page, quietly ask the model to update the people · places · things list. Turn off to update it only by hand.',
+      }),
+      h(
+        'label',
+        { class: 'field check-field' },
+        autoSummaryBox,
+        h('span', { text: ' Keep the rolling story summary up to date' }),
+      ),
+      h('p', {
+        class: 'field-hint',
+        text: 'After each page, quietly fold the whole story into a compact memory that is injected into every generation — so long books never forget their beginning. Turn off to update it only by hand.',
+      }),
+      h(
+        'label',
+        { class: 'field check-field' },
+        autoSuggestBox,
+        h('span', { text: ' Propose next-beat directions automatically' }),
+      ),
+      h('p', {
+        class: 'field-hint',
+        text: 'At every turn, the model suggests three possible next beats without being asked (one extra request per turn).',
+      }),
+      field(
+        'Fast model (optional)',
+        fastModelInput,
+        'Used for the cheap phases — titles, chat, suggested beats, endings, the cast and the story summary. Leave empty to use the main model for everything.',
+      ),
+    ),
+
+    h(
+      'section',
+      { class: 'card' },
+      h('h2', { text: 'Appearance' }),
+      field(
+        'Reading theme',
+        themeControl,
+        'Dark candlelight by default; sepia and light for daytime reading.',
+      ),
+      field(
+        'Reading text size',
+        h('div', { class: 'row gap' }, fontScaleInput, fontScaleLabel),
+        'Scales the page typography.',
+      ),
     ),
 
     h(
@@ -628,24 +732,42 @@ function refreshModelDatalist(modelInput: HTMLInputElement): void {
   list.replaceChildren(...options);
 }
 
+/**
+ * The endpoint exactly as typed in the form — the ONE source of truth for
+ * both Save and Test connection. Generation always reads the saved settings,
+ * so a test must never be able to pass against values the app won't use.
+ */
+function collectEndpoint(controls: Controls): EndpointSettings {
+  return {
+    name: controls.nameInput.value.trim() || 'Local LLM',
+    baseUrl: normalizeBaseUrl(controls.urlInput.value),
+    vendor: controls.vendorInput.value as EndpointVendor,
+    model: controls.modelInput.value.trim(),
+    temperature: Number(controls.tempInput.value),
+    apiKey: controls.keyInput.value.trim(),
+  };
+}
+
 async function testConnection(api: AppApi, controls: Controls): Promise<void> {
   const token = api.beginGen();
+  // Persist the form FIRST, then test the SAVED endpoint — "Connected" must
+  // mean the endpoint every future generation (titles, pages) will actually
+  // use, not some unsaved copy of it.
+  const endpoint = collectEndpoint(controls);
+  if (endpoint.model) discoveredModels.push(endpoint.model);
+  api.update((lib) => ({
+    ...lib,
+    settings: { ...lib.settings, endpoint },
+  }));
   api.toast('Testing…', 'info');
   try {
-    const endpoint: EndpointSettings = {
-      ...api.lib.settings.endpoint,
-      baseUrl: normalizeBaseUrl(controls.urlInput.value),
-      vendor: controls.vendorInput.value as EndpointVendor,
-      model: controls.modelInput.value.trim(),
-      apiKey: controls.keyInput.value.trim(),
-    };
     const answer = await api.generateText([{ role: 'user', content: 'Reply with exactly: OK' }], {
       model: endpoint.model,
       endpoint,
     });
     if (api.staleGen(token)) return;
     api.toast(
-      `Connected — the model said “${answer.trim().slice(0, 40)}”. Press 💾 Save to use this endpoint for your books.`,
+      `Connected — the model said “${answer.trim().slice(0, 40)}”. Endpoint saved; your books will use it.`,
       'success',
     );
   } catch (err) {
@@ -703,4 +825,32 @@ async function wipe(api: AppApi): Promise<void> {
   api.update(() => defaultLibrary());
   api.navigate('library');
   api.toast('Library wiped', 'info');
+}
+
+function segmentedTheme(
+  value: 'dark' | 'sepia' | 'light',
+  onChange: (value: 'dark' | 'sepia' | 'light') => void,
+): HTMLElement {
+  const group = h(
+    'div',
+    { class: 'segmented' },
+    ...[
+      ['dark', 'dark'],
+      ['sepia', 'sepia'],
+      ['light', 'light'],
+    ].map(([v, label]) =>
+      h('button', {
+        class: `seg${v === value ? ' seg-on' : ''}`,
+        type: 'button',
+        text: label,
+        onclick: () => {
+          onChange(v as 'dark' | 'sepia' | 'light');
+          for (const seg of Array.from(group.querySelectorAll('.seg'))) {
+            seg.classList.toggle('seg-on', seg.textContent === label);
+          }
+        },
+      }),
+    ),
+  );
+  return group;
 }

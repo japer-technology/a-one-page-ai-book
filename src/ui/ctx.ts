@@ -11,13 +11,23 @@ import type {
   EndpointSettings,
   Library,
   SeedOptions,
+  StoryBible,
   StoryNode,
   TitleOption,
   TurnInput,
 } from '../core/types';
 
 export type ViewName =
-  'library' | 'seed' | 'titles' | 'page' | 'turn' | 'settings' | 'reader' | 'theend';
+  | 'library'
+  | 'seed'
+  | 'titles'
+  | 'page'
+  | 'turn'
+  | 'settings'
+  | 'reader'
+  | 'theend'
+  | 'archive'
+  | 'about';
 
 export type ToastKind = 'info' | 'error' | 'success';
 
@@ -43,11 +53,17 @@ export interface AppApi {
   /** Stream-capable LLM call using the app's endpoint settings (or an override). */
   generateText(
     messages: ChatMessage[],
-    opts?: { model?: string; endpoint?: EndpointSettings; onToken?: (token: string) => void },
+    opts?: {
+      model?: string;
+      endpoint?: EndpointSettings;
+      onToken?: (token: string) => void;
+      /** Keep other in-flight requests alive (parallel candidates). */
+      parallel?: boolean;
+    },
   ): Promise<string>;
   generateJSON<T>(
     messages: ChatMessage[],
-    opts?: { model?: string; endpoint?: EndpointSettings },
+    opts?: { model?: string; endpoint?: EndpointSettings; parallel?: boolean },
   ): Promise<T>;
   /** Generation token: increment before an await, check after, to ignore stale results. */
   beginGen(): number;
@@ -58,7 +74,7 @@ export interface AppApi {
   genError(err: unknown): string;
 
   // Tree mutations (implemented in main.ts with core/tree.ts) ---------------
-  newSeed(text: string, options: SeedOptions): StoryNode;
+  newSeed(text: string, options: SeedOptions, brief?: string): StoryNode;
   appendTitles(seedNodeId: string, options: TitleOption[]): void;
   pickTitle(seedNodeId: string, option: TitleOption): Book;
   /** Create a page node under parentId, move the book frontier there. */
@@ -68,6 +84,7 @@ export interface AppApi {
     direction: TurnInput,
     text: string,
     model: string,
+    by?: 'ai' | 'user',
   ): StoryNode;
   appendVersion(pageId: string, text: string, by: 'ai' | 'user', model?: string): void;
   chooseVersion(pageId: string, version: number): void;
@@ -76,4 +93,26 @@ export interface AppApi {
   unfinishBook(book: Book): void;
   removeBook(bookId: string): void;
   duplicateBook(bookId: string): Book | null;
+  /** Move the frontier to an existing page (walk back in time to re-enter/fork). */
+  openPageAt(book: Book, pageNodeId: string): void;
+  /** Store the living cast snapshot on a page node. */
+  saveBible(pageNodeId: string, bible: StoryBible): void;
+  /** Store the rolling story summary on a page node. */
+  saveSummary(pageNodeId: string, summary: string): void;
+  /** Create (or find) the title node for a proposed option, so it can be entered. */
+  ensureTitleNode(seedNodeId: string, option: TitleOption): StoryNode;
+  /** Re-enter the book from any proposed title (frontier moves to that branch's tip). */
+  openBranch(book: Book, option: TitleOption): void;
+  /** Replace the book's standing rules. */
+  setRules(book: Book, rules: string[]): void;
+  /** Rename the chosen title of a book (updates the title node in place). */
+  renameTitle(book: Book, title: string): void;
+  /** Pin (or unpin) a page version so it sorts first and is never lost. */
+  togglePin(pageId: string, version: number): void;
+  /** Start a sequel book from a finished one (inherits the cast as a brief). */
+  seedFromBook(bookId: string): void;
+  /** Apply the reading theme + font scale from settings to the document. */
+  applyAppearance(): void;
+  /** Remember where the reader left off in a book (title page = 0). */
+  setReadingPosition(bookId: string, position: number): void;
 }

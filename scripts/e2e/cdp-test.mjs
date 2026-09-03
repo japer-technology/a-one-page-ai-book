@@ -1,8 +1,9 @@
 // Drive the REAL built app in headless Chromium over the Chrome DevTools
 // Protocol — the full user journey, including the part that used to break:
 //
-//   settings → scan (both mock servers reachable) → Use LM Studio → Save →
-//   Test connection → New book → seed → titles (JSON) → use title →
+//   settings → scan (both mock servers reachable) → Use LM Studio →
+//   Test connection (which persists the endpoint) → New book → seed →
+//   titles (JSON) → use title →
 //   PAGE 1 STREAMS (SSE) → keep → turn → switch endpoint to Ollama → Save →
 //   continue → PAGE 2 STREAMS (NDJSON) → LAN scan finds the loopback server.
 //
@@ -91,9 +92,8 @@ await evaluate(
 out.modelAfterUse = await evaluate(
   'document.querySelector(\'input[list="discovered-models"]\').value',
 );
-await evaluate(
-  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Save')).click(); 'saved'",
-);
+// Regression: Test connection must persist the form, so a user who tests
+// without pressing Save still gets a working endpoint for titles/pages.
 await evaluate(
   "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Test connection')).click(); 'clicked'",
 );
@@ -102,6 +102,7 @@ out.connectedToast = await waitForOr(
   30000,
   'Connected toast',
 );
+out.savedAfterTest = await evaluate('window.__PAGE_TURN__.model()');
 
 // ---- 2. New book: seed → titles → page 1 streams SSE -----------------------
 await evaluate(
@@ -135,6 +136,13 @@ if (!out.page1Appeared) {
 out.page1Text = await evaluate(
   "document.querySelector('.view-page .page-text')?.textContent ?? ''",
 );
+// The page workshop: paragraph tools, story spine, living cast, version picker.
+out.paragraphTools = await evaluate(
+  "document.querySelectorAll('.view-page .para-tool').length > 0",
+);
+out.spineNav = await evaluate("!!document.querySelector('.view-page .spine')");
+out.castPanel = await evaluate("!!document.querySelector('.view-page .cast')");
+out.versionPicker = await evaluate("!!document.querySelector('.view-page .version-picker')");
 await evaluate(
   "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Keep this page')).click(); 'kept'",
 );
@@ -143,6 +151,9 @@ out.turnPanelAppeared = await waitFor(
   10000,
   'turn panel',
 );
+// The director's console: emotion dials and standing rules.
+out.emotionDials = await evaluate("!!document.querySelector('.view-turn .dial-grid')");
+out.standingRules = await evaluate("!!document.querySelector('.view-turn .rules-area')");
 
 // ---- 3. Switch to Ollama and stream page 2 over NDJSON ---------------------
 await evaluate(
@@ -190,6 +201,42 @@ out.page2Text = await evaluate(
   "document.querySelector('.view-page .page-text')?.textContent ?? ''",
 );
 
+// ---- 3b. Story map renders the tree as a timeline --------------------------
+await evaluate(
+  "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Story map')).click(); 'archive'",
+);
+out.archiveAppeared = await waitFor(
+  "!!document.querySelector('.archive-timeline') && document.querySelectorAll('.archive-entry').length >= 2",
+  10000,
+  'story map with two timeline entries',
+);
+
+// ---- 3c. Time-lapse replay regression: live entries must light up ----------
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Replay the journey')).click(); 'replay'",
+);
+out.replayHighlighted = await waitForOr(
+  "document.querySelectorAll('.archive-entry.replaying').length === 1",
+  4000,
+);
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Stop replay')).click(); 'stop-replay'",
+);
+
+// ---- 3d. Reader regression: no render loop when speech synthesis exists ----
+await evaluate(
+  "Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { getVoices: () => [{ name: 'Mock Voice' }], speak: () => {}, cancel: () => {} } }); 'mocked'",
+);
+const rendersBefore = await evaluate('window.__PAGE_TURN__.renders()');
+await evaluate(
+  "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Read')).click(); 'read'",
+);
+out.readerRendered = await waitForOr("!!document.querySelector('.view-reader')", 10000);
+out.readerVoicePicked = await evaluate(
+  "document.querySelector('.voice-select')?.textContent.includes('Mock Voice') ?? false",
+);
+out.readerRenderDelta = (await evaluate('window.__PAGE_TURN__.renders()')) - rendersBefore;
+
 // ---- 4. LAN scan over the loopback subnet -----------------------------------
 await evaluate(
   "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Settings')).click(); 'settings'",
@@ -218,13 +265,25 @@ console.log(JSON.stringify(out, null, 2));
 
 const ok =
   out.connectedToast === true &&
+  out.savedAfterTest?.model === 'mock-poet-3b' &&
   out.titleCards === true &&
   out.page1Appeared === true &&
   (out.page1Text ?? '').includes('The letter') &&
+  out.paragraphTools === true &&
+  out.spineNav === true &&
+  out.castPanel === true &&
+  out.versionPicker === true &&
   out.turnPanelAppeared === true &&
+  out.emotionDials === true &&
+  out.standingRules === true &&
   out.modelAfterOllamaUse === 'mock-ollama-7b' &&
   out.page2Appeared === true &&
   (out.page2Text ?? '').includes('The letter') &&
+  out.archiveAppeared === true &&
+  out.replayHighlighted === true &&
+  out.readerRendered === true &&
+  out.readerVoicePicked === true &&
+  out.readerRenderDelta <= 10 &&
   out.lanHitAppeared === true &&
   out.modelAfterLanUse === 'mock-poet-3b';
 ws.close();

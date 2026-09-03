@@ -10,6 +10,9 @@ import type { AppApi } from './ctx';
 import { button, h, spinner } from './dom';
 import { audit } from './audit';
 import { buildContext, pageMessages } from '../core/prompt';
+import { pageNumberAt } from '../core/tree';
+import { maybeUpdateBible } from './cast';
+import { maybeUpdateSummary } from './story';
 import type { Book, StoryNode, TurnInput } from '../core/types';
 
 export interface GenState {
@@ -40,7 +43,7 @@ export async function generatePage(
   api.refresh();
   try {
     const context = buildContext(api.nodes, book);
-    const messages = pageMessages(context, direction, targetPageNumber);
+    const messages = pageMessages(context, direction, targetPageNumber, book.rules);
     const model = book.model || api.lib.settings.endpoint.model;
     const text = await api.generateText(messages, {
       model,
@@ -66,6 +69,10 @@ export async function generatePage(
         })();
     }
     genStates.delete(key);
+    // The cast follows the story: update it in the background after each page.
+    maybeUpdateBible(api, book, node.id);
+    // The memory too: fold the story into the rolling summary in the background.
+    maybeUpdateSummary(api, book, node.id);
     api.refresh();
     return node;
   } catch (err) {
@@ -127,4 +134,74 @@ export function renderGenPanel(api: AppApi, key: string, onRetry: () => void): H
     h('div', { class: 'banner banner-error' }, state.error),
     button('Retry', () => onRetry(), 'primary'),
   );
+}
+
+/**
+ * Parallel candidate fan-out: ask the model for `count` alternative versions
+ * of the same page at once, stream each into its own panel, and attach the
+ * finished ones as new versions of the page node. Returns how many landed.
+ * A failed candidate can be retried by re-calling with a fresh count of 1
+ * after deleting its error state.
+ */
+export async function generateCandidates(
+  api: AppApi,
+  book: Book,
+  page: StoryNode,
+  count: number,
+): Promise<number> {
+  if (page.data.kind !== 'page') return 0;
+  const direction = page.data.direction;
+  const context = buildContext(api.nodes, book);
+  const messages = pageMessages(context, direction, pageNumberAt(api.nodes, page.id), book.rules);
+  const model = book.model || api.lib.settings.endpoint.model;
+  const token = api.beginGen();
+  const keys = Array.from({ length: count }, (_, i) => `cand:${page.id}:${i}`);
+  for (const [i, key] of keys.entries()) {
+    genStates.set(key, {
+      token,
+      status: 'busy',
+      label: `Candidate ${i + 1} of ${count} — writing an alternative…`,
+      stream: '',
+      error: '',
+    });
+  }
+  api.refresh();
+
+  const run = async (key: string): Promise<number> => {
+    try {
+      const text = await api.generateText(messages, {
+        model,
+        parallel: true,
+        onToken: (piece) => {
+          const state = genStates.get(key);
+          if (state) state.stream += piece;
+        },
+      });
+      if (api.staleGen(token)) return 0;
+      const cleaned = text.trim();
+      if (cleaned.length === 0) throw new Error('The model returned an empty page');
+      genStates.delete(key);
+      api.appendVersion(page.id, cleaned, 'ai', model);
+      return 1;
+    } catch (err) {
+      genStates.delete(key);
+      if (api.staleGen(token)) return 0;
+      genStates.set(key, {
+        token,
+        status: 'error',
+        label: 'Candidate failed',
+        stream: '',
+        error: api.genError(err),
+      });
+      return 0;
+    }
+  };
+
+  const results = await Promise.allSettled(keys.map((key) => run(key)));
+  const attached = results.reduce(
+    (sum, result) => sum + (result.status === 'fulfilled' ? result.value : 0),
+    0,
+  );
+  api.refresh();
+  return attached;
 }

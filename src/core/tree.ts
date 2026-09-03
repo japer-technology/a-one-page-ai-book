@@ -5,7 +5,15 @@
  * old node makes a new branch while the old one stays intact. Nothing is ever
  * destroyed by editing. The chosen path is just "walk parents from the frontier".
  */
-import type { Book, Library, SeedOptions, StoryNode, TitleOption, TurnInput } from './types';
+import type {
+  Book,
+  Library,
+  SeedOptions,
+  StoryBible,
+  StoryNode,
+  TitleOption,
+  TurnInput,
+} from './types';
 import { DEFAULT_TURN } from './types';
 import { newId } from './id';
 import { countWords } from './compile';
@@ -77,6 +85,10 @@ export interface BookStats {
   versions: number;
   nodes: number;
   branches: number;
+  /** Every word of every version ever written (kept + discarded). */
+  wordsGenerated: number;
+  /** Words the reader wrote by hand. */
+  wordsByUser: number;
 }
 
 /** Statistics over the whole book subtree (kept + discarded material). */
@@ -91,6 +103,24 @@ export function statsOf(nodes: Record<string, StoryNode>, book: Book): BookStats
     words: kept.reduce((sum, v) => sum + countWords(v.text), 0),
     versions: pageNodes.reduce(
       (sum, p) => sum + (p.data.kind === 'page' ? p.data.versions.length : 0),
+      0,
+    ),
+    wordsGenerated: pageNodes.reduce(
+      (sum, p) =>
+        sum +
+        (p.data.kind === 'page'
+          ? p.data.versions.reduce((vSum, version) => vSum + countWords(version.text), 0)
+          : 0),
+      0,
+    ),
+    wordsByUser: pageNodes.reduce(
+      (sum, p) =>
+        sum +
+        (p.data.kind === 'page'
+          ? p.data.versions
+              .filter((version) => version.by === 'user')
+              .reduce((vSum, version) => vSum + countWords(version.text), 0)
+          : 0),
       0,
     ),
     nodes: subtree.length,
@@ -157,13 +187,13 @@ export function removeSubtree(
 
 // ---- Node factories -------------------------------------------------------
 
-export function makeSeedNode(text: string, options: SeedOptions): StoryNode {
+export function makeSeedNode(text: string, options: SeedOptions, brief = ''): StoryNode {
   return {
     id: newId(),
     kind: 'seed',
     parentId: null,
     createdAt: Date.now(),
-    data: { kind: 'seed', text, options, titles: [] },
+    data: { kind: 'seed', text, options, titles: [], brief },
   };
 }
 
@@ -182,6 +212,7 @@ export function makePageNode(
   direction: TurnInput,
   model: string,
   text: string,
+  by: 'ai' | 'user' = 'ai',
 ): StoryNode {
   return {
     id: newId(),
@@ -190,7 +221,7 @@ export function makePageNode(
     createdAt: Date.now(),
     data: {
       kind: 'page',
-      versions: [{ v: 1, text, by: 'ai', at: Date.now(), model }],
+      versions: [{ v: 1, text, by, at: Date.now(), model }],
       chosenVersion: 1,
       direction,
       model,
@@ -244,6 +275,111 @@ export function setChosenVersion(node: StoryNode, v: number): StoryNode {
   return { ...node, data: { ...node.data, chosenVersion: v } };
 }
 
+/** Pin (or unpin) a version so it sorts first and is never lost. */
+export function setVersionPinned(node: StoryNode, v: number, pinned: boolean): StoryNode {
+  if (node.kind !== 'page' || node.data.kind !== 'page') {
+    throw new Error('setVersionPinned requires a page node');
+  }
+  if (v < 1 || v > node.data.versions.length) throw new Error(`version ${v} out of range`);
+  const versions = node.data.versions.map((version) =>
+    version.v === v ? { ...version, pinned: pinned || undefined } : version,
+  );
+  return { ...node, data: { ...node.data, versions } };
+}
+
+/** Attach (or replace) the living cast snapshot on a page node. */
+export function attachBible(node: StoryNode, bible: StoryBible): StoryNode {
+  if (node.kind !== 'page' || node.data.kind !== 'page') {
+    throw new Error('attachBible requires a page node');
+  }
+  return { ...node, data: { ...node.data, bible } };
+}
+
+/** Attach (or replace) the rolling story summary on a page node. */
+export function attachSummary(node: StoryNode, summary: string): StoryNode {
+  if (node.kind !== 'page' || node.data.kind !== 'page') {
+    throw new Error('attachSummary requires a page node');
+  }
+  return { ...node, data: { ...node.data, summary } };
+}
+
+/** The most recent cast snapshot along the chosen path (frontier → root). */
+export function latestBible(
+  nodes: Record<string, StoryNode>,
+  book: Book,
+): { bible: StoryBible; pageNumber: number } | null {
+  return bibleUpTo(nodes, book.frontierId);
+}
+
+/**
+ * The most recent cast snapshot at or before the given node along its path.
+ * When pageNodeId is a page, that page's own bible counts ("up to this page").
+ * Returns the carrying node's id too, so edits can be saved back to it.
+ */
+export function bibleUpTo(
+  nodes: Record<string, StoryNode>,
+  pageNodeId: string,
+): { bible: StoryBible; pageNumber: number; nodeId: string } | null {
+  const path = pathToRoot(nodes, pageNodeId);
+  let found: { bible: StoryBible; pageNumber: number; nodeId: string } | null = null;
+  let pageNumber = 0;
+  for (const node of path) {
+    if (node.kind === 'page') pageNumber++;
+    if (node.data.kind === 'page' && node.data.bible) {
+      found = { bible: node.data.bible, pageNumber, nodeId: node.id };
+    }
+  }
+  return found;
+}
+
+/**
+ * The most recent rolling summary at or before the given node along its path.
+ * When pageNodeId is a page, that page's own summary counts ("as of this page").
+ * Returns the carrying node's id too, so it can be inspected or replaced.
+ */
+export function summaryUpTo(
+  nodes: Record<string, StoryNode>,
+  pageNodeId: string,
+): { summary: string; pageNumber: number; nodeId: string } | null {
+  const path = pathToRoot(nodes, pageNodeId);
+  let found: { summary: string; pageNumber: number; nodeId: string } | null = null;
+  let pageNumber = 0;
+  for (const node of path) {
+    if (node.kind === 'page') pageNumber++;
+    if (
+      node.data.kind === 'page' &&
+      typeof node.data.summary === 'string' &&
+      node.data.summary.trim().length > 0
+    ) {
+      found = { summary: node.data.summary, pageNumber, nodeId: node.id };
+    }
+  }
+  return found;
+}
+
+/**
+ * The tip of a branch: walk down from a node, always taking the most recently
+ * created child, until there are none. Used to re-enter any proposed title at
+ * wherever writing last stopped under it.
+ */
+export function branchTip(nodes: Record<string, StoryNode>, rootId: string): StoryNode {
+  let node = getNode(nodes, rootId);
+  if (!node) throw new Error(`branchTip: node ${rootId} is missing from the tree`);
+  const seen = new Set<string>();
+  for (;;) {
+    const children = childrenOf(nodes, node.id);
+    const next = children[children.length - 1];
+    if (!next || seen.has(next.id)) return node;
+    seen.add(node.id);
+    node = next;
+  }
+}
+
+/** Replace the book's standing rules (persist until removed). */
+export function setBookRules(book: Book, rules: string[]): Book {
+  return { ...book, rules, updatedAt: Date.now() };
+}
+
 export function appendTitleOptions(seedNode: StoryNode, titles: TitleOption[]): StoryNode {
   if (seedNode.kind !== 'seed' || seedNode.data.kind !== 'seed') {
     throw new Error('appendTitleOptions requires a seed node');
@@ -260,6 +396,7 @@ export function makeBook(seedNodeId: string, titleNodeId: string, model: string)
     frontierId: titleNodeId,
     status: 'in-progress',
     model,
+    rules: [],
     createdAt: now,
     updatedAt: now,
   };

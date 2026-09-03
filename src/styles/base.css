@@ -8,6 +8,12 @@
 
 html {
   color-scheme: dark;
+  font-size: calc(16px * var(--font-scale, 1));
+}
+
+:root[data-theme='sepia'],
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 body {
@@ -35,7 +41,7 @@ body {
   gap: 1.25rem;
   padding: 0.7rem 1.1rem;
   border-bottom: 1px solid var(--line);
-  background: rgb(20 16 14 / 0.9);
+  background: var(--chrome);
   backdrop-filter: blur(6px);
   position: sticky;
   top: 0;

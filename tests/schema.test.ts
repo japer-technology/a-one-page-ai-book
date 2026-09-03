@@ -107,6 +107,267 @@ describe('defaultLibrary', () => {
     const lib = defaultLibrary();
     expect(lib.books).toEqual([]);
     expect(lib.nodes).toEqual({});
-    expect(lib.schemaVersion).toBe(1);
+    expect(lib.schemaVersion).toBe(6);
+    expect(lib.settings.autoBible).toBe(true);
+    expect(lib.settings.autoSummary).toBe(true);
+    expect(lib.settings.autoSuggest).toBe(false);
+  });
+});
+
+describe('schema v2 fields', () => {
+  it('normalizes turn inputs with emotion dials and chapter intent', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {
+        t: {
+          id: 't',
+          kind: 'turn',
+          parentId: null,
+          createdAt: 1,
+          data: {
+            kind: 'turn',
+            input: {
+              direction: 'go',
+              length: 'longer',
+              tone: 'funnier',
+              ending: true,
+              emotions: { dread: 9, joy: -2, bogus: 4 },
+              chapter: 'start',
+            },
+          },
+        },
+      },
+    });
+    const input = lib.nodes.t?.data;
+    expect(input && input.kind === 'turn' ? input.input : null).toEqual({
+      direction: 'go',
+      length: 'longer',
+      sizeTarget: null,
+      tone: 'funnier',
+      ending: true,
+      emotions: { dread: 3, joy: -2 }, // clamped; bogus dropped; 0s dropped
+      chapter: 'start',
+      document: 'story',
+    });
+  });
+
+  it('tolerates old turn inputs without emotions or chapter', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {
+        t: {
+          id: 't',
+          kind: 'turn',
+          parentId: null,
+          createdAt: 1,
+          data: { kind: 'turn', input: { direction: 'old', length: 'standard', tone: 'inherit' } },
+        },
+      },
+    });
+    const input = lib.nodes.t?.data;
+    expect(input && input.kind === 'turn' ? input.input : null).toMatchObject({
+      emotions: {},
+      chapter: 'none',
+    });
+  });
+
+  it('keeps page bible snapshots and fills default book rules', () => {
+    const raw = goodLibrary();
+    const pageId = raw.books[0]!.frontierId;
+    const page = raw.nodes[pageId]!;
+    page.data = {
+      ...page.data,
+      kind: 'page',
+      bible: {
+        people: [{ name: 'K', note: 'keeper' }],
+        places: [],
+        things: [],
+        at: 1,
+        updatedAt: 2,
+      },
+    } as never;
+    delete (raw.books[0] as { rules?: unknown }).rules;
+    const lib = normalizeLibrary(raw);
+    expect(lib.books[0]?.rules).toEqual([]);
+    const normalizedPage = lib.nodes[pageId]?.data;
+    expect(
+      normalizedPage && normalizedPage.kind === 'page' && normalizedPage.bible?.people[0]?.name,
+    ).toBe('K');
+  });
+
+  it('carries rules and writing toggles through normalization', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: { autoBible: false, autoSuggest: true },
+    });
+    expect(lib.settings.autoBible).toBe(false);
+    expect(lib.settings.autoSuggest).toBe(true);
+    const raw = goodLibrary();
+    raw.books[0]!.rules = ['  ', 'Don’t reveal the letter'];
+    const withRules = normalizeLibrary(raw);
+    expect(withRules.books[0]?.rules).toEqual(['Don’t reveal the letter']);
+  });
+});
+
+describe('schema v3 fields', () => {
+  it('normalizes precise page-size targets', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {
+        t: {
+          id: 't',
+          kind: 'turn',
+          parentId: null,
+          createdAt: 1,
+          data: { kind: 'turn', input: { sizeTarget: { kind: 'words', value: 412.7 } } },
+        },
+      },
+    });
+    const input = lib.nodes.t?.data;
+    expect(input && input.kind === 'turn' ? input.input.sizeTarget : null).toEqual({
+      kind: 'words',
+      value: 413,
+    });
+    const bad = normalizeLibrary({
+      books: [],
+      nodes: {
+        t: {
+          id: 't',
+          kind: 'turn',
+          parentId: null,
+          createdAt: 1,
+          data: { kind: 'turn', input: { sizeTarget: { kind: 'pixels', value: 5 } } },
+        },
+      },
+    });
+    const badInput = bad.nodes.t?.data;
+    expect(badInput && badInput.kind === 'turn' ? badInput.input.sizeTarget : null).toBeNull();
+  });
+
+  it('carries seed briefs and turn templates through normalization', () => {
+    const raw = goodLibrary();
+    const seed = Object.values(raw.nodes).find((n) => n.kind === 'seed');
+    if (seed && seed.data.kind === 'seed') seed.data.brief = 'A quiet gothic mystery.';
+    const lib = normalizeLibrary({
+      ...raw,
+      settings: {
+        templates: [{ name: 'noir sting', input: { tone: 'darker', emotions: { dread: 2 } } }],
+      },
+    });
+    const normSeed = Object.values(lib.nodes).find((n) => n.kind === 'seed');
+    expect(normSeed && normSeed.data.kind === 'seed' ? normSeed.data.brief : '').toBe(
+      'A quiet gothic mystery.',
+    );
+    expect(lib.settings.templates).toHaveLength(1);
+    expect(lib.settings.templates[0]?.name).toBe('noir sting');
+    expect(lib.settings.templates[0]?.input.emotions.dread).toBe(2);
+    // Templates from files without a sizeTarget still normalize safely.
+    const plain = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: { templates: [{ name: 'old', input: { direction: 'x' } }] },
+    });
+    expect(plain.settings.templates[0]?.input.sizeTarget).toBeNull();
+  });
+
+  it('fills the threads group for bibles saved before it existed', () => {
+    const raw = goodLibrary();
+    const pageId = raw.books[0]!.frontierId;
+    const page = raw.nodes[pageId]!;
+    page.data = {
+      ...page.data,
+      kind: 'page',
+      bible: { people: [], places: [], things: [], at: 1, updatedAt: 2 },
+    } as never;
+    const lib = normalizeLibrary(raw);
+    const data = lib.nodes[pageId]?.data;
+    expect(data && data.kind === 'page' ? data.bible?.threads : undefined).toEqual([]);
+  });
+});
+
+describe('schema v4 fields', () => {
+  it('normalizes appearance, fast model and onboarding state', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: { theme: 'sepia', fontScale: 1.2, fastModel: ' tiny-1b ', seenOnboarding: true },
+    });
+    expect(lib.settings.theme).toBe('sepia');
+    expect(lib.settings.fontScale).toBe(1.2);
+    expect(lib.settings.fastModel).toBe('tiny-1b');
+    expect(lib.settings.seenOnboarding).toBe(true);
+    const clamped = normalizeLibrary({ books: [], nodes: {}, settings: { fontScale: 9 } });
+    expect(clamped.settings.fontScale).toBeLessThanOrEqual(1.4);
+    expect(clamped.settings.fontScale).toBeGreaterThanOrEqual(0.8);
+    const fresh = normalizeLibrary({ books: [], nodes: {} });
+    expect(fresh.settings.theme).toBe('dark');
+    expect(fresh.settings.seenOnboarding).toBe(false);
+  });
+
+  it('round-trips pinned versions', () => {
+    const raw = goodLibrary();
+    const pageId = raw.books[0]!.frontierId;
+    const page = raw.nodes[pageId]!;
+    if (page.data.kind === 'page') page.data.versions[0]!.pinned = true;
+    const lib = normalizeLibrary(raw);
+    const data = lib.nodes[pageId]?.data;
+    expect(data && data.kind === 'page' ? data.versions[0]?.pinned : false).toBe(true);
+  });
+});
+
+describe('schema v5 fields', () => {
+  it('normalizes reading positions and document formats', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {
+        t: {
+          id: 't',
+          kind: 'turn',
+          parentId: null,
+          createdAt: 1,
+          data: { kind: 'turn', input: { document: 'letter' } },
+        },
+      },
+      settings: { readingPositions: { b1: 4, bad: 'x' } },
+    });
+    const input = lib.nodes.t?.data;
+    expect(input && input.kind === 'turn' ? input.input.document : 'story').toBe('letter');
+    expect(lib.settings.readingPositions).toEqual({ b1: 4 });
+    const fresh = normalizeLibrary({ books: [], nodes: {} });
+    expect(fresh.settings.readingPositions).toEqual({});
+  });
+});
+
+describe('schema v6 fields', () => {
+  it('carries the rolling story summary through normalization and drops junk', () => {
+    const raw = goodLibrary();
+    const pageId = raw.books[0]!.frontierId;
+    const page = raw.nodes[pageId]!;
+    page.data = {
+      ...page.data,
+      kind: 'page',
+      summary: 'The keeper finds a letter; a storm gathers.',
+    } as never;
+    const lib = normalizeLibrary(raw);
+    const data = lib.nodes[pageId]?.data;
+    expect(data && data.kind === 'page' ? data.summary : undefined).toBe(
+      'The keeper finds a letter; a storm gathers.',
+    );
+    // (re-read the raw node: the previous `as never` cast poisons the type)
+    const pageAgain = raw.nodes[pageId]!;
+    pageAgain.data = { ...pageAgain.data, kind: 'page', summary: 42 } as never;
+    const dropped = normalizeLibrary(raw);
+    const droppedData = dropped.nodes[pageId]?.data;
+    expect(
+      droppedData && droppedData.kind === 'page' ? droppedData.summary : undefined,
+    ).toBeUndefined();
+  });
+
+  it('defaults the summary toggle on and preserves an explicit off', () => {
+    const fresh = normalizeLibrary({ books: [], nodes: {} });
+    expect(fresh.settings.autoSummary).toBe(true);
+    const off = normalizeLibrary({ books: [], nodes: {}, settings: { autoSummary: false } });
+    expect(off.settings.autoSummary).toBe(false);
   });
 });
