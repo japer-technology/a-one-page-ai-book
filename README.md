@@ -10,7 +10,8 @@ every version, every decision is remembered as a **branchable tree** — and the
 files, and never talks to a cloud.
 
 > The full product vision: [docs/PRODUCT.md](docs/PRODUCT.md) · The engineering deep-dive:
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · The author's guide (every control, every best
+> practice): [docs/AUTHORING.md](docs/AUTHORING.md)
 
 [![CI](https://github.com/thefederation/a-one-page-ai-book/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -125,7 +126,7 @@ exported as JSON at any time, and the only place your words ever travel is the l
 ├── build/            build pipeline (esbuild inliner + dev server)
 ├── src/              application source (core / llm / store / ui / styles)
 ├── tests/            unit tests
-├── docs/             PRODUCT.md (vision) · ARCHITECTURE.md (engineering)
+├── docs/             PRODUCT.md (vision) · ARCHITECTURE.md (engineering) · AUTHORING.md (the author's guide)
 ├── dist/             build output (gitignored; CI publishes the artifact)
 └── .github/          CI workflow + issue templates
 ```
