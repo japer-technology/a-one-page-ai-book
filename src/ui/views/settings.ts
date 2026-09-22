@@ -339,7 +339,7 @@ export function renderSettings(api: AppApi): HTMLElement {
                 v === (api.lib.settings.documentFonts?.[format as never] ?? 'auto')
                   ? true
                   : undefined,
-              text: flabel,
+              text: v === 'auto' && format === 'mapnote' ? 'auto (monospace)' : flabel,
             }),
           ),
         ),

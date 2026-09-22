@@ -859,14 +859,7 @@ class App implements AppApi {
     root.dataset.theme = theme;
     root.dataset.font = settings.readingFont;
     root.style.setProperty('--font-scale', String(settings.fontScale));
-    // The document wardrobe: per-format typography (auto = the reading font).
-    const FONT_STACKS: Record<string, string> = {
-      georgia: "Georgia, 'Iowan Old Style', serif",
-      palatino: "'Palatino Linotype', Palatino, 'Book Antiqua', serif",
-      charter: "Charter, 'Bitstream Charter', 'Sitka Text', Georgia, serif",
-      serif: 'ui-serif, Georgia, serif',
-      sans: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
-    };
+    // Share the reading font stacks with the per-format document wardrobe.
     for (const format of ['story', 'letter', 'diary', 'newspaper', 'mapnote', 'recipe']) {
       const choice =
         settings.documentFonts?.[format as keyof typeof settings.documentFonts] ?? 'auto';
@@ -876,7 +869,7 @@ class App implements AppApi {
           ? format === 'mapnote'
             ? 'var(--mono)' // map notes default to monospace, matching the CSS
             : 'var(--serif)'
-          : (FONT_STACKS[choice] ?? 'var(--serif)'),
+          : `var(--font-${choice}, var(--serif))`,
       );
     }
   }
