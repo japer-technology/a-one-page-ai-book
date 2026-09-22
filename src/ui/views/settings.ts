@@ -357,7 +357,7 @@ export function renderSettings(api: AppApi): HTMLElement {
   }
   const readingFontSelect = h(
     'select',
-    { class: 'input' },
+    { class: 'input', id: 'reading-font' },
     ...[
       ['georgia', 'Georgia — the classic'],
       ['palatino', 'Palatino — literary'],
