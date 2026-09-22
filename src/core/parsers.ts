@@ -72,8 +72,20 @@ function repairTrailingCommas(text: string): string {
 
 function firstBalanced(text: string): string | null {
   const starts: Array<{ index: number; open: string; close: string }> = [];
+  let inString = false;
+  let escaped = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
     if (ch === '{' || ch === '[')
       starts.push({ index: i, open: ch, close: ch === '{' ? '}' : ']' });
   }
@@ -220,6 +232,8 @@ export function parseBible(text: string, previous: StoryBible | null = null): St
     places: previous?.places ?? [],
     things: previous?.things ?? [],
     threads: previous?.threads ?? [],
+    relations: previous?.relations ?? [],
+    summary: previous?.summary ?? '',
   };
   let raw: unknown = null;
   try {
@@ -257,11 +271,61 @@ export function parseBible(text: string, previous: StoryBible | null = null): St
   const places = entries('places').slice(0, caps.places);
   const things = entries('things').slice(0, caps.things);
   const threads = entries('threads').slice(0, caps.threads);
+  const relations = parseRelations(object.relations, base.relations);
+  const summary =
+    typeof object.summary === 'string' && object.summary.trim().length > 0
+      ? object.summary.trim()
+      : base.summary;
   if (people.length === 0 && places.length === 0 && things.length === 0) {
     if (previous) return { ...base, at: previous.at, updatedAt: Date.now() };
     throw new Error('The model returned an empty cast — try again.');
   }
-  return { people, places, things, threads, at: previous?.at ?? 1, updatedAt: Date.now() };
+  return {
+    people,
+    places,
+    things,
+    threads,
+    relations,
+    summary,
+    at: previous?.at ?? 1,
+    updatedAt: Date.now(),
+  };
+}
+
+/** Parse relationship triples: [{"from","to","kind"}] or ["A — B — kind"]. */
+function parseRelations(raw: unknown, previous: StoryBible['relations']): StoryBible['relations'] {
+  if (!Array.isArray(raw)) return previous;
+  const out: StoryBible['relations'] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const [from, kind, to] = item.split(/\s*[—–-]\s*/);
+      if (from?.trim() && to?.trim() && kind?.trim()) {
+        pushRelation(out, seen, { from: from.trim(), to: to.trim(), kind: kind.trim() });
+      }
+      continue;
+    }
+    if (item && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      const from = typeof record.from === 'string' ? record.from.trim() : '';
+      const to = typeof record.to === 'string' ? record.to.trim() : '';
+      const kind = typeof record.kind === 'string' ? record.kind.trim() : '';
+      if (from && to && kind) pushRelation(out, seen, { from, to, kind });
+    }
+  }
+  return out.length > 0 ? out : previous;
+}
+
+function pushRelation(
+  out: StoryBible['relations'],
+  seen: Set<string>,
+  r: StoryBible['relations'][number],
+): void {
+  // Ordered key: "A mentors B" and "B mentors A" are different relationships.
+  const key = `${r.from.toLowerCase()}\u0000${r.to.toLowerCase()}\u0000${r.kind.toLowerCase()}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  out.push(r);
 }
 
 function coerceEntries(list: unknown[]): BibleEntry[] {

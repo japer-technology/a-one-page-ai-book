@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { crc32, epubBytes, moodLine } from '../src/core/epub';
+import { crc32 } from '../src/core/zip';
+import { epubBytes, moodLine } from '../src/core/epub';
 import type { CompiledBook } from '../src/core/compile';
 
 function book(): CompiledBook {
@@ -22,6 +23,8 @@ function book(): CompiledBook {
       places: [],
       things: [],
       threads: [{ name: "the letter's sender", note: '' }],
+      relations: [],
+      summary: '',
       at: 2,
       updatedAt: 1,
     },
@@ -64,5 +67,28 @@ describe('epubBytes', () => {
     expect(text).toContain('A &lt;Sharp&gt; &amp; &quot;Odd&quot; Title');
     expect(text).toContain('First page.');
     expect(moodLine(b)).toContain('1🕳️+2');
+  });
+
+  it('does not let the prologue shift page labels and moods by one', () => {
+    const b = book();
+    b.pages.unshift({
+      number: 0,
+      kind: 'prologue',
+      text: 'The page zero that knew.',
+      words: 5,
+      mood: { icon: '✨', label: 'wonder', value: 1 },
+    });
+    const bytes = epubBytes(b);
+    const text = new TextDecoder().decode(bytes);
+    expect(text).toContain('OEBPS/p0.xhtml');
+    expect(text).toContain('OEBPS/p1.xhtml');
+    // Page 1 keeps its own page label and its own mood — not the prologue's.
+    expect(text).toContain('Page 1 · 🕳️ dread +2');
+    expect(text).not.toContain('Page 1 · ✨ wonder +1');
+    // The prologue entry labels itself as the prologue (header and heading).
+    expect(text).toContain('<title>Prologue</title>');
+    // The mood map ignores page zero (like compile.ts does).
+    expect(moodLine(b)).toContain('1🕳️+2');
+    expect(moodLine(b)).not.toContain('0✨');
   });
 });

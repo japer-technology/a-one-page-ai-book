@@ -4,7 +4,7 @@
  * so later the book can be re-entered from any of them.
  */
 import type { AppApi } from '../ctx';
-import { button, h, spinner } from '../dom';
+import { button, h, pruneMap, spinner } from '../dom';
 import { parseTitleOptions } from '../../core/parsers';
 import { titlesMessages } from '../../core/prompt';
 import { getNode } from '../../core/tree';
@@ -15,6 +15,8 @@ const selection = new Map<string, { index: number; edited: string }>();
 const busy = new Map<string, { token: number; error: string | null }>();
 
 export function renderTitles(api: AppApi): HTMLElement {
+  pruneMap(selection, 60);
+  pruneMap(busy, 60);
   const seedId = api.params.seed ?? '';
   const seedNode = seedId ? getNode(api.nodes, seedId) : null;
   if (!seedNode || seedNode.data.kind !== 'seed') {
@@ -86,7 +88,9 @@ export function renderTitles(api: AppApi): HTMLElement {
               ? { title: sel.edited.trim(), tagline: chosen.tagline }
               : chosen;
           api.pickTitle(seedId, option);
-          api.navigate('page', { auto: '1' });
+          // Page one deserves a turn too: the title is the first decision,
+          // and how page one begins is the next one.
+          api.navigate('turn', { from: api.book?.chosenTitleId ?? seedId });
         },
         sel.index >= 0 ? 'primary' : 'ghost',
         { disabled: sel.index < 0 },
@@ -160,12 +164,27 @@ async function generate(
       model: fast || api.lib.settings.endpoint.model,
     });
     if (api.staleGen(token)) {
-      busy.delete(seedId);
+      if (busy.get(seedId)?.token === token) busy.delete(seedId);
       return;
     }
     const parsed = parseTitleOptions(raw);
     if (parsed.length === 0) throw new Error('The model returned no titles');
-    api.appendTitles(seedId, parsed.slice(0, 5));
+    // "Propose 5 more" can overlap earlier batches: never list the same
+    // title twice (the proposal list persists on the seed node).
+    const seedNow = getNode(api.nodes, seedId);
+    const existing = new Set(
+      seedNow && seedNow.data.kind === 'seed'
+        ? seedNow.data.titles.map((t) => t.title.trim().toLowerCase())
+        : [],
+    );
+    const fresh = parsed
+      .slice(0, 5)
+      .filter((option) => !existing.has(option.title.trim().toLowerCase()));
+    if (fresh.length === 0) {
+      api.toast('No new titles this time — propose again for a fresh batch', 'info');
+    } else {
+      api.appendTitles(seedId, fresh);
+    }
     busy.delete(seedId);
     const sel = selection.get(seedId);
     if (sel && !append) {
@@ -174,6 +193,9 @@ async function generate(
     }
     api.refresh();
   } catch (err) {
+    // Only touch the busy entry if it still belongs to THIS request — a
+    // superseded generation must not clear the newer one's spinner.
+    if (busy.get(seedId)?.token !== token) return;
     busy.delete(seedId);
     if (api.staleGen(token)) return;
     busy.set(seedId, { token, error: api.genError(err) });

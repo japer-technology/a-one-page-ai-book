@@ -10,15 +10,18 @@ import type {
   EndpointSettings,
   Library,
   SeedOptions,
+  Settings,
   StoryBible,
   StoryNode,
   TitleOption,
   TurnInput,
 } from './core/types';
+import { DEFAULT_TURN } from './core/types';
 import {
   addNode,
   appendPageVersion,
   appendTitleOptions,
+  appendVersionTo,
   attachBible,
   attachSummary,
   branchTip,
@@ -29,6 +32,7 @@ import {
   titleOf,
   makeEndingNode,
   makePageNode,
+  makePrologueNode,
   makeSeedNode,
   makeTitleNode,
   makeTurnNode,
@@ -38,12 +42,18 @@ import {
   setFrontier,
   setVersionPinned,
   cloneSubtree,
+  prologueOf,
 } from './core/tree';
-import { defaultLibrary, emptySeedOptions, normalizeLibrary } from './core/schema';
-import { chat, chatJSON } from './llm/client';
+import {
+  defaultLibrary,
+  emptySeedOptions,
+  normalizeBookBundle,
+  normalizeLibrary,
+} from './core/schema';
+import { chat, chatJSON, isTransientLLMError } from './llm/client';
 import { compileBook } from './core/compile';
 import { loadLibrary, requestPersistence, saveLibrary } from './store/db';
-import { readOpfsLibrary, writeOpfsLibrary } from './store/files';
+import { readOpfsLibrary, writeMdLibrary, writeOpfsLibrary } from './store/files';
 import { newId } from './core/id';
 import type { AppApi, ToastKind, ViewName } from './ui/ctx';
 import { renderShell, renderToastStack, type Toast } from './ui/shell';
@@ -55,10 +65,11 @@ import { maybeAutoGenerate, renderTitles } from './ui/views/titles';
 import { clearSpanToolbar, renderPage } from './ui/views/page';
 import { renderTurn } from './ui/views/turn';
 import { renderSettings } from './ui/views/settings';
-import { renderReader } from './ui/views/reader';
+import { renderReader, stopReaderSpeech } from './ui/views/reader';
 import { renderTheEnd } from './ui/views/theend';
-import { renderArchive } from './ui/views/archive';
+import { renderArchive, stopReplay } from './ui/views/archive';
 import { renderAbout } from './ui/views/about';
+import { renderHelp } from './ui/views/help';
 
 interface AppState {
   lib: Library;
@@ -70,6 +81,7 @@ interface AppState {
   renderCount: number;
   abort: AbortController | null;
   controllers: Set<AbortController>;
+  activeRequests: number;
 }
 
 /**
@@ -92,6 +104,7 @@ const HASH_VIEWS: ReadonlySet<string> = new Set([
   'theend',
   'archive',
   'about',
+  'help',
 ]);
 
 function viewFromHash(): ViewName | null {
@@ -117,6 +130,7 @@ class App implements AppApi {
       renderCount: 0,
       abort: null,
       controllers: new Set(),
+      activeRequests: 0,
     };
   }
 
@@ -141,6 +155,8 @@ class App implements AppApi {
   navigate(view: ViewName, params: Record<string, string> = {}): void {
     audit(`navigate→${view}`);
     clearSpanToolbar();
+    stopReplay();
+    stopReaderSpeech();
     this.abortGeneration();
     this.state.view = view;
     this.state.params = params;
@@ -190,6 +206,17 @@ class App implements AppApi {
 
   update(recipe: (lib: Library) => Library): void {
     this.state.lib = recipe(this.state.lib);
+    // The living shelf: every mutation marks today in the activity calendar
+    // (streaks), and every new page/version nudges the backup meter.
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      this.state.lib.settings.activityDays = {
+        ...this.state.lib.settings.activityDays,
+        [today]: (this.state.lib.settings.activityDays[today] ?? 0) + 1,
+      };
+    } catch {
+      // activity tracking is best-effort
+    }
     // Book mutations replace the Book object inside lib.books (new frontier,
     // status, …). Keep the session's open-book pointer in sync, or views would
     // render against a stale frontier — the classic "generated but nothing
@@ -238,16 +265,33 @@ class App implements AppApi {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
     const armed = this.armGeneration(opts.parallel === true);
-    return chat(
-      {
-        endpoint,
-        model,
-        temperature: endpoint.temperature,
-        signal: armed.controller.signal,
-        onToken: opts.onToken,
-      },
-      messages,
-    ).finally(() => this.disarmGeneration(armed));
+    this.state.activeRequests++;
+    this.renderActiveState();
+    return this.withRetry(
+      () =>
+        chat(
+          {
+            endpoint,
+            model,
+            temperature: endpoint.temperature,
+            signal: armed.controller.signal,
+            onToken: opts.onToken,
+          },
+          messages,
+        ),
+      endpoint.baseUrl,
+      armed.controller.signal,
+    )
+      .catch((err) => {
+        // Surface a notice AND rethrow — views still get their retry panels.
+        this.toast(this.genError(err), 'error');
+        throw err;
+      })
+      .finally(() => {
+        this.state.activeRequests = Math.max(0, this.state.activeRequests - 1);
+        this.disarmGeneration(armed);
+        this.renderActiveState();
+      });
   }
 
   generateJSON<T>(
@@ -257,10 +301,59 @@ class App implements AppApi {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
     const armed = this.armGeneration(opts.parallel === true);
-    return chatJSON<T>(
-      { endpoint, model, temperature: endpoint.temperature, signal: armed.controller.signal },
-      messages,
-    ).finally(() => this.disarmGeneration(armed));
+    this.state.activeRequests++;
+    this.renderActiveState();
+    return this.withRetry(
+      () =>
+        chatJSON<T>(
+          { endpoint, model, temperature: endpoint.temperature, signal: armed.controller.signal },
+          messages,
+        ),
+      endpoint.baseUrl,
+      armed.controller.signal,
+    )
+      .catch((err) => {
+        // Surface a notice AND rethrow — views still get their retry panels.
+        this.toast(this.genError(err), 'error');
+        throw err;
+      })
+      .finally(() => {
+        this.state.activeRequests = Math.max(0, this.state.activeRequests - 1);
+        this.disarmGeneration(armed);
+        this.renderActiveState();
+      });
+  }
+
+  /**
+   * One automatic retry for connection hiccups. Deliberately skipped when the
+   * request was aborted or timed out: the signal is dead, so a retry would
+   * fail instantly with a misleading "cancelled" error.
+   */
+  private async withRetry<T>(
+    fn: () => Promise<T>,
+    baseUrl: string,
+    signal: AbortSignal,
+  ): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (signal.aborted || !isTransientLLMError(err)) throw err;
+      audit(`withRetry retrying against ${baseUrl}`);
+      this.toast('The local server hiccuped — retrying once…', 'info');
+      return fn();
+    }
+  }
+
+  /** Update ONLY the header's working light (never a full re-render). */
+  private renderActiveState(): void {
+    if (typeof document === 'undefined') return;
+    const chip = document.getElementById('nav-working');
+    if (!chip) return;
+    chip.style.display = this.state.activeRequests > 0 ? '' : 'none';
+  }
+
+  genActive(): number {
+    return this.state.activeRequests;
   }
 
   /**
@@ -353,15 +446,155 @@ class App implements AppApi {
 
   pickTitle(seedNodeId: string, option: TitleOption): Book {
     audit(`pickTitle seed=${seedNodeId}`);
-    const titleNode = makeTitleNode(seedNodeId, option);
+    // Reuse (or create) ONE title node per distinct title — and ONE book per
+    // seed. Re-picking a title after walking back used to spawn duplicate
+    // title nodes AND duplicate books on the shelf.
+    const titleNode = this.ensureTitleNode(seedNodeId, option);
+    const existing = this.state.lib.books.find((b) => b.seedNodeId === seedNodeId);
+    if (existing) {
+      // The seed already has a book: re-entering through the titles moves
+      // the frontier onto this title instead of duplicating the book.
+      const book: Book = {
+        ...setFrontier(existing, titleNode.id),
+        chosenTitleId: titleNode.id,
+        status: 'in-progress',
+      };
+      this.state.book = book;
+      this.update((lib) => ({ ...lib, books: replaceBook(lib, book) }));
+      return book;
+    }
     const book = makeBook(seedNodeId, titleNode.id, this.state.lib.settings.endpoint.model);
     this.state.book = book;
+    this.update((lib) => ({ ...lib, books: [...lib.books, book] }));
+    return book;
+  }
+
+  markExported(): void {
     this.update((lib) => ({
       ...lib,
-      nodes: addNode(lib.nodes, titleNode),
-      books: [...lib.books, book],
+      settings: {
+        ...lib.settings,
+        exportMeter: { lastExportAt: Date.now(), pages: 0 },
+      },
     }));
-    return book;
+  }
+
+  setTags(book: Book, tags: string[]): void {
+    this.update((lib) => ({
+      ...lib,
+      books: replaceBook(lib, {
+        ...book,
+        tags: [...new Set(tags.map((t) => t.trim()).filter(Boolean))],
+        updatedAt: Date.now(),
+      }),
+    }));
+  }
+
+  writePrologue(book: Book, text: string, model: string): void {
+    const existing = prologueOf(this.state.lib.nodes, book);
+    this.update((lib) => {
+      if (existing && lib.nodes[existing.id]) {
+        return {
+          ...lib,
+          nodes: { ...lib.nodes, [existing.id]: appendVersionTo(existing, text, 'ai', model) },
+        };
+      }
+      const node = makePrologueNode(book.chosenTitleId, DEFAULT_TURN, model, text);
+      return { ...lib, nodes: addNode(lib.nodes, node) };
+    });
+  }
+
+  setIronMode(book: Book, mode: 'none' | 'three' | 'iron'): void {
+    this.update((lib) => ({
+      ...lib,
+      books: replaceBook(lib, { ...book, ironMode: mode, updatedAt: Date.now() }),
+    }));
+    this.toast(
+      mode === 'iron'
+        ? '⚔ Iron Author: no re-rolls — the page is final'
+        : mode === 'three'
+          ? '⚔ Three strikes: three re-rolls per page'
+          : 'Normal mode: unlimited re-rolls',
+      'info',
+    );
+  }
+
+  savePortrait(book: Book, text: string): void {
+    this.update((lib) => {
+      const node = getNode(lib.nodes, book.frontierId);
+      if (!node || node.kind !== 'ending' || node.data.kind !== 'ending') return lib;
+      return {
+        ...lib,
+        nodes: { ...lib.nodes, [node.id]: { ...node, data: { ...node.data, portrait: text } } },
+      };
+    });
+  }
+
+  async importDropped(payload: unknown): Promise<void> {
+    try {
+      if (
+        payload &&
+        typeof payload === 'object' &&
+        (payload as { format?: unknown }).format === 'page-turn-book'
+      ) {
+        const { book, nodes } = normalizeBookBundle(payload);
+        const duplicate = this.state.lib.books.some(
+          (b) => b.seedNodeId === book.seedNodeId || b.id === book.id,
+        );
+        if (
+          duplicate &&
+          !window.confirm('This book is already on the shelf — import a copy anyway?')
+        )
+          return;
+        // Shared ids corrupt the tree: if the incoming nodes collide with
+        // anything on the shelf (or this is a deliberate copy), clone the
+        // subtree to fresh ids so the imported book is fully independent.
+        let incomingBook = book;
+        let incomingNodes = nodes;
+        const collides = Object.keys(incomingNodes).some((id) => id in this.state.lib.nodes);
+        if (duplicate || collides) {
+          const clone = cloneSubtree(incomingNodes, book.seedNodeId);
+          incomingNodes = clone.nodes;
+          incomingBook = {
+            ...book,
+            id: newId(),
+            seedNodeId: clone.rootId,
+            chosenTitleId: clone.remap.get(book.chosenTitleId) ?? clone.rootId,
+            frontierId: clone.remap.get(book.frontierId) ?? clone.rootId,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+        }
+        this.update((lib) => ({
+          ...lib,
+          nodes: { ...incomingNodes, ...lib.nodes },
+          books: [...lib.books, incomingBook],
+        }));
+        this.toast('Dropped book added to the shelf', 'success');
+        this.navigate('library');
+        return;
+      }
+      const lib = normalizeLibrary(payload);
+      if (
+        lib.books.length === 0 ||
+        window.confirm(
+          'Import ' +
+            lib.books.length +
+            ' book(s) from the dropped file? It will REPLACE the current library.',
+        )
+      ) {
+        this.update(() => lib);
+        this.toast(
+          lib.books.length > 0
+            ? 'Imported ' + lib.books.length + ' book(s)'
+            : 'Imported an empty library',
+          'success',
+        );
+        this.navigate('library');
+      }
+    } catch (err) {
+      this.toast(err instanceof Error ? err.message : 'That file is not a Page Turn file', 'error');
+    }
   }
 
   attachPage(
@@ -378,11 +611,29 @@ class App implements AppApi {
       ...lib,
       nodes: addNode(lib.nodes, node),
       books: replaceBook(lib, setFrontier(book, node.id)),
+      settings: {
+        ...lib.settings,
+        exportMeter: {
+          ...lib.settings.exportMeter,
+          pages: (lib.settings.exportMeter.pages ?? 0) + 1,
+        },
+      },
     }));
     return node;
   }
 
   appendVersion(pageId: string, text: string, by: 'ai' | 'user', model?: string): void {
+    // Backup nudge: every new version is new writing worth protecting.
+    this.update((lib) => ({
+      ...lib,
+      settings: {
+        ...lib.settings,
+        exportMeter: {
+          ...lib.settings.exportMeter,
+          pages: (lib.settings.exportMeter.pages ?? 0) + 1,
+        },
+      },
+    }));
     this.update((lib) => {
       const node = getNode(lib.nodes, pageId);
       if (!node || node.kind !== 'page') return lib;
@@ -446,6 +697,10 @@ class App implements AppApi {
         status: 'in-progress', // walking back re-opens the book for branching
       }),
     }));
+    // Sync the session's open-book pointer: the story map / about views can
+    // target a book that is not currently open, and the page view must render
+    // THAT book after the jump.
+    this.state.book = this.state.lib.books.find((b) => b.id === book.id) ?? book;
     this.navigate('page');
     if (reopened) {
       this.toast(
@@ -587,12 +842,43 @@ class App implements AppApi {
     }));
   }
 
-  applyAppearance(): void {
-    const settings = this.state.lib.settings;
+  applyAppearance(
+    overrides?: Partial<Pick<Settings, 'theme' | 'readingFont' | 'fontScale' | 'documentFonts'>>,
+  ): void {
+    const settings = { ...this.state.lib.settings, ...overrides };
     if (typeof document === 'undefined') return;
     const root = document.documentElement;
-    root.dataset.theme = settings.theme;
+    let theme = settings.theme;
+    if (theme === 'system') {
+      try {
+        theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      } catch {
+        theme = 'dark';
+      }
+    }
+    root.dataset.theme = theme;
+    root.dataset.font = settings.readingFont;
     root.style.setProperty('--font-scale', String(settings.fontScale));
+    // The document wardrobe: per-format typography (auto = the reading font).
+    const FONT_STACKS: Record<string, string> = {
+      georgia: "Georgia, 'Iowan Old Style', serif",
+      palatino: "'Palatino Linotype', Palatino, 'Book Antiqua', serif",
+      charter: "Charter, 'Bitstream Charter', 'Sitka Text', Georgia, serif",
+      serif: 'ui-serif, Georgia, serif',
+      sans: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    };
+    for (const format of ['story', 'letter', 'diary', 'newspaper', 'mapnote', 'recipe']) {
+      const choice =
+        settings.documentFonts?.[format as keyof typeof settings.documentFonts] ?? 'auto';
+      root.style.setProperty(
+        `--doc-font-${format}`,
+        choice === 'auto'
+          ? format === 'mapnote'
+            ? 'var(--mono)' // map notes default to monospace, matching the CSS
+            : 'var(--serif)'
+          : (FONT_STACKS[choice] ?? 'var(--serif)'),
+      );
+    }
   }
 
   renameTitle(book: Book, title: string): void {
@@ -659,6 +945,8 @@ class App implements AppApi {
     try {
       await saveLibrary(this.state.lib);
       await writeOpfsLibrary(this.state.lib);
+      // The .md mirror: the same books as plain, readable markdown files.
+      await writeMdLibrary(this.state.lib);
     } catch {
       // Persistence is best-effort; the app keeps working in memory.
     }
@@ -697,6 +985,8 @@ function dispatchView(api: AppApi): HTMLElement {
       return renderArchive(api);
     case 'about':
       return renderAbout(api);
+    case 'help':
+      return renderHelp(api);
     case 'library':
     default:
       return renderLibrary(api);
@@ -740,12 +1030,49 @@ async function boot(): Promise<void> {
   const app = new App(lib, viewFromHash() ?? 'library');
   app.render();
 
+  let beforeHelp: ViewName | null = null;
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== '?' && event.key !== 'Escape') return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      (target.closest('input, textarea, select, [contenteditable="true"]') ||
+        target.isContentEditable)
+    )
+      return;
+    if (event.key === '?' && app.view !== 'help') {
+      event.preventDefault();
+      beforeHelp = app.view;
+      app.navigate('help');
+    } else if (event.key === 'Escape' && app.view === 'help') {
+      event.preventDefault();
+      app.navigate(beforeHelp ?? 'library');
+      beforeHelp = null;
+    }
+  });
+
   window.addEventListener('hashchange', () => {
     const view = viewFromHash();
     if (view && view !== app.view) app.navigate(view);
   });
 
   void requestPersistence();
+  // Drag-and-drop import: drop a .ptlibrary.json / .ptbook.json anywhere.
+  window.addEventListener('dragover', (event) => {
+    if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+  });
+  window.addEventListener('drop', (event) => {
+    const file = event.dataTransfer?.files[0];
+    if (!file) return;
+    event.preventDefault();
+    void file.text().then((text) => {
+      try {
+        void app.importDropped(JSON.parse(text));
+      } catch {
+        app.toast('That file is not a Page Turn file', 'error');
+      }
+    });
+  });
   window.addEventListener('beforeunload', () => void app.persistNow());
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') void app.persistNow();

@@ -6,7 +6,7 @@
  * between sessions. Wrapped so failures degrade to in-memory use gracefully.
  */
 import type { Library } from '../core/types';
-import { defaultLibrary } from '../core/schema';
+import { defaultLibrary, normalizeLibrary } from '../core/schema';
 
 const DB_NAME = 'page-turn';
 const DB_VERSION = 1;
@@ -47,7 +47,12 @@ export async function loadLibrary(): Promise<Library> {
     const db = await openDB();
     const tx = db.transaction(STORE, 'readonly');
     const result = await requestResult(tx.objectStore(STORE).get(KEY));
-    return result === undefined ? defaultLibrary() : (result as Library);
+    if (result === undefined) return defaultLibrary();
+    // Normalize on the way in: a hand-edited or older-schema document must
+    // never reach boot as a malformed object (boot reads lib.books before any
+    // guard). A document that fails validation degrades to a fresh library
+    // instead of crashing the whole app.
+    return normalizeLibrary(result as Library);
   } catch {
     return defaultLibrary();
   }

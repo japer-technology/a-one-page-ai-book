@@ -11,6 +11,7 @@ import type {
   EndpointSettings,
   Library,
   SeedOptions,
+  Settings,
   StoryBible,
   StoryNode,
   TitleOption,
@@ -27,7 +28,8 @@ export type ViewName =
   | 'reader'
   | 'theend'
   | 'archive'
-  | 'about';
+  | 'about'
+  | 'help';
 
 export type ToastKind = 'info' | 'error' | 'success';
 
@@ -72,6 +74,8 @@ export interface AppApi {
   abortGeneration(): void;
   /** Human-readable message for a generation error. */
   genError(err: unknown): string;
+  /** How many LLM requests are in flight right now (the "being processed" light). */
+  genActive(): number;
 
   // Tree mutations (implemented in main.ts with core/tree.ts) ---------------
   newSeed(text: string, options: SeedOptions, brief?: string): StoryNode;
@@ -111,8 +115,22 @@ export interface AppApi {
   togglePin(pageId: string, version: number): void;
   /** Start a sequel book from a finished one (inherits the cast as a brief). */
   seedFromBook(bookId: string): void;
-  /** Apply the reading theme + font scale from settings to the document. */
-  applyAppearance(): void;
+  /** Apply the reading theme + fonts to the document (overrides = live preview). */
+  applyAppearance(
+    overrides?: Partial<Pick<Settings, 'theme' | 'readingFont' | 'fontScale' | 'documentFonts'>>,
+  ): void;
   /** Remember where the reader left off in a book (title page = 0). */
   setReadingPosition(bookId: string, position: number): void;
+  /** Replace a book's shelf tags. */
+  setTags(book: Book, tags: string[]): void;
+  /** Reset the backup-nudge meter (after a successful export). */
+  markExported(): void;
+  /** Import a dropped .ptlibrary.json / .ptbook.json payload (with confirm). */
+  importDropped(payload: unknown): Promise<void>;
+  /** Write (or replace) the prologue — the page zero that knew. */
+  writePrologue(book: Book, text: string, model: string): void;
+  /** Set the book's Iron Author difficulty. */
+  setIronMode(book: Book, mode: 'none' | 'three' | 'iron'): void;
+  /** Save the Director's Portrait onto the ending node. */
+  savePortrait(book: Book, text: string): void;
 }

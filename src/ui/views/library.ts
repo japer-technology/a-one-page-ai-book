@@ -7,20 +7,27 @@ import { button, fmtDate, fmtNumber, h } from '../dom';
 import { compileBook } from '../../core/compile';
 import { getNode, seedTextOf, sortBooks, statsOf, titleNodeOf, titleOf } from '../../core/tree';
 import { EMOTION_NAMES } from '../../core/types';
-import type { Book } from '../../core/types';
+import type { Book, StoryNode } from '../../core/types';
 import {
   exportBookBundle,
-  exportCompiledFile,
   exportLibraryFile,
+  exportLibraryMarkdown,
   importLibraryFile,
 } from '../../store/files';
+import { exportCompiled } from '../export';
+import { paintCover } from '../cover';
+import { searchScore } from '../../core/search';
+import { computeShelfStats } from '../../core/stats';
 
-// Session-scoped sort choice.
+// Session-scoped shelf state.
 let sortMode: 'recent' | 'mood' | 'length' | 'branches' = 'recent';
+let activeTag: string | null = null;
 
 export function renderLibrary(api: AppApi): HTMLElement {
   const all = sortBooks(api.lib);
-  const books = sortBy(all, sortMode, api);
+  const books = sortBy(all, sortMode, api).filter(
+    (book) => !activeTag || (book.tags ?? []).includes(activeTag),
+  );
 
   // Full-text index: titles (chosen AND every proposed one), seeds AND page text (spec §10).
   const haystacks = new Map<string, string>();
@@ -37,7 +44,7 @@ export function renderLibrary(api: AppApi): HTMLElement {
   const search = h('input', {
     class: 'search',
     type: 'search',
-    placeholder: 'Search titles and seeds…',
+    placeholder: 'Search titles, seeds & pages…',
     'aria-label': 'Search your books',
   });
 
@@ -71,10 +78,56 @@ export function renderLibrary(api: AppApi): HTMLElement {
     for (const card of Array.from(list.children)) {
       const bookId = (card as HTMLElement).dataset.bookId ?? '';
       const haystack = haystacks.get(bookId) ?? '';
+      // Fuzzy: exact substring always wins; typo-tolerant subsequences need a score.
       (card as HTMLElement).style.display =
-        needle === '' || haystack.includes(needle) ? '' : 'none';
+        needle === '' || haystack.includes(needle) || searchScore(needle, haystack) >= 8
+          ? ''
+          : 'none';
     }
   });
+
+  const allTags = [...new Set(all.flatMap((book) => book.tags ?? []))].sort();
+  const tagChips =
+    allTags.length > 0
+      ? h(
+          'div',
+          { class: 'tag-row' },
+          h('span', { class: 'tag-row-label', text: 'tags' }),
+          ...allTags.map((tag) =>
+            h('button', {
+              class: 'chip tag-chip' + (activeTag === tag ? ' chip-on' : ''),
+              type: 'button',
+              text: tag,
+              onclick: () => {
+                activeTag = activeTag === tag ? null : tag;
+                api.refresh();
+              },
+            }),
+          ),
+          activeTag
+            ? button(
+                '✕ clear',
+                () => {
+                  activeTag = null;
+                  api.refresh();
+                },
+                'chip',
+              )
+            : null,
+        )
+      : null;
+
+  const nudge =
+    (api.lib.settings.exportMeter?.pages ?? 0) >= 15
+      ? h(
+          'div',
+          { class: 'banner backup-nudge' },
+          `You've written ${api.lib.settings.exportMeter.pages} pages since your last export. `,
+          button('⇓ Export the library', () => void exportLibrary(api), 'chip'),
+        )
+      : null;
+
+  const shelf = shelfStatsStrip(api);
 
   const sortSelect = h(
     'select',
@@ -103,6 +156,9 @@ export function renderLibrary(api: AppApi): HTMLElement {
       button('↥ Import', () => importLibrary(api), 'ghost', {
         title: 'Import a .ptlibrary.json or .ptbook.json file',
       }),
+      button('⇓ Library as .md files', () => void exportMdLibrary(api), 'ghost', {
+        title: 'The whole library as plain, readable markdown files (.zip)',
+      }),
       button('⇓ Export library', () => exportLibrary(api), 'ghost', {
         title: 'Save every book and every decision as one JSON file',
       }),
@@ -110,7 +166,7 @@ export function renderLibrary(api: AppApi): HTMLElement {
     ),
   );
 
-  return h('div', { class: 'view view-library' }, empty, toolbar, list);
+  return h('div', { class: 'view view-library' }, empty, shelf, nudge, tagChips, toolbar, list);
 }
 
 function bookCard(api: AppApi, book: Book): HTMLElement {
@@ -134,30 +190,75 @@ function bookCard(api: AppApi, book: Book): HTMLElement {
         const name = window.prompt('Rename this book:', title);
         if (name?.trim()) api.renameTitle(book, name.trim());
       }),
+      menuItem('⚔ Iron Author: unlimited', () => api.setIronMode(book, 'none')),
+      menuItem('⚔ Iron Author: three strikes', () => api.setIronMode(book, 'three')),
+      menuItem('⚔ Iron Author: iron (no re-rolls)', () => api.setIronMode(book, 'iron')),
+      menuItem('🪶 Pass the quill', () => passQuill(api, book, nodes)),
+      menuItem('🏷 Edit tags', () => {
+        const current = (book.tags ?? []).join(', ');
+        const next = window.prompt(
+          'Tags (comma-separated collections, e.g. bedtime, gothic):',
+          current,
+        );
+        if (next !== null)
+          api.setTags(
+            book,
+            next
+              .split(',')
+              .map((t) => t.trim())
+              .filter(Boolean),
+          );
+      }),
       menuItem('🗺️ Story map', () => api.navigate('archive', { book: book.id })),
       menuItem('📊 About this book', () => api.navigate('about', { book: book.id })),
       menuItem('📖 Read the chosen path', () => api.navigate('reader', { book: book.id })),
-      menuItem('Export as .epub', () => void exportCompiledFile(compileBook(nodes, book), 'epub')),
-      menuItem('Export as .txt', () => void exportCompiledFile(compileBook(nodes, book), 'txt')),
-      menuItem('Export as .md', () => void exportCompiledFile(compileBook(nodes, book), 'md')),
-      menuItem('Save book file (.ptbook.json)', () => void exportBookBundle(book, nodes)),
+      menuItem('Export as .epub', () => void exportCompiled(api, compileBook(nodes, book), 'epub')),
+      menuItem('Export as .txt', () => void exportCompiled(api, compileBook(nodes, book), 'txt')),
+      menuItem('Export as .md', () => void exportCompiled(api, compileBook(nodes, book), 'md')),
+      menuItem('Save book file (.ptbook.json)', () => {
+        void exportBookBundle(book, nodes).then((saved) => {
+          if (saved) api.markExported();
+        });
+      }),
       menuItem('➡️ Write a sequel', () => api.seedFromBook(book.id)),
       menuItem('Duplicate', () => api.duplicateBook(book.id)),
       menuItem('Delete', () => deleteBook(api, book), 'danger'),
     ),
   );
 
+  const cover = h('canvas', {
+    class: 'book-cover',
+    width: 168,
+    height: 210,
+    'aria-hidden': 'true',
+    title: `${finished ? 'Read' : 'Continue'} “${title}”`,
+    onclick: () => api.openBook(book.id),
+  });
+  paintCover(cover, compileBook(nodes, book));
+
   return h(
     'article',
     {
       class: `book-card${finished ? ' finished' : ''}`,
-      dataset: { search: `${title}\n${seed}\n${tagline}\n${proposedTitlesText(api, book)}` },
+      dataset: { search: `${title}\n${seed}\n${tagline}`, bookId: book.id },
     },
+    cover,
     h(
       'div',
       { class: 'book-main' },
-      h('div', { class: 'book-status', text: finished ? '📕 finished' : '📖 in progress' }),
-      h('h2', { class: 'book-title', text: title }),
+      h(
+        'div',
+        { class: 'book-status' },
+        finished ? '📕 finished' : '📖 in progress',
+        book.ironMode === 'iron' ? ' · ⚔ iron' : book.ironMode === 'three' ? ' · ⚔ 3 strikes' : '',
+        book.guests && book.guests.length > 0 ? ` · 🪶 with ${book.guests.join(' & ')}` : '',
+      ),
+      h('h2', {
+        class: 'book-title',
+        text: title,
+        title: `${finished ? 'Read' : 'Continue'} “${title}”`,
+        onclick: () => api.openBook(book.id),
+      }),
       tagline ? h('p', { class: 'book-tagline', text: tagline }) : null,
       h('p', {
         class: 'book-stats',
@@ -233,13 +334,75 @@ async function importLibrary(api: AppApi): Promise<void> {
   }
 }
 
-async function exportLibrary(api: AppApi): Promise<void> {
+async function exportMdLibrary(api: AppApi): Promise<void> {
   try {
-    await exportLibraryFile(api.lib);
-    api.toast('Library exported', 'success');
+    if (await exportLibraryMarkdown(api.lib)) {
+      api.toast('Library exported as .md files', 'success');
+    }
   } catch (err) {
     api.toast(err instanceof Error ? err.message : 'Export failed', 'error');
   }
+}
+
+async function exportLibrary(api: AppApi): Promise<void> {
+  try {
+    if (await exportLibraryFile(api.lib)) {
+      api.markExported();
+      api.toast('Library exported', 'success');
+    }
+  } catch (err) {
+    api.toast(err instanceof Error ? err.message : 'Export failed', 'error');
+  }
+}
+
+/** The living shelf's ledger: streak, totals, and local achievements. */
+function shelfStatsStrip(api: AppApi): HTMLElement {
+  if (api.lib.books.length === 0) return h('div');
+  const today = new Date().toISOString().slice(0, 10);
+  const stats = computeShelfStats(api.lib, today);
+  const earned = stats.achievements.filter((a) => a.earned).length;
+  return h(
+    'details',
+    { class: 'shelf-stats' },
+    h(
+      'summary',
+      { class: 'shelf-stats-summary' },
+      h('span', { class: 'shelf-stats-item', text: `🔥 ${stats.streak}-day streak` }),
+      h('span', {
+        class: 'shelf-stats-item',
+        text: `📚 ${stats.books} book${stats.books === 1 ? '' : 's'}`,
+      }),
+      h('span', { class: 'shelf-stats-item', text: `📄 ${fmtNumber(stats.pages)} pages kept` }),
+      h('span', {
+        class: 'shelf-stats-item',
+        text: `🏆 ${earned}/${stats.achievements.length} badges`,
+      }),
+      h('span', { class: 'shelf-stats-item', text: `${fmtNumber(stats.wordsKept)} words kept` }),
+    ),
+    h(
+      'div',
+      { class: 'shelf-stats-body' },
+      h(
+        'div',
+        { class: 'achievements' },
+        ...stats.achievements.map((a) =>
+          h(
+            'span',
+            {
+              class: 'achievement' + (a.earned ? ' earned' : ' locked'),
+              title: `${a.label} — ${a.hint}`,
+            },
+            h('span', { class: 'achievement-icon', text: a.icon }),
+            h('span', { class: 'achievement-label', text: a.label }),
+          ),
+        ),
+      ),
+      h('p', {
+        class: 'field-hint',
+        text: `Longest streak: ${stats.longestStreak} days · ${stats.activeDays} active days · all badges are computed on this device.`,
+      }),
+    ),
+  );
 }
 
 function noModelBanner(api: AppApi): HTMLElement | null {
@@ -342,4 +505,29 @@ function sortBy(
     return [...books].sort((a, b) => rank(a) - rank(b));
   }
   return books;
+}
+
+async function passQuill(api: AppApi, book: Book, nodes: Record<string, StoryNode>): Promise<void> {
+  const name = window.prompt('Your name for the quill (recorded as a co-writer):');
+  if (name === null) return;
+  const withGuest = {
+    ...book,
+    guests: [...new Set([...(book.guests ?? []), name.trim()])].filter(Boolean),
+  };
+  // Record the co-writer on the shelf, not just in the exported file — the
+  // toast promises it and a fresh export should carry every guest.
+  api.update((lib) => ({
+    ...lib,
+    books: lib.books.map((b) => (b.id === book.id ? withGuest : b)),
+  }));
+  try {
+    if (await exportBookBundle(withGuest, nodes)) {
+      api.toast(
+        'The quill is passed — send the .ptbook.json file. Drop it back here to merge their pages as new branches.',
+        'success',
+      );
+    }
+  } catch (err) {
+    api.toast(err instanceof Error ? err.message : 'Quill export failed', 'error');
+  }
 }

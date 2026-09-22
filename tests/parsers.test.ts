@@ -87,14 +87,16 @@ describe('parseTitleOptions', () => {
 });
 
 describe('parseBible', () => {
-  it('parses a clean cast object', () => {
+  it('parses a clean cast object with relations and summary', () => {
     const bible = parseBible(
-      '{"people":[{"name":"Elin","note":"the keeper"}],"places":[{"name":"the lighthouse","note":"crumbling"}],"things":[{"name":"the letter","note":"sealed with wax"}]}',
+      '{"people":[{"name":"Elin","note":"the keeper"}],"places":[{"name":"the lighthouse","note":"crumbling"}],"things":[{"name":"the letter","note":"sealed with wax"}],"relations":[{"from":"Elin","to":"Mara","kind":"sisters"}],"summary":"A keeper finds a letter."}',
       null,
     );
     expect(bible.people).toEqual([{ name: 'Elin', note: 'the keeper' }]);
     expect(bible.places[0]?.name).toBe('the lighthouse');
     expect(bible.things[0]?.note).toContain('wax');
+    expect(bible.relations).toEqual([{ from: 'Elin', to: 'Mara', kind: 'sisters' }]);
+    expect(bible.summary).toBe('A keeper finds a letter.');
   });
 
   it('tolerates fences, prose wrappers and string entries', () => {
@@ -120,6 +122,8 @@ describe('parseBible', () => {
       places: [],
       things: [],
       threads: [],
+      relations: [],
+      summary: '',
       at: 2,
       updatedAt: 1,
     };
@@ -133,6 +137,8 @@ describe('parseBible', () => {
       places: [{ name: 'the island', note: '' }],
       things: [],
       threads: [],
+      relations: [],
+      summary: '',
       at: 1,
       updatedAt: 1,
     };

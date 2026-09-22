@@ -7,7 +7,8 @@
 import type { AppApi } from '../ctx';
 import { button, fmtDate, fmtNumber, h } from '../dom';
 import { compileBook, countWords, moodOf } from '../../core/compile';
-import { pathToRoot, spinePages, statsOf, titleNodeOf } from '../../core/tree';
+import { collectSubtree, pageNumberAt, pathToRoot, statsOf, titleNodeOf } from '../../core/tree';
+import { lintText, lintVerdict } from '../../core/lint';
 import type { Book } from '../../core/types';
 
 export function renderAbout(api: AppApi): HTMLElement {
@@ -51,9 +52,10 @@ export function renderAbout(api: AppApi): HTMLElement {
     stat('moments remembered', String(stats.nodes)),
   );
 
-  // Models used, per page.
+  // Models used, per page — scoped to THIS book's subtree.
+  const subtree = collectSubtree(nodes, book.seedNodeId);
   const models = new Set<string>();
-  for (const node of Object.values(nodes)) {
+  for (const node of subtree) {
     if (node.data.kind === 'page' && node.data.model) models.add(node.data.model);
   }
 
@@ -82,13 +84,13 @@ export function renderAbout(api: AppApi): HTMLElement {
     })
     .filter((item): item is NonNullable<typeof item> => item !== null);
 
-  // Most-iterated pages.
-  const iterated = Object.values(nodes)
+  // Most-iterated pages — scoped to THIS book's subtree, real page numbers.
+  const iterated = subtree
     .filter((n) => n.kind === 'page' && n.data.kind === 'page')
     .map((n) => ({
       node: n,
       versions: n.data.kind === 'page' ? n.data.versions.length : 0,
-      number: spinePages(nodes, n.id).length,
+      number: pageNumberAt(nodes, n.id),
     }))
     .sort((a, b) => b.versions - a.versions)
     .slice(0, 5)
@@ -126,9 +128,15 @@ export function renderAbout(api: AppApi): HTMLElement {
         'primary',
       ),
       button('🗺️ Story map', () => api.navigate('archive', { book: book.id })),
-      button('← Back', () =>
-        api.book?.id === book.id ? api.navigate('theend') : api.navigate('library'),
-      ),
+      button('← Back', () => {
+        if (api.book?.id === book.id) {
+          // Finished books go back to their end page; in-progress ones to the
+          // page view (the "the end" screen for a live book was misleading).
+          api.navigate(book.status === 'finished' ? 'theend' : 'page');
+        } else {
+          api.navigate('library');
+        }
+      }),
     ),
     h(
       'p',
@@ -144,6 +152,7 @@ export function renderAbout(api: AppApi): HTMLElement {
           h('p', { class: 'about-mood', text: moodLine }),
         )
       : null,
+    lintSection(compiled),
     h(
       'section',
       { class: 'card' },
@@ -188,4 +197,30 @@ function findBook(api: AppApi): Book | null {
   const id = api.params.book;
   if (id) return api.lib.books.find((b) => b.id === id) ?? null;
   return api.book;
+}
+
+function lintSection(compiled: ReturnType<typeof compileBook>): HTMLElement {
+  const whole = compiled.pages.map((p) => p.text).join('\n\n');
+  const report = lintText(whole);
+  return h(
+    'section',
+    { class: 'card' },
+    h('h2', { text: `🩺 Story linter — ${lintVerdict(report)}` }),
+    h('p', {
+      class: 'field-hint',
+      text: `${report.words} words · ${report.sentences} sentences · ${report.paragraphs} paragraphs · adverbs ${Math.round(report.adverbRatio * 100)}% · dialogue ${Math.round(report.dialogueDensity * 100)}% · sentence variance ${report.sentenceVariance}`,
+    }),
+    report.issues.length === 0
+      ? h('p', { class: 'conflict-ok', text: '✓ The linter smells nothing.' })
+      : h(
+          'ul',
+          { class: 'conflict-list' },
+          ...report.issues.map((issue) =>
+            h('li', {
+              class: issue.severity === 'warn' ? 'lint-warn' : 'lint-info',
+              text: issue.message,
+            }),
+          ),
+        ),
+  );
 }

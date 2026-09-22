@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chat, chatJSON } from '../src/llm/client';
+import { chat, chatJSON, isTransientLLMError } from '../src/llm/client';
 import type { EndpointSettings } from '../src/core/types';
 
 const openai: EndpointSettings = {
@@ -173,5 +173,17 @@ describe('chatJSON', () => {
       'a',
       'b',
     ]);
+  });
+});
+
+describe('isTransientLLMError', () => {
+  it('classifies connection failures as transient, aborts and timeouts as not', () => {
+    expect(isTransientLLMError(new TypeError('Failed to fetch'))).toBe(true);
+    expect(isTransientLLMError(new Error('NetworkError when attempting to fetch resource.'))).toBe(
+      true,
+    );
+    expect(isTransientLLMError(new DOMException('x', 'AbortError'))).toBe(false);
+    expect(isTransientLLMError(new DOMException('x', 'TimeoutError'))).toBe(false);
+    expect(isTransientLLMError(new Error('Model output was not valid JSON'))).toBe(false);
   });
 });

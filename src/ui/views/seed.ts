@@ -39,21 +39,49 @@ const chat = {
   brief: '',
 };
 
+/**
+ * Session-scoped seed form state. The seed view re-renders on every chat
+ * message and distill, and uncontrolled inputs would lose everything the
+ * reader typed — the classic "chat wiped my seed" bug. The draft is the one
+ * source of truth; the inputs just mirror it.
+ */
+const draft = {
+  seed: '',
+  genre: '',
+  perspective: '',
+  tense: '',
+  tone: '',
+  audience: '',
+  lengthHint: '',
+};
+let chatOpen = false;
+
 export function renderSeed(api: AppApi): HTMLElement {
   const textarea = h('textarea', {
     class: 'seed-input',
     rows: 4,
+    value: draft.seed,
     placeholder:
       'A lighthouse keeper finds a letter addressed to someone who died a hundred years ago.',
     'aria-label': 'Your seed',
+    oninput: (event: Event) => {
+      draft.seed = (event.target as HTMLTextAreaElement).value;
+    },
   });
-  textarea.focus();
+  // Focus the seed box when the reader is working on the seed — but NEVER
+  // when the chat is open: every chat send/distill re-renders the view, and
+  // an eager focus() used to yank the caret out of the chat input mid-flow.
+  if (!chatOpen) textarea.focus();
 
   const genre = h('input', {
     class: 'input',
     type: 'text',
     placeholder: 'surprise me',
     list: 'genres',
+    value: draft.genre,
+    oninput: (event: Event) => {
+      draft.genre = (event.target as HTMLInputElement).value;
+    },
   });
   const genres = h(
     'datalist',
@@ -71,55 +99,104 @@ export function renderSeed(api: AppApi): HTMLElement {
     ].map((g) => h('option', { value: g })),
   );
 
-  const perspective = select('', [
-    ['', 'decide for me'],
-    ['first', 'first person'],
-    ['third', 'third person'],
-    ['second', 'second person'],
-  ]);
-  const tense = select('', [
-    ['', 'decide for me'],
-    ['past', 'past tense'],
-    ['present', 'present tense'],
-  ]);
-  const tone = select('', [
-    ['', 'decide for me'],
-    ['warm', 'warm'],
-    ['dark', 'dark'],
-    ['funny', 'funny'],
-    ['literary', 'literary'],
-    ['pulpy', 'pulpy'],
-  ]);
-  const audience = select('', [
-    ['', 'adult'],
-    ['kid-safe', 'kid-safe'],
-    ['teen', 'teen'],
-    ['adult', 'adult'],
-  ]);
-  const lengthHint = select('', [
-    ['', 'let it run'],
-    ['short-story', 'short story'],
-    ['novella', 'novella'],
-    ['let-it-run', 'let it run'],
-  ]);
+  const perspective = select(
+    draft.perspective,
+    [
+      ['', 'decide for me'],
+      ['first', 'first person'],
+      ['third', 'third person'],
+      ['second', 'second person'],
+    ],
+    (value) => {
+      draft.perspective = value;
+    },
+  );
+  const tense = select(
+    draft.tense,
+    [
+      ['', 'decide for me'],
+      ['past', 'past tense'],
+      ['present', 'present tense'],
+    ],
+    (value) => {
+      draft.tense = value;
+    },
+  );
+  const tone = select(
+    draft.tone,
+    [
+      ['', 'decide for me'],
+      ['warm', 'warm'],
+      ['dark', 'dark'],
+      ['funny', 'funny'],
+      ['literary', 'literary'],
+      ['pulpy', 'pulpy'],
+    ],
+    (value) => {
+      draft.tone = value;
+    },
+  );
+  const audience = select(
+    draft.audience,
+    [
+      ['', 'decide for me'],
+      ['kid-safe', 'kid-safe'],
+      ['teen', 'teen'],
+      ['adult', 'adult'],
+    ],
+    (value) => {
+      draft.audience = value;
+    },
+  );
+  const lengthHint = select(
+    draft.lengthHint,
+    [
+      ['', 'decide for me'],
+      ['short-story', 'short story'],
+      ['novella', 'novella'],
+      ['let-it-run', 'let it run'],
+    ],
+    (value) => {
+      draft.lengthHint = value;
+    },
+  );
 
   const collect = (): SeedOptions => ({
     ...emptySeedOptions(),
-    genre: genre.value.trim(),
-    perspective: perspective.value as SeedOptions['perspective'],
-    tense: tense.value as SeedOptions['tense'],
-    tone: tone.value as SeedOptions['tone'],
-    audience: audience.value as SeedOptions['audience'],
-    lengthHint: lengthHint.value as SeedOptions['lengthHint'],
+    genre: draft.genre.trim(),
+    perspective: draft.perspective as SeedOptions['perspective'],
+    tense: draft.tense as SeedOptions['tense'],
+    tone: draft.tone as SeedOptions['tone'],
+    audience: draft.audience as SeedOptions['audience'],
+    lengthHint: draft.lengthHint as SeedOptions['lengthHint'],
   });
 
   const begin = (options: SeedOptions) => {
-    const text = textarea.value.trim();
+    const brief = chat.brief.trim();
+    const typed = draft.seed.trim();
+    // The brief can BE the seed: a book distilled from a chat alone starts
+    // here instead of refusing to begin.
+    const text = typed.length > 0 ? typed : brief;
     if (text.length === 0) {
       api.toast('The seed can be anything — write one line, or roll the dice.', 'info');
       return;
     }
-    const seedNode = api.newSeed(text, options, chat.brief.trim());
+    const seedNode = api.newSeed(text, options, brief);
+    if (typed.length === 0) {
+      api.toast('Seeded from your brief — the brief still rides along into every page.', 'info');
+    }
+    // The book is born: clear the session drafts so the NEXT new book starts
+    // fresh (a stale brief must never steer a different story).
+    draft.seed = '';
+    draft.genre = '';
+    draft.perspective = '';
+    draft.tense = '';
+    draft.tone = '';
+    draft.audience = '';
+    draft.lengthHint = '';
+    chat.messages = [];
+    chat.brief = '';
+    chatOpen = false;
     api.navigate('titles', { seed: seedNode.id });
   };
 
@@ -157,7 +234,11 @@ export function renderSeed(api: AppApi): HTMLElement {
     input.value = '';
     chat.messages.push({ role: 'user', content: text });
     chat.busy = true;
+    chatOpen = true;
     api.refresh();
+    // The re-render replaced the input — hand the caret back so the reader
+    // can keep chatting without a mouse.
+    document.querySelector<HTMLInputElement>('.chat-input')?.focus();
     try {
       const fast = api.lib.settings.fastModel || api.lib.settings.endpoint.model;
       const reply = await api.generateText(chatMessages([...chat.messages]), { model: fast });
@@ -180,8 +261,13 @@ export function renderSeed(api: AppApi): HTMLElement {
       const fast = api.lib.settings.fastModel || api.lib.settings.endpoint.model;
       const brief = await api.generateText(briefMessages([...chat.messages]), { model: fast });
       chat.brief = brief.trim();
+      // The brief fills the seed: a book distilled from a chat alone must be
+      // able to begin. Edit either field — they stay in sync only here.
+      if (draft.seed.trim().length === 0) {
+        draft.seed = chat.brief;
+      }
       api.toast(
-        'Brief distilled — it will steer the titles and every page. Edit it below.',
+        'Brief distilled — it fills the seed below (and still rides along into every page). Edit either one.',
         'success',
       );
     } catch (err) {
@@ -189,6 +275,8 @@ export function renderSeed(api: AppApi): HTMLElement {
     }
     chat.busy = false;
     api.refresh();
+    // Land the caret in the brief so it can be trimmed right away.
+    document.querySelector<HTMLTextAreaElement>('.brief-input')?.focus();
   };
 
   const briefArea = chat.brief
@@ -204,7 +292,15 @@ export function renderSeed(api: AppApi): HTMLElement {
 
   const chatSection = h(
     'details',
-    { class: 'folds chat', open: chat.messages.length > 0 ? true : undefined },
+    {
+      class: 'folds chat',
+      open: chatOpen ? true : undefined,
+      ontoggle: (event: Event) => {
+        // Respect the reader's collapse/expand across re-renders (re-renders
+        // used to force the chat back open whenever messages existed).
+        chatOpen = (event.currentTarget as HTMLDetailsElement).open;
+      },
+    },
     h('summary', { text: '💬 Talk it through first (optional)' }),
     h(
       'p',
@@ -225,7 +321,9 @@ export function renderSeed(api: AppApi): HTMLElement {
         disabled: chat.messages.length < 2 || chat.busy,
         title: 'Condense this conversation into a story brief the model will follow',
       }),
-      chat.brief ? h('span', { class: 'field-hint', text: 'brief ready — edit it above' }) : null,
+      chat.brief
+        ? h('span', { class: 'field-hint', text: 'brief ready — it also fills the seed above' })
+        : null,
     ),
     briefArea,
   );
@@ -247,7 +345,8 @@ export function renderSeed(api: AppApi): HTMLElement {
       'div',
       { class: 'row gap' },
       button('🎲 I’m feeling lucky', () => {
-        textarea.value = luckySeed();
+        draft.seed = luckySeed();
+        textarea.value = draft.seed;
         textarea.focus();
       }),
     ),
@@ -276,10 +375,17 @@ export function renderSeed(api: AppApi): HTMLElement {
   );
 }
 
-function select(value: string, options: Array<[string, string]>): HTMLSelectElement {
+function select(
+  value: string,
+  options: Array<[string, string]>,
+  onchange: (value: string) => void,
+): HTMLSelectElement {
   return h(
     'select',
-    { class: 'input' },
+    {
+      class: 'input',
+      onchange: (event: Event) => onchange((event.target as HTMLSelectElement).value),
+    },
     ...options.map(([v, label]) =>
       h('option', { value: v, selected: v === value ? true : undefined, text: label }),
     ),

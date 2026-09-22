@@ -10,7 +10,7 @@ import type { AppApi } from './ctx';
 import { button, h, spinner } from './dom';
 import { audit } from './audit';
 import { buildContext, pageMessages } from '../core/prompt';
-import { pageNumberAt } from '../core/tree';
+import { chapterCountUpTo, pageNumberAt } from '../core/tree';
 import { maybeUpdateBible } from './cast';
 import { maybeUpdateSummary } from './story';
 import type { Book, StoryNode, TurnInput } from '../core/types';
@@ -27,7 +27,10 @@ export const genStates = new Map<string, GenState>();
 
 export type GenTarget = { kind: 'new'; parentId: string } | { kind: 'version'; pageId: string };
 
-/** Generate a page with the app's endpoint settings, attach it, re-render. Returns the node, or null. */
+/** Generate a page with the app's endpoint settings, attach it, re-render. Returns the node, or null.
+ * `chapterNumber` is the chapter this page opens if the direction starts a new
+ * chapter; when omitted it is derived from the tree (a new page opens one past
+ * the parent chain, a rewrite keeps the page's own chapter). */
 export async function generatePage(
   api: AppApi,
   book: Book,
@@ -36,6 +39,7 @@ export async function generatePage(
   key: string,
   label: string,
   target: GenTarget,
+  chapterNumber?: number,
 ): Promise<StoryNode | null> {
   const token = api.beginGen();
   audit(`generatePage start key=${key} token=${token} target=${target.kind}`);
@@ -43,7 +47,21 @@ export async function generatePage(
   api.refresh();
   try {
     const context = buildContext(api.nodes, book);
-    const messages = pageMessages(context, direction, targetPageNumber, book.rules);
+    // The chapter number is a property of the tree, never of the page number:
+    // a new page opens one chapter past the parent chain; a rewrite keeps the
+    // page's own chapter.
+    const resolvedChapter =
+      chapterNumber ??
+      (target.kind === 'new'
+        ? chapterCountUpTo(api.nodes, target.parentId) + 1
+        : chapterCountUpTo(api.nodes, target.pageId));
+    const messages = pageMessages(
+      context,
+      direction,
+      targetPageNumber,
+      book.rules,
+      resolvedChapter,
+    );
     const model = book.model || api.lib.settings.endpoint.model;
     const text = await api.generateText(messages, {
       model,
@@ -152,7 +170,13 @@ export async function generateCandidates(
   if (page.data.kind !== 'page') return 0;
   const direction = page.data.direction;
   const context = buildContext(api.nodes, book);
-  const messages = pageMessages(context, direction, pageNumberAt(api.nodes, page.id), book.rules);
+  const messages = pageMessages(
+    context,
+    direction,
+    pageNumberAt(api.nodes, page.id),
+    book.rules,
+    chapterCountUpTo(api.nodes, page.id),
+  );
   const model = book.model || api.lib.settings.endpoint.model;
   const token = api.beginGen();
   const keys = Array.from({ length: count }, (_, i) => `cand:${page.id}:${i}`);
@@ -177,7 +201,10 @@ export async function generateCandidates(
           if (state) state.stream += piece;
         },
       });
-      if (api.staleGen(token)) return 0;
+      if (api.staleGen(token)) {
+        genStates.delete(key);
+        return 0;
+      }
       const cleaned = text.trim();
       if (cleaned.length === 0) throw new Error('The model returned an empty page');
       genStates.delete(key);

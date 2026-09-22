@@ -106,6 +106,18 @@ export function fmtDate(ts: number): string {
   }
 }
 
+/** Cap session-scoped maps so long sessions can never balloon memory. */
+export function pruneMap<K, V>(map: Map<K, V>, max: number): void {
+  if (map.size <= max) return;
+  const excess = map.size - max;
+  let dropped = 0;
+  for (const key of [...map.keys()]) {
+    if (dropped >= excess) break;
+    map.delete(key);
+    dropped++;
+  }
+}
+
 export function fmtNumber(n: number): string {
   return new Intl.NumberFormat().format(n);
 }

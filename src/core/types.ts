@@ -56,6 +56,9 @@ export const EMOTION_ICONS: Record<EmotionName, string> = {
 
 export type ChapterIntent = 'none' | 'start' | 'close';
 
+export type Pace = 'inherit' | 'slow' | 'propulsive';
+export type PageBeat = 'inherit' | 'cliffhanger' | 'resting';
+
 /** Diegetic document formats — the page IS a letter, a diary entry, a clipping… */
 export const DOCUMENT_FORMATS = [
   'story',
@@ -66,6 +69,9 @@ export const DOCUMENT_FORMATS = [
   'recipe',
 ] as const;
 export type PageDocument = (typeof DOCUMENT_FORMATS)[number];
+
+export type ReadingFont = 'georgia' | 'palatino' | 'charter' | 'serif' | 'sans';
+export type DocFontChoice = 'auto' | ReadingFont;
 
 export const DOCUMENT_META: Record<PageDocument, { icon: string; label: string }> = {
   story: { icon: '📄', label: 'story page' },
@@ -115,6 +121,13 @@ export interface BibleEntry {
   details?: string;
 }
 
+/** A relationship between two people in the cast. */
+export interface Relation {
+  from: string;
+  to: string;
+  kind: string;
+}
+
 /** The story bible: everything established up to a page, viewable any time. */
 export interface StoryBible {
   people: BibleEntry[];
@@ -122,6 +135,10 @@ export interface StoryBible {
   things: BibleEntry[];
   /** Open story threads — questions/mysteries the book must eventually resolve. */
   threads: BibleEntry[];
+  /** Relationships between people ("Elin — sisters — Mara"). */
+  relations: Relation[];
+  /** The rolling summary of the story so far (long-book coherence). */
+  summary: string;
   /** 1-based page number this cast reflects. */
   at: number;
   updatedAt: number;
@@ -143,6 +160,10 @@ export interface TurnInput {
   chapter: ChapterIntent;
   /** Diegetic document format for the page. */
   document: PageDocument;
+  /** Pacing: slow & meditative vs. propulsive. */
+  pace: Pace;
+  /** How the page should end: on a hook or a breath. */
+  beat: PageBeat;
 }
 
 export const DEFAULT_TURN: TurnInput = {
@@ -154,6 +175,8 @@ export const DEFAULT_TURN: TurnInput = {
   emotions: {},
   chapter: 'none',
   document: 'story',
+  pace: 'inherit',
+  beat: 'inherit',
 };
 
 export type NodeData =
@@ -178,7 +201,14 @@ export type NodeData =
       summary?: string;
     }
   | { kind: 'turn'; input: TurnInput }
-  | { kind: 'ending'; note: string };
+  | { kind: 'ending'; note: string; portrait?: string }
+  | {
+      kind: 'prologue';
+      versions: PageVersion[];
+      chosenVersion: number;
+      model: string;
+      direction: TurnInput;
+    };
 
 export interface StoryNode {
   id: string;
@@ -199,6 +229,12 @@ export interface Book {
   model: string;
   /** Standing rules ("don't touch" constraints) — persist until removed. */
   rules: string[];
+  /** Reader-curated shelf tags (collections). */
+  tags: string[];
+  /** Iron Author difficulty: unlimited / three re-rolls per page / none. */
+  ironMode: 'none' | 'three' | 'iron';
+  /** Co-writers who grew branches via Pass the Quill. */
+  guests: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -229,14 +265,22 @@ export interface Settings {
   templates: TurnTemplate[];
   /** Optional fast model for cheap phases (titles, suggestions, cast, chat). */
   fastModel: string;
-  /** Reading theme: dark (default), sepia, or light. */
-  theme: 'dark' | 'sepia' | 'light';
+  /** Reading theme: dark, sepia, light — or system (follows the OS). */
+  theme: 'dark' | 'sepia' | 'light' | 'system';
+  /** Reading font stack for page prose. */
+  readingFont: ReadingFont;
+  /** Per-format typography ("auto" inherits the reading font). */
+  documentFonts: Record<PageDocument, DocFontChoice>;
   /** Typography scale for the reading pages. */
   fontScale: number;
   /** The library onboarding tour has been seen. */
   seenOnboarding: boolean;
   /** Last reading position per book id (title page = 0). */
   readingPositions: Record<string, number>;
+  /** Creative-activity calendar: ISO date → mutation count (streaks). */
+  activityDays: Record<string, number>;
+  /** Backup nudge meter: pages created since the last export. */
+  exportMeter: { lastExportAt: number; pages: number };
 }
 
 /** A saved turn-console setup, reusable at any turn. */
@@ -252,4 +296,4 @@ export interface Library {
   settings: Settings;
 }
 
-export const LIBRARY_SCHEMA_VERSION = 6;
+export const LIBRARY_SCHEMA_VERSION = 8;

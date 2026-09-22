@@ -149,8 +149,12 @@ async function readNdjson(response: Response, onToken: (t: string) => void): Pro
 }
 
 async function readJSONError(response: Response): Promise<string> {
+  // Read the body ONCE: response.json() consumes it, so a later text() fallback
+  // would throw "body already read" and hide the server's actual message.
+  const text = await response.text().catch(() => '');
+  if (!text) return '';
   try {
-    const json = (await response.json()) as { error?: unknown };
+    const json = JSON.parse(text) as { error?: unknown };
     if (json && typeof json.error === 'string') return json.error;
     if (json && typeof json.error === 'object' && json.error !== null) {
       const message = (json.error as { message?: unknown }).message;
@@ -158,8 +162,25 @@ async function readJSONError(response: Response): Promise<string> {
     }
     return '';
   } catch {
-    return (await response.text()).slice(0, 300);
+    return text.slice(0, 300);
   }
+}
+
+/**
+ * A connection-level failure worth ONE automatic retry: the server may just
+ * have hiccuped. Aborts and timeouts are NOT transient — a timed-out request
+ * has a dead signal (a retry would fail instantly with a misleading error).
+ */
+export function isTransientLLMError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === 'AbortError') return false;
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes('Failed to fetch') ||
+    message.includes('NetworkError') ||
+    message.includes('Load failed') ||
+    message.includes('fetch failed') ||
+    message.includes('ECONNREFUSED')
+  );
 }
 
 export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<string> {

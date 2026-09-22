@@ -107,7 +107,7 @@ describe('defaultLibrary', () => {
     const lib = defaultLibrary();
     expect(lib.books).toEqual([]);
     expect(lib.nodes).toEqual({});
-    expect(lib.schemaVersion).toBe(6);
+    expect(lib.schemaVersion).toBe(8);
     expect(lib.settings.autoBible).toBe(true);
     expect(lib.settings.autoSummary).toBe(true);
     expect(lib.settings.autoSuggest).toBe(false);
@@ -148,6 +148,8 @@ describe('schema v2 fields', () => {
       emotions: { dread: 3, joy: -2 }, // clamped; bogus dropped; 0s dropped
       chapter: 'start',
       document: 'story',
+      pace: 'inherit',
+      beat: 'inherit',
     });
   });
 
@@ -369,5 +371,156 @@ describe('schema v6 fields', () => {
     expect(fresh.settings.autoSummary).toBe(true);
     const off = normalizeLibrary({ books: [], nodes: {}, settings: { autoSummary: false } });
     expect(off.settings.autoSummary).toBe(false);
+  });
+});
+
+describe('schema v6 fields', () => {
+  it('normalizes pace and beat intents', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {
+        t: {
+          id: 't',
+          kind: 'turn',
+          parentId: null,
+          createdAt: 1,
+          data: { kind: 'turn', input: { pace: 'propulsive', beat: 'cliffhanger' } },
+        },
+      },
+    });
+    const input = lib.nodes.t?.data;
+    expect(input && input.kind === 'turn' ? input.input.pace : null).toBe('propulsive');
+    expect(input && input.kind === 'turn' ? input.input.beat : null).toBe('cliffhanger');
+    const bad = normalizeLibrary({
+      books: [],
+      nodes: {
+        t: {
+          id: 't',
+          kind: 'turn',
+          parentId: null,
+          createdAt: 1,
+          data: { kind: 'turn', input: { pace: 'ludicrous', beat: 4 } },
+        },
+      },
+    });
+    const badInput = bad.nodes.t?.data;
+    expect(badInput && badInput.kind === 'turn' ? badInput.input.pace : null).toBe('inherit');
+    expect(badInput && badInput.kind === 'turn' ? badInput.input.beat : null).toBe('inherit');
+  });
+
+  it('normalizes bible relations and summary', () => {
+    const raw = goodLibrary();
+    const pageId = raw.books[0]!.frontierId;
+    const page = raw.nodes[pageId]!;
+    page.data = {
+      ...page.data,
+      kind: 'page',
+      bible: {
+        people: [],
+        places: [],
+        things: [],
+        threads: [],
+        relations: [
+          { from: 'Elin', to: 'Mara', kind: 'sisters' },
+          { from: '', to: 'x', kind: '' },
+          'Elin — mentor — Joss',
+        ],
+        summary: 'A keeper finds a letter.',
+        at: 1,
+        updatedAt: 2,
+      },
+    } as never;
+    const lib = normalizeLibrary(raw);
+    const data = lib.nodes[pageId]?.data;
+    const bible = data && data.kind === 'page' ? data.bible : undefined;
+    expect(bible?.relations.map((r) => r.kind)).toEqual(['sisters', 'mentor']);
+    expect(bible?.summary).toBe('A keeper finds a letter.');
+  });
+});
+
+describe('schema v7 appearance fields', () => {
+  it('normalizes system theme and reading font', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: { theme: 'system', readingFont: 'charter' },
+    });
+    expect(lib.settings.theme).toBe('system');
+    expect(lib.settings.readingFont).toBe('charter');
+    const fresh = normalizeLibrary({ books: [], nodes: {} });
+    expect(fresh.settings.theme).toBe('dark');
+    expect(fresh.settings.readingFont).toBe('georgia');
+    const bad = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: { theme: 'neon', readingFont: 'wingdings' },
+    });
+    expect(bad.settings.theme).toBe('dark');
+    expect(bad.settings.readingFont).toBe('georgia');
+  });
+
+  it('normalizes book tags, activity days and the export meter', () => {
+    const raw = goodLibrary();
+    raw.books[0]!.tags = ['gothic', 'gothic', '  bedtime  '];
+    const lib = normalizeLibrary({
+      ...raw,
+      settings: {
+        ...raw.settings,
+        activityDays: { '2026-01-01': 3, bad: 'x' },
+        exportMeter: { lastExportAt: 9, pages: 12 },
+      },
+    });
+    expect(lib.books[0]?.tags).toEqual(['gothic', 'bedtime']);
+    expect(lib.settings.activityDays).toEqual({ '2026-01-01': 3 });
+    expect(lib.settings.exportMeter).toEqual({ lastExportAt: 9, pages: 12 });
+  });
+});
+
+describe('schema v8 round-5 fields', () => {
+  it('normalizes prologue nodes, iron mode, guests and portraits', () => {
+    const raw = goodLibrary();
+    raw.nodes.pro = {
+      id: 'pro',
+      kind: 'prologue',
+      parentId: raw.books[0]!.chosenTitleId,
+      createdAt: 2,
+      data: {
+        kind: 'prologue',
+        versions: [{ v: 1, text: 'Before all of it.', by: 'ai', at: 1 }],
+        chosenVersion: 9,
+        model: 'm',
+        direction: DEFAULT_TURN,
+      },
+    };
+    raw.books[0]!.ironMode = 'three';
+    raw.books[0]!.guests = ['Mara', 'Mara'];
+    const lib = normalizeLibrary(raw);
+    const pro = lib.nodes.pro?.data;
+    expect(pro && pro.kind === 'prologue' ? pro.chosenVersion : null).toBe(1);
+    expect(lib.books[0]?.ironMode).toBe('three');
+    expect(lib.books[0]?.guests).toEqual(['Mara']);
+    const fresh = normalizeLibrary(goodLibrary());
+    expect(fresh.books[0]?.ironMode).toBe('none');
+  });
+
+  it('normalizes the document wardrobe', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: {
+        documentFonts: {
+          letter: 'palatino',
+          diary: 'sans',
+          story: 'charter',
+          newspaper: 'auto',
+          mapnote: 'serif',
+          recipe: 'georgia',
+        },
+      },
+    });
+    expect(lib.settings.documentFonts.letter).toBe('palatino');
+    expect(lib.settings.documentFonts.diary).toBe('sans');
+    const fresh = normalizeLibrary({ books: [], nodes: {} });
+    expect(fresh.settings.documentFonts.newspaper).toBe('auto');
   });
 });

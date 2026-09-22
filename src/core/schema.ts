@@ -9,6 +9,7 @@ import type {
   Library,
   NodeData,
   SeedOptions,
+  StoryBible,
   StoryNode,
   TurnInput,
 } from './types';
@@ -23,6 +24,38 @@ export const DEFAULT_ENDPOINT: EndpointSettings = {
   apiKey: '',
 };
 
+const DOC_FORMATS = ['story', 'letter', 'diary', 'newspaper', 'mapnote', 'recipe'] as const;
+type DocFormat = (typeof DOC_FORMATS)[number];
+
+function defaultDocumentFonts(
+  raw: unknown,
+): Record<DocFormat, 'auto' | 'georgia' | 'palatino' | 'charter' | 'serif' | 'sans'> {
+  const base: Record<DocFormat, 'auto' | 'georgia' | 'palatino' | 'charter' | 'serif' | 'sans'> = {
+    story: 'auto',
+    letter: 'auto',
+    diary: 'auto',
+    newspaper: 'auto',
+    mapnote: 'auto',
+    recipe: 'auto',
+  };
+  if (!raw || typeof raw !== 'object') return base;
+  const record = raw as Record<string, unknown>;
+  for (const format of DOC_FORMATS) {
+    const value = record[format];
+    if (
+      value === 'auto' ||
+      value === 'georgia' ||
+      value === 'palatino' ||
+      value === 'charter' ||
+      value === 'serif' ||
+      value === 'sans'
+    ) {
+      base[format] = value;
+    }
+  }
+  return base;
+}
+
 export function defaultSettings() {
   return {
     endpoint: { ...DEFAULT_ENDPOINT },
@@ -33,9 +66,13 @@ export function defaultSettings() {
     templates: [],
     fastModel: '',
     theme: 'dark' as const,
+    readingFont: 'georgia' as const,
+    documentFonts: defaultDocumentFonts(undefined),
     fontScale: 1,
     seenOnboarding: false,
     readingPositions: {},
+    activityDays: {},
+    exportMeter: { lastExportAt: 0, pages: 0 },
   };
 }
 
@@ -48,7 +85,7 @@ export function defaultLibrary(): Library {
   };
 }
 
-const KINDS: ReadonlySet<string> = new Set(['seed', 'title', 'page', 'turn', 'ending']);
+const KINDS: ReadonlySet<string> = new Set(['seed', 'title', 'page', 'turn', 'ending', 'prologue']);
 
 function fail(reason: string): never {
   throw new Error(`Invalid Page Turn file: ${reason}`);
@@ -74,7 +111,8 @@ function normalizeNode(raw: unknown): StoryNode {
       : asString(raw.parentId, 'node.parentId');
   if (typeof raw.createdAt !== 'number') fail(`node "${id}" createdAt must be a number`);
   if (!isRecord(raw.data)) fail(`node "${id}" data is missing`);
-  const data = raw.data as unknown as NodeData;
+  // Work on a clone: normalization must never mutate (or alias) the caller's object.
+  const data = structuredClone(raw.data) as NodeData;
   if (data.kind !== kind) fail(`node "${id}" kind field disagrees with data.kind`);
   switch (data.kind) {
     case 'seed':
@@ -92,12 +130,43 @@ function normalizeNode(raw: unknown): StoryNode {
         fail(`node "${id}" page has no versions`);
       }
       if (typeof data.chosenVersion !== 'number') fail(`node "${id}" page chosenVersion missing`);
+      data.chosenVersion = Math.max(
+        1,
+        Math.min(data.versions.length, Math.floor(data.chosenVersion)),
+      );
       data.direction = normalizeTurnInput(data.direction);
       // The living-cast snapshot is optional derived data; pass it through,
       // filling the threads group for bibles saved before it existed.
       if (data.bible !== undefined) {
         if (!isRecord(data.bible)) delete data.bible;
-        else if (!Array.isArray(data.bible.threads)) data.bible.threads = [];
+        else {
+          if (!Array.isArray(data.bible.people)) data.bible.people = [];
+          if (!Array.isArray(data.bible.places)) data.bible.places = [];
+          if (!Array.isArray(data.bible.things)) data.bible.things = [];
+          if (!Array.isArray(data.bible.threads)) data.bible.threads = [];
+          if (!Array.isArray(data.bible.relations)) {
+            data.bible.relations = [];
+          } else {
+            data.bible.relations = (data.bible.relations as unknown[])
+              .map((raw): StoryBible['relations'][number] | null => {
+                if (typeof raw === 'string') {
+                  const [from, kind, to] = raw.split(/\s*[—–-]\s*/);
+                  if (from?.trim() && to?.trim() && kind?.trim()) {
+                    return { from: from.trim(), to: to.trim(), kind: kind.trim() };
+                  }
+                  return null;
+                }
+                if (!isRecord(raw)) return null;
+                const from = typeof raw.from === 'string' ? raw.from.trim() : '';
+                const to = typeof raw.to === 'string' ? raw.to.trim() : '';
+                const kind = typeof raw.kind === 'string' ? raw.kind.trim() : '';
+                if (!from || !to || !kind) return null;
+                return { from, to, kind };
+              })
+              .filter((r): r is NonNullable<typeof r> => r !== null);
+          }
+          if (typeof data.bible.summary !== 'string') data.bible.summary = '';
+        }
       }
       // The rolling summary is optional derived data; drop non-string values.
       if (data.summary !== undefined && typeof data.summary !== 'string') delete data.summary;
@@ -108,7 +177,21 @@ function normalizeNode(raw: unknown): StoryNode {
       data.input = normalizeTurnInput(data.input);
       break;
     }
+    case 'prologue': {
+      if (!Array.isArray(data.versions) || data.versions.length === 0) {
+        fail(`node "${id}" prologue has no versions`);
+      }
+      if (typeof data.chosenVersion !== 'number')
+        fail(`node "${id}" prologue chosenVersion missing`);
+      data.chosenVersion = Math.max(
+        1,
+        Math.min(data.versions.length, Math.floor(data.chosenVersion)),
+      );
+      data.direction = normalizeTurnInput(data.direction);
+      break;
+    }
     case 'ending':
+      if (data.portrait !== undefined && typeof data.portrait !== 'string') delete data.portrait;
       break;
   }
   return { id, kind: kind as StoryNode['kind'], parentId, createdAt: raw.createdAt, data };
@@ -152,6 +235,10 @@ export function normalizeTurnInput(raw: unknown): TurnInput {
       }
     }
   }
+  const pace: TurnInput['pace'] =
+    input.pace === 'slow' || input.pace === 'propulsive' ? input.pace : 'inherit';
+  const beat: TurnInput['beat'] =
+    input.beat === 'cliffhanger' || input.beat === 'resting' ? input.beat : 'inherit';
   const document: TurnInput['document'] =
     typeof input.document === 'string' &&
     (input.document === 'story' ||
@@ -171,6 +258,8 @@ export function normalizeTurnInput(raw: unknown): TurnInput {
     emotions,
     chapter,
     document,
+    pace,
+    beat,
   };
 }
 
@@ -205,6 +294,23 @@ function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
     model: typeof raw.model === 'string' ? raw.model : '',
     rules: Array.isArray(raw.rules)
       ? raw.rules.filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+      : [],
+    tags: Array.isArray(raw.tags)
+      ? [
+          ...new Set(
+            raw.tags
+              .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+              .map((t) => t.trim()),
+          ),
+        ]
+      : [],
+    ironMode: raw.ironMode === 'three' || raw.ironMode === 'iron' ? raw.ironMode : 'none',
+    guests: Array.isArray(raw.guests)
+      ? [
+          ...new Set(
+            raw.guests.filter((g): g is string => typeof g === 'string' && g.trim().length > 0),
+          ),
+        ]
       : [],
     createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
@@ -241,12 +347,36 @@ function normalizeSettings(raw: unknown): Library['settings'] {
     autoSummary: raw.autoSummary !== false,
     autoSuggest: raw.autoSuggest === true,
     fastModel: typeof raw.fastModel === 'string' ? raw.fastModel.trim() : '',
-    theme: raw.theme === 'sepia' || raw.theme === 'light' ? raw.theme : 'dark',
+    theme:
+      raw.theme === 'sepia' || raw.theme === 'light' || raw.theme === 'system' ? raw.theme : 'dark',
+    readingFont:
+      raw.readingFont === 'palatino' ||
+      raw.readingFont === 'charter' ||
+      raw.readingFont === 'serif' ||
+      raw.readingFont === 'sans'
+        ? raw.readingFont
+        : 'georgia',
+    documentFonts: defaultDocumentFonts(raw.documentFonts),
     fontScale:
       typeof raw.fontScale === 'number' && Number.isFinite(raw.fontScale)
         ? Math.max(0.8, Math.min(1.4, raw.fontScale))
         : 1,
     seenOnboarding: raw.seenOnboarding === true,
+    activityDays: isRecord(raw.activityDays)
+      ? Object.fromEntries(
+          Object.entries(raw.activityDays).filter(
+            (entry): entry is [string, number] =>
+              typeof entry[0] === 'string' && typeof entry[1] === 'number',
+          ),
+        )
+      : {},
+    exportMeter: isRecord(raw.exportMeter)
+      ? {
+          lastExportAt:
+            typeof raw.exportMeter.lastExportAt === 'number' ? raw.exportMeter.lastExportAt : 0,
+          pages: typeof raw.exportMeter.pages === 'number' ? raw.exportMeter.pages : 0,
+        }
+      : { lastExportAt: 0, pages: 0 },
     readingPositions: isRecord(raw.readingPositions)
       ? Object.fromEntries(
           Object.entries(raw.readingPositions).filter(
@@ -278,7 +408,11 @@ export function normalizeLibrary(raw: unknown): Library {
   for (const [id, node] of Object.entries(nodesRaw)) {
     if (node === undefined) continue;
     try {
-      nodes[id] = normalizeNode(node);
+      const normalized = normalizeNode(node);
+      // The map key must agree with the node's own id — a mismatched pair
+      // would silently store the node under a key nothing references.
+      if (normalized.id !== id) fail(`node key "${id}" disagrees with node.id "${normalized.id}"`);
+      nodes[id] = normalized;
     } catch (err) {
       fail(err instanceof Error ? err.message : 'bad node');
     }

@@ -6,9 +6,10 @@
  * and pages. The living cast follows along.
  */
 import type { AppApi } from '../ctx';
-import { button, fmtDate, fmtNumber, h } from '../dom';
+import { button, fmtDate, fmtNumber, h, pruneMap } from '../dom';
 import { compileBook, countWords, joinParagraphs, paragraphsOf } from '../../core/compile';
 import {
+  chapterCountUpTo,
   childrenOf,
   getNode,
   pageNumberAt,
@@ -33,6 +34,7 @@ import { maybeUpdateSummary, renderStoryMemory } from '../story';
 import { quoteCardFor } from '../quote';
 import { ambienceOn, setAmbienceMood, toggleAmbience } from '../sound';
 import { diffWords } from '../../core/diff';
+import { lintText, lintVerdict } from '../../core/lint';
 import { audit } from '../audit';
 
 // Session view state.
@@ -46,6 +48,7 @@ const autoStarted = new Set<string>();
 const renaming = new Map<string, string>();
 const diffOpen = new Set<string>();
 const headingEdit = new Map<string, string>();
+const candidatesBusy = new Set<string>();
 /** Previous chosen version per page, for the one-click Undo. */
 const lastCommit = new Map<string, number>();
 
@@ -62,6 +65,13 @@ const TONE_LABEL: Record<string, string> = {
 };
 
 export function renderPage(api: AppApi): HTMLElement {
+  // A re-render replaces the page DOM and invalidates the text selection, so
+  // any floating span toolbar must die here — its offsets would target stale
+  // version text otherwise.
+  removeSpanToolbar();
+  pruneMap(editState, 200);
+  pruneMap(paraEdit, 200);
+  pruneMap(paraPanel, 200);
   const book = api.book;
   if (!book)
     return h(
@@ -205,99 +215,160 @@ export function renderPage(api: AppApi): HTMLElement {
   return h(
     'div',
     { class: 'view view-page' },
-    pageHeader(api, book, pageNum),
-    data.direction.ending
-      ? h('div', {
-          class: 'banner banner-ending',
-          text: 'This page was directed to bring the story to a close.',
-        })
-      : null,
-    forked
-      ? h('div', {
-          class: 'banner',
-          text: 'This page already has a path growing from it. Keeping or tweaking here forks a new branch — the existing path stays intact.',
-        })
-      : null,
-    undoBar(api, page),
-    headingEditor,
-    spineNav(api, book, page),
     h(
       'div',
-      { class: 'page-meta' },
-      h('span', { text: `${fmtNumber(countWords(chosen.text))} words` }),
-      h('span', { text: `${data.model || book.model || 'model'}` }),
-      versionPicker(api, page),
-    ),
-    body,
-    directionChips(data.direction),
-    h(
-      'div',
-      { class: 'actions' },
-      button(
-        keepLabel,
-        () => {
-          if (data.direction.ending) {
-            maybeUpdateBible(api, book, page.id);
-            maybeUpdateSummary(api, book, page.id);
-            api.finishBook(book, page.id, data.direction.direction || 'The End');
-            api.navigate('theend');
-          } else {
-            maybeUpdateBible(api, book, page.id);
-            maybeUpdateSummary(api, book, page.id);
-            api.navigate('turn', { from: page.id });
-          }
-        },
-        'primary',
+      { class: 'page-layout' },
+      h(
+        'div',
+        { class: 'page-main' },
+        pageHeader(api, book, pageNum),
+        data.direction.ending
+          ? h('div', {
+              class: 'banner banner-ending',
+              text: 'This page was directed to bring the story to a close.',
+            })
+          : null,
+        forked
+          ? h('div', {
+              class: 'banner',
+              text: 'This page already has a path growing from it. Keeping or tweaking here forks a new branch — the existing path stays intact.',
+            })
+          : null,
+        headingEditor,
+        spineNav(api, book, page),
+        h(
+          'div',
+          { class: 'page-meta' },
+          h('span', { text: `${fmtNumber(countWords(chosen.text))} words` }),
+          h('span', { text: `${data.model || book.model || 'model'}` }),
+        ),
+        body,
+        undoBar(api, page),
+        directionChips(data.direction),
       ),
-      button(
-        '↻ Regenerate',
-        () =>
-          void generatePage(api, book, data.direction, pageNum, key, `Rewriting page ${pageNum}…`, {
-            kind: 'version',
-            pageId: page.id,
+      h(
+        'aside',
+        { class: 'page-rail' },
+        h(
+          'div',
+          { class: 'actions' },
+          button(
+            keepLabel,
+            () => {
+              if (data.direction.ending) {
+                maybeUpdateBible(api, book, page.id);
+                maybeUpdateSummary(api, book, page.id);
+                api.finishBook(book, page.id, data.direction.direction || 'The End');
+                api.navigate('theend');
+              } else {
+                maybeUpdateBible(api, book, page.id);
+                maybeUpdateSummary(api, book, page.id);
+                api.navigate('turn', { from: page.id });
+              }
+            },
+            'primary',
+          ),
+          button('↻ Regenerate', () => {
+            // Iron Author: a re-roll is a version, and versions are gated.
+            if (!allowReroll(api, book, page)) return;
+            void generatePage(
+              api,
+              book,
+              data.direction,
+              pageNum,
+              key,
+              `Rewriting page ${pageNum}…`,
+              {
+                kind: 'version',
+                pageId: page.id,
+              },
+            );
           }),
+          button('✎ Edit this page', () => {
+            editState.set(page.id, { open: true, text: chosen.text });
+            api.refresh();
+          }),
+          button(
+            candidatesBusy.has(page.id)
+              ? '🎲 Writing alternatives…'
+              : '🎲 Generate 2 more versions',
+            () => void runCandidates(api, book, page),
+            'ghost',
+            {
+              disabled: candidatesBusy.has(page.id),
+              title: 'Ask the model for two parallel alternatives, then pick your favorite',
+            },
+          ),
+          button(
+            '🖼️ Quote card',
+            () => quoteCardFor(compileBook(api.nodes, book), pageNum),
+            'ghost',
+            {
+              title: 'Render this page as a shareable image',
+            },
+          ),
+          ambienceButton,
+        ),
+        candidatesSection(api, book, page),
+        book.ironMode !== 'none'
+          ? h('p', {
+              class: 'iron-chip',
+              text:
+                book.ironMode === 'iron'
+                  ? '⚔ Iron Author — this page is final'
+                  : `⚔ Three strikes — ${rollsLeft(book, page)} re-roll${rollsLeft(book, page) === 1 ? '' : 's'} left`,
+            })
+          : null,
+        h(
+          'div',
+          { class: 'row gap tweak-row' },
+          tweakInput,
+          button(
+            'Regenerate with this tweak',
+            () => {
+              const tweak = tweakInput.value.trim();
+              const direction: TurnInput = {
+                ...data.direction,
+                direction: tweak || data.direction.direction,
+              };
+              if (page.parentId === null) return;
+              void generatePage(
+                api,
+                book,
+                direction,
+                pageNum,
+                key,
+                `Writing a new page ${pageNum}…`,
+                {
+                  kind: 'new',
+                  parentId: page.parentId,
+                },
+                // The fork replaces THIS page number on a sibling branch, so
+                // a chapter break here re-opens the same chapter this page did.
+                chapterCountUpTo(api.nodes, page.id),
+              );
+            },
+            'ghost',
+            { title: 'Forks a new branch from the same moment' },
+          ),
+        ),
+        versionPicker(api, page),
+        lintCard(page),
+        renderCast(api, book),
+        renderStoryMemory(api, book),
+        h(
+          'p',
+          { class: 'kbd-hint' },
+          'keys: ←/→ walk pages · shift+←/→ flip versions · hover a paragraph to craft it',
+        ),
+        h('button', {
+          class: 'help-link',
+          type: 'button',
+          text: '? crafting help',
+          title: 'Open the help for page crafting',
+          onclick: () => api.navigate('help', { section: 'craft' }),
+        }),
       ),
-      button('✎ Edit this page', () => {
-        editState.set(page.id, { open: true, text: chosen.text });
-        api.refresh();
-      }),
-      button('🎲 Generate 2 more versions', () => void runCandidates(api, book, page), 'ghost', {
-        title: 'Ask the model for two parallel alternatives, then pick your favorite',
-      }),
-      button('🖼️ Quote card', () => quoteCardFor(compileBook(api.nodes, book), pageNum), 'ghost', {
-        title: 'Render this page as a shareable image',
-      }),
-      ambienceButton,
-    ),
-    candidatesSection(api, book, page),
-    h(
-      'div',
-      { class: 'row gap tweak-row' },
-      tweakInput,
-      button(
-        'Regenerate with this tweak',
-        () => {
-          const tweak = tweakInput.value.trim();
-          const direction: TurnInput = {
-            ...data.direction,
-            direction: tweak || data.direction.direction,
-          };
-          if (page.parentId === null) return;
-          void generatePage(api, book, direction, pageNum, key, `Writing a new page ${pageNum}…`, {
-            kind: 'new',
-            parentId: page.parentId,
-          });
-        },
-        'ghost',
-        { title: 'Forks a new branch from the same moment' },
-      ),
-    ),
-    renderCast(api, book),
-    renderStoryMemory(api, book),
-    h(
-      'p',
-      { class: 'kbd-hint' },
-      'keys: ←/→ walk pages · shift+←/→ flip versions · hover a paragraph to craft it',
     ),
   );
 }
@@ -492,7 +563,10 @@ function paragraphPanel(
         'primary',
       ),
       button('⌨ Type it myself', () => {
-        paraEdit.set(`${page.id}:after${index}`, { text: '' });
+        paraEdit.set(
+          panel.mode === 'rewrite' ? `${page.id}:${index}` : `${page.id}:after${index}`,
+          { text: panel.mode === 'rewrite' ? (paras[index] ?? '') : '' },
+        );
         paraPanel.delete(key);
         api.refresh();
       }),
@@ -690,8 +764,13 @@ function retryCandidate(api: AppApi, book: Book, page: StoryNode, key: string): 
 }
 
 async function runCandidates(api: AppApi, book: Book, page: StoryNode): Promise<void> {
+  if (candidatesBusy.has(page.id)) return; // one fan-out batch at a time
+  // Iron Author: candidates are versions too, and versions are gated.
+  if (!allowReroll(api, book, page)) return;
   if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
+  candidatesBusy.add(page.id);
   const attached = await generateCandidates(api, book, page, 2);
+  candidatesBusy.delete(page.id);
   if (attached > 0) {
     showVersions.add(page.id);
     api.toast(
@@ -705,12 +784,80 @@ async function runCandidates(api: AppApi, book: Book, page: StoryNode): Promise<
 
 /** Drop transient editing state for a page (version flips, page walks). */
 function clearCraftState(pageId: string): void {
+  lastCommit.delete(pageId);
   for (const key of [...paraEdit.keys()]) {
     if (key.startsWith(`${pageId}:`)) paraEdit.delete(key);
   }
   for (const key of [...paraPanel.keys()]) {
     if (key.startsWith(`${pageId}:`)) paraPanel.delete(key);
   }
+  for (const key of [...spanEdit.keys()]) {
+    if (key.startsWith(`span:${pageId}:`)) spanEdit.delete(key);
+  }
+  for (const key of [...spanTask.keys()]) {
+    if (key.startsWith(`span:${pageId}:`)) spanTask.delete(key);
+  }
+}
+
+// ---- Iron Author mode ------------------------------------------------------
+
+/** How many AI re-rolls this page has left (Iron Author difficulty). */
+function rollsLeft(book: Book, page: StoryNode): number {
+  const mode = book.ironMode ?? 'none';
+  if (mode === 'none') return Number.POSITIVE_INFINITY;
+  const used = page.data.kind === 'page' ? Math.max(0, page.data.versions.length - 1) : 0;
+  const budget = mode === 'three' ? 3 : 0;
+  return Math.max(0, budget - used);
+}
+
+function allowReroll(api: AppApi, book: Book, page: StoryNode): boolean {
+  if (rollsLeft(book, page) > 0) return true;
+  api.toast(
+    '⚔ Iron Author: this page is final — keep it, or walk back and fork a new path',
+    'info',
+  );
+  return false;
+}
+
+/** The story linter card for the control rail. */
+function lintCard(page: StoryNode): HTMLElement | null {
+  if (page.data.kind !== 'page') return null;
+  const chosen = page.data.versions[page.data.chosenVersion - 1];
+  if (!chosen || chosen.text.trim().length === 0) return null;
+  const report = lintText(chosen.text);
+  return h(
+    'details',
+    { class: 'lint-card' },
+    h(
+      'summary',
+      { class: 'lint-summary' },
+      h('span', { text: `🩺 Story linter: ${lintVerdict(report)}` }),
+      h('span', {
+        class: 'field-hint',
+        text: `${report.words} words · ${report.sentences} sentences · ${report.paragraphs} paragraphs`,
+      }),
+    ),
+    h(
+      'div',
+      { class: 'lint-body' },
+      report.issues.length === 0
+        ? h('p', { class: 'conflict-ok', text: '✓ Nothing the linter can smell.' })
+        : h(
+            'ul',
+            { class: 'conflict-list' },
+            ...report.issues.map((issue) =>
+              h('li', {
+                class: issue.severity === 'warn' ? 'lint-warn' : 'lint-info',
+                text: issue.message,
+              }),
+            ),
+          ),
+      h('p', {
+        class: 'field-hint',
+        text: `adverbs ${Math.round(report.adverbRatio * 100)}% · dialogue ${Math.round(report.dialogueDensity * 100)}% · sentence variance ${report.sentenceVariance}`,
+      }),
+    ),
+  );
 }
 
 function commitUserVersion(
@@ -741,6 +888,7 @@ async function aiParagraph(
   instruction: string,
 ): Promise<void> {
   if (page.data.kind !== 'page') return;
+  if (!allowReroll(api, book, page)) return;
   const isAdd = index >= paras.length;
   const genKey = `para:${isAdd ? `${page.id}:add` : `${page.id}:${index}`}`;
   const token = api.beginGen();
@@ -774,9 +922,18 @@ async function aiParagraph(
     }
     const cleaned = text.trim();
     if (cleaned.length === 0) throw new Error('The model returned an empty paragraph');
-    const next = [...paras];
+    // Re-read the CURRENT chosen text at commit time: the reader may have
+    // edited other paragraphs while this generation ran, and we must never
+    // revert their work by appending from the pre-edit snapshot.
+    const chosenNow =
+      page.data.kind === 'page'
+        ? (page.data.versions[page.data.chosenVersion - 1]?.text ?? '')
+        : '';
+    const fresh = paragraphsOf(chosenNow);
+    const next = [...fresh];
     if (isAdd) next.push(cleaned);
-    else next[index] = cleaned;
+    else if (next[index] !== undefined) next[index] = cleaned;
+    else next.push(cleaned);
     genStates.delete(genKey);
     paraPanel.delete(isAdd ? `${page.id}:add` : `${page.id}:${index}`);
     if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
@@ -844,6 +1001,18 @@ function versionPicker(api: AppApi, page: StoryNode): HTMLElement {
           'ghost',
         )
       : null,
+    versions.length > 1
+      ? button(
+          diffOpen.has(page.id) ? '▴ Hide diff' : '△ Diff vs previous',
+          () => {
+            if (diffOpen.has(page.id)) diffOpen.delete(page.id);
+            else diffOpen.add(page.id);
+            api.refresh();
+          },
+          'ghost',
+          { title: 'Show what changed between the previous version and this one' },
+        )
+      : null,
   );
 
   const diff = diffOpen.has(page.id)
@@ -905,7 +1074,17 @@ function spineNav(api: AppApi, book: Book, page: StoryNode): HTMLElement {
   const nextAction = () => {
     if (nextPage) api.openPageAt(book, nextPage.id);
     else if (atFrontier) api.navigate('turn', { from: page.id });
-    else if (frontier) api.openPageAt(book, frontier.id);
+    else if (frontier) {
+      // Walking back from the frontier: the ▶ button must land on whatever
+      // the frontier is — a turn console, the ending, or the frontier page.
+      if (frontier.kind === 'turn') {
+        api.navigate('turn', { from: frontier.parentId ?? book.chosenTitleId });
+      } else if (frontier.kind === 'ending') {
+        api.navigate('theend');
+      } else {
+        api.openPageAt(book, frontier.id);
+      }
+    }
   };
 
   const dots = spine.map((p, i) => {
@@ -965,6 +1144,7 @@ function installKeys(api: AppApi, book: Book, page: StoryNode): void {
     if (genStates.get(`page:${book.id}`)) return;
 
     if (event.key === 'Escape') {
+      clearSpanToolbar();
       editState.delete(page.id);
       for (const k of [...paraEdit.keys()]) if (k.startsWith(`${page.id}:`)) paraEdit.delete(k);
       paraPanel.delete(`${page.id}:add`);
@@ -1066,6 +1246,14 @@ function beginView(api: AppApi, book: Book): HTMLElement {
           }),
         'primary',
       ),
+      button(
+        '↺ Pick another title',
+        () => api.navigate('titles', { seed: book.seedNodeId }),
+        'ghost',
+        {
+          title: 'Go back to the proposed titles — every one of them is a doorway',
+        },
+      ),
     ),
   );
 }
@@ -1106,6 +1294,15 @@ function directionChips(direction: TurnInput): HTMLElement {
       ? h('span', {
           class: 'chip chip-size',
           text: `≈ ${direction.sizeTarget.value} ${direction.sizeTarget.kind}`,
+        })
+      : null,
+    direction.pace !== 'inherit'
+      ? h('span', { class: 'chip', text: direction.pace === 'slow' ? '🐌 slow' : '⚡ propulsive' })
+      : null,
+    direction.beat !== 'inherit'
+      ? h('span', {
+          class: 'chip',
+          text: direction.beat === 'cliffhanger' ? '⛰ cliffhanger' : '🌙 resting point',
         })
       : null,
     ...chapterChip,
@@ -1209,8 +1406,12 @@ function considerSelection(api: AppApi, book: Book, page: StoryNode, paras: stri
     return;
   }
   const range = selection.getRangeAt(0);
-  const anchorEl = range.startContainer.parentElement;
-  const focusEl = range.endContainer.parentElement;
+  const anchorEl =
+    range.startContainer instanceof Element
+      ? range.startContainer
+      : range.startContainer.parentElement;
+  const focusEl =
+    range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
   if (!anchorEl || !focusEl) {
     removeSpanToolbar();
     return;
@@ -1226,13 +1427,20 @@ function considerSelection(api: AppApi, book: Book, page: StoryNode, paras: stri
     removeSpanToolbar();
     return;
   }
-  const start = range.startOffset;
-  const end = range.endOffset;
+  const paragraph = paras[index] ?? '';
+  // Element-level ranges (a whole-paragraph selection) report child offsets
+  // against the .para-body element; text ranges report character offsets.
+  const start =
+    range.startContainer instanceof Element ? 0 : Math.min(range.startOffset, paragraph.length);
+  const end =
+    range.endContainer instanceof Element
+      ? paragraph.length
+      : Math.min(range.endOffset, paragraph.length);
   if (end <= start) {
     removeSpanToolbar();
     return;
   }
-  const text = paras[index]?.slice(start, end) ?? '';
+  const text = paragraph.slice(start, end);
   if (!text.trim()) {
     removeSpanToolbar();
     return;
@@ -1300,7 +1508,6 @@ function mountSpanToolbar(
             button('Cancel', () => {
               spanEdit.delete(genKey);
               removeSpanToolbar();
-              api.refresh();
             }),
           ),
         )
@@ -1319,10 +1526,11 @@ function mountSpanToolbar(
           ),
           button('✎ Edit', () => {
             spanEdit.set(genKey, text);
-            api.refresh();
-            const rect2 = window.getSelection()?.getRangeAt(0)?.getBoundingClientRect();
-            if (rect2)
-              mountSpanToolbar(api, book, page, index, start, end, text, rect2.left, rect2.top);
+            // Rebuild the floating box IN PLACE — a full api.refresh() here
+            // would detach the view, destroy the selection, and (on empty
+            // ranges) make getRangeAt throw.
+            removeSpanToolbar();
+            mountSpanToolbar(api, book, page, index, start, end, text, x, y);
           }),
           button('✕', () => removeSpanToolbar()),
         ),
@@ -1370,6 +1578,7 @@ async function aiSpanRewrite(
   text: string,
 ): Promise<void> {
   if (page.data.kind !== 'page') return;
+  if (!allowReroll(api, book, page)) return;
   const genKey = `span:${page.id}:${index}`;
   const task = spanTask.get(genKey) ?? { start, end, text, instruction: '' };
   spanTask.set(genKey, task);
@@ -1411,8 +1620,17 @@ async function aiSpanRewrite(
     if (!cleaned) throw new Error('The model returned an empty span');
     genStates.delete(genKey);
     spanTask.delete(genKey);
-    const next = [...paras];
-    next[index] = paragraph.slice(0, task.start) + cleaned + paragraph.slice(task.end);
+    // Commit against the CURRENT chosen text (concurrent edits elsewhere on
+    // the page must survive this rewrite).
+    const chosenNow =
+      page.data.kind === 'page'
+        ? (page.data.versions[page.data.chosenVersion - 1]?.text ?? '')
+        : '';
+    const fresh = paragraphsOf(chosenNow);
+    const currentParagraph = fresh[index] ?? paragraph;
+    const next = [...fresh];
+    next[index] =
+      currentParagraph.slice(0, task.start) + cleaned + currentParagraph.slice(task.end);
     if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
     api.appendVersion(page.id, joinParagraphs(next), 'ai', model);
     maybeUpdateBible(api, book, page.id);

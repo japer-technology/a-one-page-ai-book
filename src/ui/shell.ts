@@ -60,6 +60,24 @@ export function renderShell(api: AppApi, viewContent: HTMLElement, toasts: Toast
     h(
       'div',
       { class: 'nav-right' },
+      h('button', {
+        class: 'help-btn',
+        type: 'button',
+        text: '?',
+        title: 'Help — the whole manual (? key)',
+        onclick: () => api.navigate('help'),
+      }),
+      h(
+        'span',
+        {
+          class: 'nav-working',
+          id: 'nav-working',
+          role: 'status',
+          title: 'The local model is being processed right now',
+        },
+        h('span', { class: 'spinner' }),
+        ' being processed…',
+      ),
       h(
         'button',
         {

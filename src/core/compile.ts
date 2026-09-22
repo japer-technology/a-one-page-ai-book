@@ -4,7 +4,7 @@
  */
 import type { Book, EmotionName, PageDocument, StoryBible, StoryNode, TurnInput } from './types';
 import { EMOTION_ICONS } from './types';
-import { pathToRoot } from './tree';
+import { pathToRoot, prologueOf } from './tree';
 
 export interface CompiledPage {
   number: number;
@@ -14,6 +14,10 @@ export interface CompiledPage {
   mood?: { icon: string; label: string; value: number };
   /** The diegetic document format of this page (letter, diary, clipping…). */
   document?: PageDocument;
+  /** The turn decision that produced this page (commentary edition). */
+  direction?: TurnInput;
+  /** 'prologue' for page zero — the page that knew. */
+  kind?: 'prologue';
 }
 
 export interface CompiledBook {
@@ -69,17 +73,34 @@ export function compileBook(
 
   const pages: CompiledPage[] = [];
   let cast: StoryBible | undefined;
+  // The prologue leads, if it was written.
+  const prologue = prologueOf(nodes, book);
+  if (prologue && prologue.data.kind === 'prologue') {
+    const version = prologue.data.versions[prologue.data.chosenVersion - 1];
+    if (version) {
+      pages.push({
+        number: 0,
+        text: version.text,
+        words: countWords(version.text),
+        mood: moodOf(prologue.data.direction) ?? undefined,
+        direction: prologue.data.direction,
+        kind: 'prologue',
+      });
+    }
+  }
+  let nextNumber = 1;
   for (const node of path) {
     if (node.kind !== 'page' || node.data.kind !== 'page') continue;
     if (node.data.bible) cast = node.data.bible;
     const version = node.data.versions[node.data.chosenVersion - 1];
     if (!version) continue;
     pages.push({
-      number: pages.length + 1,
+      number: nextNumber++,
       text: version.text,
       words: countWords(version.text),
       mood: moodOf(node.data.direction) ?? undefined,
       document: node.data.direction.document,
+      direction: node.data.direction,
     });
   }
 
@@ -116,6 +137,7 @@ export function moodOf(
 /** One compact line of the per-page mood map. */
 export function moodLine(compiled: CompiledBook): string {
   const marks = compiled.pages
+    .filter((page) => page.number > 0)
     .map((page) =>
       page.mood
         ? `${page.number}${page.mood.icon}${page.mood.value > 0 ? '+' : ''}${page.mood.value}`
@@ -203,4 +225,36 @@ function castMarkdown(cast: StoryBible): string {
 
 export function bookFileName(compiled: CompiledBook, ext: string): string {
   return `${slugify(compiled.title)}.${ext}`;
+}
+
+/** The Director's Commentary Edition: every page with the decisions that made it. */
+export function toDirectorCut(compiled: CompiledBook): string {
+  const lines: string[] = [
+    `# ${compiled.title} — Director's Commentary Edition`,
+    '',
+    `> ${compiled.seed}`,
+    '',
+  ];
+  for (const page of compiled.pages) {
+    const label = page.kind === 'prologue' ? 'Prologue' : `Page ${page.number}`;
+    lines.push(`## ${label}`, '', page.text.trim(), '');
+    if (page.direction) {
+      const parts: string[] = [];
+      if (page.direction.direction.trim()) parts.push(page.direction.direction.trim());
+      if (page.direction.tone !== 'inherit') parts.push(`tone: ${page.direction.tone}`);
+      if (page.direction.pace !== 'inherit') parts.push(`pace: ${page.direction.pace}`);
+      if (page.direction.beat !== 'inherit') parts.push(`ending: ${page.direction.beat}`);
+      if (page.direction.sizeTarget)
+        parts.push(`size: ${page.direction.sizeTarget.value} ${page.direction.sizeTarget.kind}`);
+      if (page.direction.chapter !== 'none') parts.push(`chapter: ${page.direction.chapter}`);
+      if (page.direction.ending) parts.push('the ending');
+      const emotions = Object.entries(page.direction.emotions)
+        .filter(([, v]) => v !== 0)
+        .map(([name, v]) => `${name} ${v && v > 0 ? '+' : ''}${v}`);
+      if (emotions.length > 0) parts.push(emotions.join(', '));
+      lines.push(`> *Directed: ${parts.join(' · ') || 'continue naturally'}*`, '');
+    }
+  }
+  lines.push('---', '', '*Directed page by page in Page Turn.*');
+  return lines.join('\n').trimEnd() + '\n';
 }

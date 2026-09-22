@@ -3,12 +3,17 @@
  * compiled path, export it, or keep branching from the last page.
  */
 import type { AppApi } from '../ctx';
+import type { Book } from '../../core/types';
 import { button, fmtNumber, h } from '../dom';
 import { compileBook } from '../../core/compile';
 import { pathToRoot, statsOf, titleNodeOf } from '../../core/tree';
-import { exportCompiledFile } from '../../store/files';
+import { exportCompiled } from '../export';
 import { renderCast } from '../cast';
 import { renderStoryMemory } from '../story';
+import { buildContext, portraitMessages, prologueMessages } from '../../core/prompt';
+import { genStates, renderGenPanel } from '../genpage';
+import { scoreNotes } from '../../core/midi';
+import { playScore } from '../sound';
 
 export function renderTheEnd(api: AppApi): HTMLElement {
   const book = api.book;
@@ -28,6 +33,10 @@ export function renderTheEnd(api: AppApi): HTMLElement {
 
   const path = pathToRoot(api.nodes, book.frontierId);
   const ending = path.find((n) => n.kind === 'ending');
+  const portrait = ending && ending.data.kind === 'ending' ? ending.data.portrait : undefined;
+  const hasPrologue = compiled.pages[0]?.kind === 'prologue';
+  const prologueKey = `prologue:${book.id}`;
+  const portraitKey = `portrait:${book.id}`;
   const lastPage = [...path].reverse().find((n) => n.kind === 'page');
   const lastText =
     lastPage && lastPage.data.kind === 'page'
@@ -55,6 +64,27 @@ export function renderTheEnd(api: AppApi): HTMLElement {
     ending && ending.data.kind === 'ending' && ending.data.note
       ? h('p', { class: 'book-meta', text: `Ending note: “${ending.data.note}”` })
       : null,
+    portrait
+      ? h(
+          'div',
+          { class: 'portrait' },
+          h('h2', { class: 'portrait-title', text: '🪞 The Director’s Portrait' }),
+          h('p', { class: 'portrait-text', text: portrait }),
+        )
+      : genStates.get(portraitKey)
+        ? renderGenPanel(api, portraitKey, () => void writePortrait(api, book, portraitKey))
+        : null,
+    hasPrologue && compiled.pages[0]
+      ? h(
+          'div',
+          { class: 'prologue' },
+          h('h2', { class: 'portrait-title', text: '🌱 The Prologue That Knew' }),
+          h('div', { class: 'page-text', text: compiled.pages[0].text }),
+        )
+      : null,
+    genStates.get(prologueKey)
+      ? renderGenPanel(api, prologueKey, () => void writePrologue(api, book, prologueKey))
+      : null,
     h(
       'div',
       { class: 'actions' },
@@ -68,11 +98,39 @@ export function renderTheEnd(api: AppApi): HTMLElement {
       button('➡️ Write a sequel', () => api.seedFromBook(book.id), 'ghost', {
         title: 'Seed a new book that inherits this cast and threads',
       }),
-      button('⇓ .epub', () => void exportCompiledFile(compiled, 'epub'), 'ghost', {
+      button(
+        hasPrologue ? '↻ Rewrite the prologue' : '🌱 Write the prologue',
+        () => void writePrologue(api, book, prologueKey),
+        'ghost',
+        { title: 'Page zero that plants the ending’s seeds' },
+      ),
+      button(
+        '🪞 The Director’s Portrait',
+        () => void writePortrait(api, book, portraitKey),
+        'ghost',
+        {
+          title: 'A playful reading of your directing style',
+        },
+      ),
+      button('⇓ .epub', () => void exportCompiled(api, compiled, 'epub'), 'ghost', {
         title: 'Export the book as a real EPUB e-book',
       }),
-      button('⇓ .txt', () => void exportCompiledFile(compiled, 'txt')),
-      button('⇓ .md', () => void exportCompiledFile(compiled, 'md')),
+      button('⇓ .txt', () => void exportCompiled(api, compiled, 'txt')),
+      button('⇓ .md', () => void exportCompiled(api, compiled, 'md')),
+      button(
+        '📝 Director’s cut (.md)',
+        () => void exportCompiled(api, compiled, 'directorcut'),
+        'ghost',
+        {
+          title: 'The commentary edition: every page with the decisions that made it',
+        },
+      ),
+      button('⇓ .mid', () => void exportCompiled(api, compiled, 'midi'), 'ghost', {
+        title: 'The score of your book as a MIDI file',
+      }),
+      button('▶ Play the score', () => playScore(scoreNotes(compiled)), 'ghost', {
+        title: 'Hear the mood map performed',
+      }),
       button(
         '🌿 Keep branching',
         () => {
@@ -87,4 +145,99 @@ export function renderTheEnd(api: AppApi): HTMLElement {
     renderCast(api, book),
     renderStoryMemory(api, book),
   );
+}
+
+async function writePrologue(api: AppApi, book: Book, key: string): Promise<void> {
+  const token = api.beginGen();
+  genStates.set(key, {
+    token,
+    status: 'busy',
+    label: 'Writing the prologue that knew…',
+    stream: '',
+    error: '',
+  });
+  api.refresh();
+  try {
+    const ctx = buildContext(api.nodes, book);
+    const model = book.model || api.lib.settings.endpoint.model;
+    const text = await api.generateText(prologueMessages(ctx), {
+      model,
+      onToken: (piece) => {
+        const state = genStates.get(key);
+        if (state) state.stream += piece;
+      },
+    });
+    if (api.staleGen(token)) {
+      genStates.delete(key);
+      return;
+    }
+    const cleaned = text.trim();
+    if (!cleaned) throw new Error('The model returned an empty prologue');
+    genStates.delete(key);
+    api.writePrologue(book, cleaned, model);
+    api.toast('The prologue that knew — page zero is written', 'success');
+  } catch (err) {
+    genStates.delete(key);
+    if (api.staleGen(token)) return;
+    genStates.set(key, {
+      token,
+      status: 'error',
+      label: 'Prologue failed',
+      stream: '',
+      error: api.genError(err),
+    });
+    api.refresh();
+  }
+}
+
+async function writePortrait(api: AppApi, book: Book, key: string): Promise<void> {
+  const token = api.beginGen();
+  genStates.set(key, {
+    token,
+    status: 'busy',
+    label: 'Sketching the Director’s Portrait…',
+    stream: '',
+    error: '',
+  });
+  api.refresh();
+  try {
+    const ctx = buildContext(api.nodes, book);
+    const stats = statsOf(api.nodes, book);
+    const model = book.model || api.lib.settings.endpoint.model;
+    const text = await api.generateText(
+      portraitMessages(ctx, {
+        pages: stats.pages,
+        versions: stats.versions,
+        branches: stats.branches,
+        wordsKept: stats.words,
+      }),
+      {
+        model,
+        onToken: (piece) => {
+          const state = genStates.get(key);
+          if (state) state.stream += piece;
+        },
+      },
+    );
+    if (api.staleGen(token)) {
+      genStates.delete(key);
+      return;
+    }
+    const cleaned = text.trim();
+    if (!cleaned) throw new Error('The model returned an empty portrait');
+    genStates.delete(key);
+    api.savePortrait(book, cleaned);
+    api.toast('Your portrait hangs in the book', 'success');
+  } catch (err) {
+    genStates.delete(key);
+    if (api.staleGen(token)) return;
+    genStates.set(key, {
+      token,
+      status: 'error',
+      label: 'Portrait failed',
+      stream: '',
+      error: api.genError(err),
+    });
+    api.refresh();
+  }
 }

@@ -8,6 +8,7 @@
 import type {
   Book,
   Library,
+  NodeData,
   SeedOptions,
   StoryBible,
   StoryNode,
@@ -55,6 +56,18 @@ export function spinePages(nodes: Record<string, StoryNode>, id: string): StoryN
 /** 1-based page number of a page node along its chosen path. */
 export function pageNumberAt(nodes: Record<string, StoryNode>, pageNodeId: string): number {
   return spinePages(nodes, pageNodeId).findIndex((p) => p.id === pageNodeId) + 1;
+}
+
+/**
+ * How many chapters have been begun along the spine up to and including the
+ * given node (pages whose direction asked to start a new chapter). Pass a
+ * turn/title node and the count covers every page before it, so the NEXT page
+ * opens chapter `chapterCountUpTo(...) + 1`.
+ */
+export function chapterCountUpTo(nodes: Record<string, StoryNode>, nodeId: string): number {
+  return spinePages(nodes, nodeId).filter(
+    (p) => p.data.kind === 'page' && p.data.direction.chapter === 'start',
+  ).length;
 }
 
 export function frontierNode(nodes: Record<string, StoryNode>, book: Book): StoryNode {
@@ -275,6 +288,53 @@ export function setChosenVersion(node: StoryNode, v: number): StoryNode {
   return { ...node, data: { ...node.data, chosenVersion: v } };
 }
 
+/** Append a new version to any versioned node (page or prologue). */
+export function appendVersionTo(
+  node: StoryNode,
+  text: string,
+  by: 'ai' | 'user',
+  model?: string,
+): StoryNode {
+  if (node.kind !== 'page' && node.kind !== 'prologue') {
+    throw new Error('appendVersionTo requires a page or prologue node');
+  }
+  if (node.data.kind !== node.kind) throw new Error('node/data kind mismatch');
+  const data = node.data as Extract<NodeData, { kind: 'page' | 'prologue' }>;
+  const versions = [
+    ...data.versions,
+    { v: data.versions.length + 1, text, by, at: Date.now(), model },
+  ];
+  return { ...node, data: { ...data, versions, chosenVersion: versions.length } } as StoryNode;
+}
+
+/** Create a prologue node (the page zero that knew). */
+export function makePrologueNode(
+  parentId: string,
+  direction: TurnInput,
+  model: string,
+  text: string,
+): StoryNode {
+  return {
+    id: newId(),
+    kind: 'prologue',
+    parentId,
+    createdAt: Date.now(),
+    data: {
+      kind: 'prologue',
+      versions: [{ v: 1, text, by: 'ai', at: Date.now(), model }],
+      chosenVersion: 1,
+      model,
+      direction,
+    },
+  };
+}
+
+/** The prologue of a book (child of the chosen title), if written. */
+export function prologueOf(nodes: Record<string, StoryNode>, book: Book): StoryNode | null {
+  const prologues = childrenOf(nodes, book.chosenTitleId).filter((n) => n.kind === 'prologue');
+  return prologues[0] ?? null;
+}
+
 /** Pin (or unpin) a version so it sorts first and is never lost. */
 export function setVersionPinned(node: StoryNode, v: number, pinned: boolean): StoryNode {
   if (node.kind !== 'page' || node.data.kind !== 'page') {
@@ -397,6 +457,9 @@ export function makeBook(seedNodeId: string, titleNodeId: string, model: string)
     status: 'in-progress',
     model,
     rules: [],
+    tags: [],
+    ironMode: 'none',
+    guests: [],
     createdAt: now,
     updatedAt: now,
   };

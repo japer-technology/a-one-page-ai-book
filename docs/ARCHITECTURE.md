@@ -62,7 +62,7 @@ emit** a file that violates the single-file contract (see §5).
 
 **Dependency rule:** `core` depends on nothing but itself; `llm` and `store` depend on `core`; `ui`
 depends on all three; `main.ts` wires them. Nothing in `core/llm/store` touches the DOM. This
-layering is what makes the 137 unit tests meaningful — the whole domain can be tested without a
+layering is what makes the 183 unit tests meaningful — the whole domain can be tested without a
 browser.
 
 ## 3. The domain model: a tree, append-only

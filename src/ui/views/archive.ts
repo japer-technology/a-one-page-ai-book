@@ -25,6 +25,15 @@ import { EMOTION_META } from '../../core/prompt';
 // Session state: pages selected for side-by-side comparison (up to two).
 const compare = new Set<string>();
 let replayTimer: ReturnType<typeof setInterval> | null = null;
+/** Stop the time-lapse on navigation/unmount (called from main.ts). */
+export function stopReplay(): void {
+  if (replayTimer) clearInterval(replayTimer);
+  replayTimer = null;
+  replayIndex = 0;
+  // The comparison selection is book-scoped: never let page ids picked in one
+  // book leak into another book's side-by-side panel.
+  compare.clear();
+}
 let replayIndex = 0;
 
 export function renderArchive(api: AppApi): HTMLElement {
@@ -231,9 +240,30 @@ function timelineEntry(
         class: 'archive-meta',
         text: `${fmtNumber(countWords(chosen?.text ?? ''))} words · ${page.data.model || book.model}`,
       }),
+      button(
+        compare.has(page.id) ? '◧ Comparing ✓' : '◧ Compare',
+        () => {
+          if (compare.has(page.id)) {
+            compare.delete(page.id);
+          } else {
+            // Two at a time: picking a third drops the oldest.
+            if (compare.size >= 2) {
+              const first = [...compare][0];
+              if (first !== undefined) compare.delete(first);
+            }
+            compare.add(page.id);
+          }
+          api.refresh();
+        },
+        'chip',
+        { title: 'Pick two pages to read side by side' },
+      ),
       button('Open', () => api.openPageAt(book, page.id), 'ghost'),
     ),
-    h('p', { class: 'archive-preview', text: `${preview}…` }),
+    h('p', {
+      class: 'archive-preview',
+      text: chosen && chosen.text.length > 140 ? `${preview}…` : preview,
+    }),
     h('p', { class: 'archive-direction', text: `turn: ${directionText}` }),
     moodChips.length > 0 ? h('div', { class: 'direction-chips' }, ...moodChips) : null,
     versionButtons,
@@ -282,9 +312,19 @@ function branchPagesOf(
   chosenNextPageId: string | undefined,
 ): StoryNode[] {
   const out: StoryNode[] = [];
+  // Most forks attach under the turn node that produced this page…
   for (const turn of childrenOf(api.nodes, page.id).filter((n) => n.kind === 'turn')) {
     for (const child of childrenOf(api.nodes, turn.id)) {
       if (child.kind !== 'page') continue;
+      if (child.id !== chosenNextPageId) out.push(child);
+    }
+  }
+  // …but page 1 grows directly under the title (it has no turn node), so its
+  // forks are siblings of the page itself.
+  const parent = getNode(api.nodes, page.parentId ?? '');
+  if (parent && parent.kind === 'title') {
+    for (const child of childrenOf(api.nodes, parent.id)) {
+      if (child.kind !== 'page' || child.id === page.id) continue;
       if (child.id !== chosenNextPageId) out.push(child);
     }
   }

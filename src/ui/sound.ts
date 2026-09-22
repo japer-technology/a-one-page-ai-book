@@ -26,6 +26,7 @@ interface PadState {
 let pad: PadState | null = null;
 let enabled = false;
 let currentMood: MoodTone | null = null;
+let lastMoodKey = '';
 
 /** Is the soundscape running? */
 export function ambienceOn(): boolean {
@@ -79,6 +80,37 @@ export function toggleAmbience(): boolean {
   }
 }
 
+/** Perform the book's score (mood map notes) with simple oscillators. */
+export function playScore(
+  notes: Array<{ note: number; velocity: number; durationMs: number }>,
+): void {
+  try {
+    const Ctx =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    let start = ctx.currentTime + 0.1;
+    for (const n of notes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = 440 * Math.pow(2, (n.note - 69) / 12);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(n.velocity / 140, start + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + n.durationMs / 1000);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + n.durationMs / 1000 + 0.1);
+      start += n.durationMs / 1000;
+    }
+    window.setTimeout(() => void ctx.close(), (start - ctx.currentTime) * 1000 + 400);
+  } catch {
+    // audio unavailable — the MIDI file export still works
+  }
+}
+
 export function stopAmbience(): void {
   if (!pad) return;
   const state = pad;
@@ -97,8 +129,11 @@ export function stopAmbience(): void {
   }
 }
 
-/** Retune the pad toward the page's dominant emotion. */
+/** Retune the pad toward the page's dominant emotion (idempotent). */
 export function setAmbienceMood(mood: MoodTone | null): void {
+  const key = mood ? `${mood.label}:${mood.value}` : 'none';
+  if (key === lastMoodKey) return;
+  lastMoodKey = key;
   currentMood = mood;
   if (!enabled || !pad) return;
   applyMood(mood);

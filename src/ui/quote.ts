@@ -1,7 +1,9 @@
 /**
  * ui/quote.ts — share a page as a beautiful quote card: typography-first,
- * rendered to a canvas at 2× resolution and downloaded as a PNG. No network,
- * no fonts — the card uses the app's own serif stack.
+ * rendered to a canvas at 2× resolution and downloaded as a PNG. The card
+ * uses its own FIXED print palette (cream paper, near-black ink, deep gold)
+ * so contrast is excellent in every theme. No network, no fonts beyond the
+ * system serif stack.
  */
 import type { CompiledBook } from '../core/compile';
 
@@ -12,14 +14,12 @@ export interface QuoteCardInput {
   mood?: { icon: string; label: string; value: number };
 }
 
-function cssVar(name: string, fallback: string): string {
-  try {
-    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    return value || fallback;
-  } catch {
-    return fallback;
-  }
-}
+// Fixed print palette — deliberately independent of the app theme.
+const PLAQUE = '#17110b';
+const PAPER = '#f6eedd';
+const INK = '#211b12';
+const ACCENT = '#7a5810';
+const MUTED = '#6b5c40';
 
 /** Wrap prose to a pixel width using canvas measurement. */
 function wrapToWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
@@ -57,54 +57,77 @@ export function renderQuoteCard(input: QuoteCardInput): HTMLCanvasElement {
   if (!ctx) throw new Error('Canvas unavailable');
   ctx.scale(scale, scale);
 
-  const paper = cssVar('--paper', '#f2e9d8');
-  const ink = cssVar('--ink', '#1c1712');
-  const accent = cssVar('--accent', '#e8c47a');
-  const bg = cssVar('--bg-card', '#211b16');
-
-  ctx.fillStyle = bg;
+  // Plaque + card with a soft shadow.
+  ctx.fillStyle = PLAQUE;
   ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = paper;
-  ctx.fillRect(48, 48, W - 96, H - 96);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(70, 78, W - 140, H - 140);
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(52, 56, W - 104, H - 112);
 
-  ctx.fillStyle = ink;
+  // Ornament rule.
+  ctx.fillStyle = ACCENT;
+  ctx.fillRect(W / 2 - 140, 120, 280, 3);
+
+  // Title — dark ink on cream: maximum contrast.
+  ctx.fillStyle = INK;
   ctx.textAlign = 'center';
-  ctx.font = '600 44px Georgia, serif';
-  ctx.fillText(input.title, W / 2, 140, W - 160);
+  ctx.font = '600 46px Georgia, serif';
+  const titleWords = input.title.split(/\s+/);
+  const titleLines: string[] = [];
+  let current = '';
+  for (const word of titleWords) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (ctx.measureText(candidate).width > W - 220 && current) {
+      titleLines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) titleLines.push(current);
+  let y = 190;
+  for (const line of titleLines.slice(0, 3)) {
+    ctx.fillText(line, W / 2, y, W - 200);
+    y += 58;
+  }
 
-  ctx.fillStyle = accent;
-  ctx.font = '28px Georgia, serif';
+  // Mood line — deep gold (readable on cream).
+  ctx.fillStyle = ACCENT;
+  ctx.font = '600 26px Georgia, serif';
   const moodLine = input.mood
-    ? `${input.mood.icon} ${input.mood.label} ${input.mood.value > 0 ? '+' : ''}${input.mood.value}`
-    : '';
-  ctx.fillText(`Page ${input.pageNumber}${moodLine ? ` · ${moodLine}` : ''}`, W / 2, 190, W - 160);
+    ? `Page ${input.pageNumber} · ${input.mood.icon} ${input.mood.label} ${input.mood.value > 0 ? '+' : ''}${input.mood.value}`
+    : `Page ${input.pageNumber}`;
+  ctx.fillText(moodLine, W / 2, y + 20, W - 200);
 
   // Trim overlong pages to a card-friendly length.
   let text = input.text.trim();
   const words = text.split(/\s+/);
-  if (words.length > 240) {
-    text = words.slice(0, 240).join(' ') + ' …';
+  if (words.length > 220) {
+    text = words.slice(0, 220).join(' ') + ' …';
   }
 
+  // Body — dark ink, generous line height.
   ctx.textAlign = 'left';
-  ctx.font = '34px Georgia, serif';
+  ctx.fillStyle = INK;
+  ctx.font = '33px Georgia, serif';
   const lines = wrapToWidth(ctx, text, W - 260);
-  const lineHeight = 54;
-  let y = 280;
+  let by = y + 96;
   for (const line of lines) {
-    if (y > H - 260) break;
+    if (by > H - 250) break;
     if (line.length === 0) {
-      y += lineHeight * 0.6;
+      by += 30;
       continue;
     }
-    ctx.fillText(line, 130, y, W - 260);
-    y += lineHeight;
+    ctx.fillText(line, 130, by, W - 260);
+    by += 54;
   }
 
+  // Footer.
   ctx.textAlign = 'center';
-  ctx.fillStyle = accent;
-  ctx.font = 'italic 24px Georgia, serif';
-  ctx.fillText('— a page directed in Page Turn —', W / 2, H - 90);
+  ctx.fillStyle = MUTED;
+  ctx.font = 'italic 23px Georgia, serif';
+  ctx.fillText('— a page directed in Page Turn —', W / 2, H - 96);
 
   return canvas;
 }
@@ -117,8 +140,13 @@ export function downloadQuoteCard(input: QuoteCardInput, fileName: string): void
     const a = document.createElement('a');
     a.href = url;
     a.download = fileName;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    document.body.appendChild(a);
+    try {
+      a.click();
+    } finally {
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    }
   }, 'image/png');
 }
 

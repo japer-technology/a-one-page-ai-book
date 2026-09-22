@@ -692,6 +692,15 @@ architecture in [ARCHITECTURE.md](ARCHITECTURE.md):
 | Compiled book export: **EPUB** + .txt/.md, cast appendix + mood map (§9) | ✅ |
 | Library bookshelf: search, duplicate, rename, import/export (§10) | ✅ |
 | **About-this-book ledger** — "you wrote 142 words and directed 11,283" (§9) | ✅ |
+| **Rolling story summary** — long books stay coherent (§12.1) | ✅ |
+| **Relationship graph** — bonds extracted, editable, visualized, injected as canon (§12.1) | ✅ |
+| **Pace + cliffhanger/resting toggles** (§7.2B) | ✅ |
+| **Nudge presets** — one-tap micro-directions (§7.4) | ✅ |
+| **Conflict detector** — direction-vs-story heads-up (§13) | ✅ |
+| **Living shelf** — covers, tags, fuzzy search, drag-drop import, backup nudge, streaks & badges (§10) | ✅ |
+| **Reading themes incl. follow-the-OS + font selection** (§13) | ✅ |
+| **Wide-screen layout** — page left, control rail right (§7.4) | ✅ |
+| **Round 5** — Prologue That Knew, Director's Commentary, what-if ghost pages, Iron Author mode, story linter, Pass the Quill, MIDI score, Director's Portrait, document wardrobe, rename surgery (§8, §9, §13, §16) | ✅ |
 | **Pin versions** — favorites never lost (§13) | ✅ |
 | **Selection rewriting** — rewrite/edit any chosen span, word by word (§6) | ✅ |
 | **Time-lapse replay** of the tree (§16) | ✅ |

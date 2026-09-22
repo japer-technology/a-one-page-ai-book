@@ -18,8 +18,7 @@ html {
 
 body {
   margin: 0;
-  background:
-    radial-gradient(1200px 500px at 50% -10%, rgb(232 196 122 / 0.07), transparent 60%), var(--bg);
+  background: var(--wall);
   color: var(--paper);
   font-family: var(--sans);
   font-size: 16px;
@@ -213,6 +212,26 @@ body {
 .input:focus {
   outline: 2px solid rgb(232 196 122 / 0.45);
   outline-offset: 0;
+}
+
+/* Keyboard users always see where they are — mouse clicks stay quiet. */
+:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+summary:focus-visible,
+.menu-btn:focus-visible,
+.spine-dot:focus-visible,
+.para-tool:focus-visible,
+.cast-tool:focus-visible,
+.version-item:focus-visible,
+.version-pin:focus-visible,
+.mood-chip:focus-visible,
+.help-link:focus-visible,
+.linklike:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 1px;
 }
 
 textarea.input {

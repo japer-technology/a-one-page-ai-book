@@ -7,6 +7,7 @@ import {
   moodOf,
   paragraphsOf,
   slugify,
+  toDirectorCut,
   toMarkdown,
   toPlainText,
 } from '../src/core/compile';
@@ -15,6 +16,7 @@ import {
   finishBook,
   makeBook,
   makePageNode,
+  makePrologueNode,
   makeSeedNode,
   makeTitleNode,
   makeTurnNode,
@@ -112,6 +114,8 @@ describe('cast in exports', () => {
       places: [],
       things: [],
       threads: [],
+      relations: [],
+      summary: '',
       at: 1,
       updatedAt: 1,
     };
@@ -151,5 +155,30 @@ describe('mood map', () => {
     expect(moodLine(compiled)).toContain('Mood map');
     expect(moodLine(compiled)).toContain('🕳️');
     expect(toMarkdown(compiled)).toContain('Mood map');
+  });
+});
+
+describe('prologue and commentary edition', () => {
+  it('compiles the prologue as page zero, before page one', () => {
+    const { nodes, book } = bookFixture();
+    const prologue = makePrologueNode(
+      book.chosenTitleId,
+      DEFAULT_TURN,
+      'm',
+      'It began long before the letter.',
+    );
+    const compiled = compileBook({ ...nodes, [prologue.id]: prologue }, book);
+    expect(compiled.pages[0]?.kind).toBe('prologue');
+    expect(compiled.pages[0]?.text).toContain('long before');
+    expect(compiled.pages[1]?.number).toBe(1);
+    expect(moodLine(compiled)).not.toContain('0');
+  });
+
+  it('interleaves directions into the director’s cut', () => {
+    const { nodes, book } = bookFixture();
+    const compiled = compileBook(nodes, book);
+    const cut = toDirectorCut(compiled);
+    expect(cut).toContain("Director's Commentary");
+    expect(cut).toContain('Directed:');
   });
 });

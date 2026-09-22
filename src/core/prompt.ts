@@ -71,13 +71,23 @@ export function buildContextTo(
   const seedText = seedNode && seedNode.data.kind === 'seed' ? seedNode.data.text : compiled.seed;
   const titleText =
     titleNode && titleNode.data.kind === 'title' ? titleNode.data.title : compiled.title;
+  let lastDirection: TurnInput | null = null;
+  let lastChapterNumber = 1;
+  let chaptersSeen = 0;
+  for (const node of path) {
+    if (node.data.kind !== 'page') continue;
+    if (node.data.direction.chapter === 'start') chaptersSeen++;
+    lastDirection = node.data.direction;
+    lastChapterNumber = chaptersSeen;
+  }
   // Two-tier memory, budget-redesigned: the fixed blocks (seed, title, brief,
-  // summary, cast) are sized FIRST; the verbatim recent pages fill whatever
-  // remains. The summary replaces the OLDEST pages, never the recent ones.
-  let fixedWords = countWords(seedText) + countWords(titleText);
+  // summary, cast, direction) are sized FIRST; the verbatim recent pages fill
+  // whatever remains. The summary replaces the OLDEST pages, never the recent ones.
+  let fixedWords = countWords(seedText) + countWords(titleText) + 90; // + fixed header/labels
   if (brief) fixedWords += countWords(briefText(brief));
   if (cast) fixedWords += countWords(castText(cast));
   if (summary) fixedWords += countWords(summaryText(summary));
+  if (lastDirection) fixedWords += countWords(directionText(lastDirection, lastChapterNumber)) + 40;
   const pagesBudget = Math.max(CONTEXT_WORD_BUDGET - fixedWords, MIN_PAGE_WORDS);
   const trimmed: string[] = [];
   let words = 0;
@@ -87,14 +97,6 @@ export function buildContextTo(
     if (words + page.words > pagesBudget) break;
     trimmed.unshift(page.text);
     words += page.words;
-  }
-  let lastDirection: TurnInput | null = null;
-  for (let i = path.length - 1; i >= 0; i--) {
-    const node = path[i];
-    if (node && node.data.kind === 'page') {
-      lastDirection = node.data.direction;
-      break;
-    }
   }
   return {
     seed: seedText,
@@ -228,7 +230,7 @@ export const LENGTH_GUIDANCE: Record<
   },
 };
 
-export function directionText(input: TurnInput): string {
+export function directionText(input: TurnInput, chapterNumber?: number): string {
   const parts: string[] = [];
   if (input.direction.trim()) parts.push(`What happens next: ${input.direction.trim()}`);
   if (input.tone !== 'inherit') parts.push(`Tone: ${TONE_GUIDANCE[input.tone]}`);
@@ -245,9 +247,14 @@ export function directionText(input: TurnInput): string {
   if (input.document !== 'story') {
     parts.push(DOCUMENT_GUIDANCE[input.document]);
   }
+  if (input.pace !== 'inherit') parts.push(PACE_GUIDANCE[input.pace]);
+  if (input.beat !== 'inherit') parts.push(BEAT_GUIDANCE[input.beat]);
   if (input.chapter === 'start') {
+    // The chapter number is a fact the app knows and the model does not: give
+    // it explicitly so the model never falls back on the page number.
+    const n = chapterNumber && chapterNumber > 0 ? chapterNumber : 1;
     parts.push(
-      'CHAPTER BREAK: begin this page with a chapter heading on its own line (like "Chapter Three — A Short Evocative Title"), then write the page as the chapter\u2019s opening.',
+      `CHAPTER BREAK: this page opens chapter ${n} of the book. Begin the page with a chapter heading on its own line, exactly numbered — "Chapter ${n} — A Short Evocative Title" — then write the page as the chapter's opening. The heading number is the chapter number (${n}), NEVER the page number.`,
     );
   }
   if (input.chapter === 'close') {
@@ -262,6 +269,19 @@ export function directionText(input: TurnInput): string {
   }
   return parts.join('\n');
 }
+
+export const PACE_GUIDANCE: Record<Exclude<TurnInput['pace'], 'inherit'>, string> = {
+  slow: 'PACE: slow and meditative — linger on detail, interiority, the weight of moments; longer sentences, room to breathe.',
+  propulsive:
+    'PACE: propulsive — short sentences, forward motion, things happening now; cut to the chase, keep the reader leaning in.',
+};
+
+export const BEAT_GUIDANCE: Record<Exclude<TurnInput['beat'], 'inherit'>, string> = {
+  cliffhanger:
+    'PAGE ENDING: end on a cliffhanger — a hook that demands the next page: a cut mid-action, a withheld reveal, a new threat.',
+  resting:
+    'PAGE ENDING: end on a resting point — a moment of calm, a completed beat, a breath before what comes next.',
+};
 
 export const DOCUMENT_GUIDANCE: Record<Exclude<TurnInput['document'], 'story'>, string> = {
   letter:
@@ -309,6 +329,11 @@ export function castText(cast: StoryBible | undefined): string {
   group('People', cast.people);
   group('Places', cast.places);
   group('Things', cast.things);
+  if (cast.relations.length > 0) {
+    lines.push(
+      `Relationships (canon): ${cast.relations.map((r) => `${r.from} — ${r.kind} — ${r.to}`).join('; ')}`,
+    );
+  }
   if (cast.threads.length > 0) {
     lines.push(
       `Open threads to advance or resolve (never drop them silently): ${cast.threads
@@ -393,12 +418,15 @@ export function titlesMessages(
   ];
 }
 
-/** Messages for generating one page. */
+/** Messages for generating one page. `chapterNumber` is the chapter this page
+ * opens when the direction asks for a chapter break (computed from the tree —
+ * never inferred from the page number). */
 export function pageMessages(
   ctx: StoryContext,
   direction: TurnInput,
   targetPageNumber: number,
   rules: string[] = [],
+  chapterNumber?: number,
 ): ChatMessage[] {
   const history =
     ctx.pages.length > 0 ? ctx.pages.join('\n\n') : '(This is page 1 — nothing exists yet.)';
@@ -410,7 +438,7 @@ export function pageMessages(
     { role: 'system', content: SYSTEM_PROMPT },
     {
       role: 'user',
-      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}${brief ? `\n\n${brief}` : ''}${cast ? `\n\n${cast}` : ''}${summary ? `\n\n${summary}` : ''}\n\nSTORY SO FAR (the chosen pages, oldest first):\n${history}\n\nThis will be page ${targetPageNumber}.\n\nDIRECTION:\n${directionText(direction)}${standing ? `\n\n${standing}` : ''}\n\nWrite the page now.`,
+      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}${brief ? `\n\n${brief}` : ''}${cast ? `\n\n${cast}` : ''}${summary ? `\n\n${summary}` : ''}\n\nSTORY SO FAR (the chosen pages, oldest first):\n${history}\n\nThis will be page ${targetPageNumber}.\n\nDIRECTION:\n${directionText(direction, chapterNumber)}${standing ? `\n\n${standing}` : ''}\n\nWrite the page now.`,
     },
   ];
 }
@@ -500,13 +528,15 @@ export function bibleMessages(ctx: StoryContext, previous: StoryBible | null): C
   }
   const history = pages.length > 0 ? pages.join('\n\n') : ctx.seed;
   const previousBlock = previous
-    ? `CURRENT CAST (keep entries that are still true, update notes when the story reveals more, add the new ones — the reader curates these, so RESPECT their names even if the older text spells them differently):\n${JSON.stringify({ people: previous.people, places: previous.places, things: previous.things, threads: previous.threads })}`
+    ? `CURRENT CAST (keep entries that are still true, update notes when the story reveals more, add the new ones — the reader curates these, so RESPECT their names even if the older text spells them differently):\n${JSON.stringify({ people: previous.people, places: previous.places, things: previous.things, threads: previous.threads, relations: previous.relations, summary: previous.summary })}`
     : '(No cast yet — build it from the story so far.)';
   return [
     { role: 'system', content: STRUCTURED_SYSTEM_PROMPT },
     {
       role: 'user',
-      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}\n\nSTORY SO FAR (oldest first):\n${history}\n\n${previousBlock}\n\nMaintain the living cast of this story. Respond with ONLY a JSON object with exactly four arrays:\n{"people": [{"name": "...", "note": "..."}], "places": [{"name": "...", "note": "..."}], "things": [{"name": "...", "note": "..."}], "threads": [{"name": "...", "note": "..."}]}\n\nRules:\n- "people" = every named or present character (humans, ghosts, animals with agency).\n- "places" = every location with story weight (the lighthouse, the island, the kitchen).\n- "things" = significant objects, letters, heirlooms, symbols — things the plot turns on.\n- "threads" = open questions, mysteries, promises and unresolved conflicts the story still owes the reader (e.g. "the letter's sender", "why the fog returns"). Drop a thread only when the story resolves it.\n- name = exactly what the text calls them (or the curated cast name). note = ONE short line (≤ 12 words) covering role or significance.\n- Ground every entry in the text; never invent entries the story has not established.\n- At most 12 people, 8 places, 10 things, 12 threads. Output ONLY the JSON object.`,
+      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}\n\nSTORY SO FAR (oldest first):\n${history}\n\n${previousBlock}\n\nMaintain the living cast and rolling summary of this story. Respond with ONLY a JSON object with exactly four arrays plus one string:\n{"people": [{"name": "...", "note": "..."}], "places": [{"name": "...", "note": "..."}], "things": [{"name": "...", "note": "..."}], "threads": [{"name": "...", "note": "..."}], "relations": [{"from": "...", "to": "...", "kind": "..."}], "summary": "..."}\n\nRules:\n- "people" = every named or present character (humans, ghosts, animals with agency).\n- "places" = every location with story weight (the lighthouse, the island, the kitchen).\n- "things" = significant objects, letters, heirlooms, symbols — things the plot turns on.\n- "threads" = open questions, mysteries, promises and unresolved conflicts the story still owes the reader (e.g. "the letter's sender", "why the fog returns"). Drop a thread only when the story resolves it.\n- name = exactly what the text calls them (or the curated cast name). note = ONE short line (≤ 12 words) covering role or significance.\n- Ground every entry in the text; never invent entries the story has not established.\n- "relations" = every important relationship between cast people as {"from", "to", "kind"} with kind a short plain label (sisters, mentor, rivals, in love, estranged...). At most 14 relations; only between people in the cast.
+- "summary" = the rolling summary of the whole story so far, at most 300 words: current situation, established facts that must stay true, the latest events, and the open threads — written so the next page can be written from it alone.
+- At most 12 people, 8 places, 10 things, 12 threads. Output ONLY the JSON object.`,
     },
   ];
 }
@@ -604,6 +634,69 @@ export function rewriteSpanMessages(
     {
       role: 'user',
       content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}${brief ? `\n\n${brief}` : ''}${cast ? `\n\n${cast}` : ''}${summary ? `\n\n${summary}` : ''}\n\nPAGE ${pageNumber}, the paragraph it lives in:\n${paragraphText}\n\nTHE EXACT SPAN TO REWRITE:\n${spanText}\n\nINSTRUCTION: ${instruction || 'Rewrite this span — same meaning and events, sharper prose, seamless with the sentence around it.'}${standing ? `\n\n${standing}` : ''}\n\nOutput ONLY the rewritten span (not the whole paragraph).`,
+    },
+  ];
+}
+
+/** Messages for the conflict checker: does the direction contradict the story? */
+export function conflictMessages(ctx: StoryContext, direction: string): ChatMessage[] {
+  const tail = ctx.pages.length > 0 ? ctx.pages.slice(-3).join('\n\n') : ctx.seed;
+  const cast = castText(ctx.cast);
+  const brief = briefText(ctx.brief);
+  const summary = summaryText(ctx.summary);
+  return [
+    { role: 'system', content: STRUCTURED_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}${brief ? `\n\n${brief}` : ''}${cast ? `\n\n${cast}` : ''}${summary ? `\n\n${summary}` : ''}\n\nRECENT PAGES:\n${tail}\n\nPROPOSED DIRECTION for the next page:\n"${direction}"\n\nCheck it against everything established. Respond with ONLY a JSON array of strings. Each string is ONE concrete contradiction with a page-or-fact reference (e.g. "She is established as the keeper's daughter, not a stranger"). If there are no contradictions, respond with an empty JSON array: [].`,
+    },
+  ];
+}
+
+// ---- Round 5: prologue, portrait, rename surgery ---------------------------
+
+/** The prologue that knew: one page that plants the finished book's seeds. */
+export function prologueMessages(ctx: StoryContext): ChatMessage[] {
+  const history = ctx.pages.join('\n\n');
+  const brief = briefText(ctx.brief);
+  const cast = castText(ctx.cast);
+  return [
+    { role: 'system', content: SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}${brief ? `\n\n${brief}` : ''}${cast ? `\n\n${cast}` : ''}\n\nTHE FINISHED STORY (oldest first):\n${history}\n\nWrite the PROLOGUE: page zero of this book, one page of ~150–300 words that comes BEFORE page 1. It must plant the seeds of how the story actually ends — an image, an object, a line — so a re-reader gasps. Do not spoil the ending outright. Output ONLY the prologue text.`,
+    },
+  ];
+}
+
+/** The Director's Portrait: a playful reading of the reader's directing style. */
+export function portraitMessages(
+  ctx: StoryContext,
+  stats: { pages: number; versions: number; branches: number; wordsKept: number },
+): ChatMessage[] {
+  return [
+    { role: 'system', content: STRUCTURED_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}\n\nThe book is finished: ${stats.pages} pages kept, ${stats.versions} versions written, ${stats.branches} branches grown, ${stats.wordsKept} words kept. The reader directed every turn, page by page.\n\nWrite THE DIRECTOR'S PORTRAIT: a warm, witty, insightful reading of this reader's directing style — their tendencies, obsessions, and what they kept coming back to. Second person, 120–180 words, playful but perceptive, like a kind editor toasting them at a party. Output ONLY the portrait text — no headings, no quotes around it.`,
+    },
+  ];
+}
+
+/** Retroactive rename: replace one name everywhere in one page, nothing else. */
+export function renameMessages(
+  ctx: StoryContext,
+  pageNumber: number,
+  pageText: string,
+  oldName: string,
+  newName: string,
+): ChatMessage[] {
+  const cast = castText(ctx.cast);
+  return [
+    { role: 'system', content: SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}${cast ? `\n\n${cast}` : ''}\n\nPAGE ${pageNumber}:\n${pageText}\n\nSURGERY: rewrite this page replacing EVERY occurrence of the name "${oldName}" with "${newName}" — including pronouns where they refer to that character and any possessive forms. Change NOTHING else: same words, same sentences, same events. Output ONLY the rewritten page.`,
     },
   ];
 }

@@ -7,18 +7,23 @@
  * the "don't touch" constraints that persist until removed.
  */
 import type { AppApi } from '../ctx';
-import { button, field, h, spinner } from '../dom';
+import { button, field, h, pruneMap, spinner } from '../dom';
 import {
   buildContext,
+  conflictMessages,
   endingsMessages,
   EMOTION_META,
+  pageMessages,
   suggestionsMessages,
 } from '../../core/prompt';
-import { getNode, pageNumberAt, titleNodeOf } from '../../core/tree';
+import { getNode, pageNumberAt, seedTextOf, titleNodeOf } from '../../core/tree';
+import { parseStringList } from '../../core/parsers';
 import type {
   Book,
   ChapterIntent,
   LengthPreference,
+  Pace,
+  PageBeat,
   PageSizeTarget,
   StoryNode,
   Tone,
@@ -36,6 +41,38 @@ const suggestions = new Map<string, string[]>();
 const suggestIndex = new Map<string, number>();
 const autoSuggested = new Set<string>();
 const endings = new Map<string, Array<{ title: string; premise: string }>>();
+const conflicts = new Map<string, string[] | null>();
+/** What-if ghost previews: written but NOT attached to the tree. */
+/** Sticky per-book turn settings: size, tone, dials, pace, beat, chapter and
+ * format persist across turns until the reader changes them. The free-text
+ * direction is one-shot and never sticks. */
+const stickyInputs = new Map<string, TurnInput>();
+
+function stickyFor(bookId: string): TurnInput {
+  const sticky = stickyInputs.get(bookId);
+  if (!sticky) return { ...DEFAULT_TURN, emotions: {} };
+  return { ...sticky, direction: '', emotions: { ...sticky.emotions } };
+}
+
+function rememberSticky(bookId: string, input: TurnInput): void {
+  stickyInputs.set(bookId, { ...input, direction: '' });
+}
+
+const ghosts = new Map<string, { text: string; direction: string }>();
+const conflictBusy = new Set<string>();
+/** Turns whose direction box has already received the caret. */
+const turnFocused = new Set<string>();
+
+const NUDGES = [
+  'end on dialogue',
+  'add sensory detail',
+  'show, don’t tell',
+  'raise the stakes',
+  'a moment of calm',
+  'reveal a secret',
+  'let a character change their mind',
+  'cut to a new location',
+];
 
 const RULE_PRESETS = [
   'Don’t reveal the letter yet',
@@ -57,9 +94,15 @@ export function renderTurn(api: AppApi): HTMLElement {
       button('← Library', () => api.navigate('library')),
     );
 
+  pruneMap(inputs, 200);
+  pruneMap(suggestions, 200);
+  pruneMap(suggestIndex, 200);
+  pruneMap(endings, 200);
+  pruneMap(conflicts, 200);
+  if (turnFocused.size > 300) turnFocused.clear();
   const fromId = api.params.from ?? frontierParent(api);
   const from = fromId ? getNode(api.nodes, fromId) : null;
-  if (!from || from.data.kind !== 'page') {
+  if (!from || (from.data.kind !== 'page' && from.data.kind !== 'title')) {
     return h(
       'div',
       { class: 'view' },
@@ -67,6 +110,7 @@ export function renderTurn(api: AppApi): HTMLElement {
       button('← Library', () => api.navigate('library')),
     );
   }
+  const fromTitle = from.data.kind === 'title';
 
   const key = `turn:${book.id}`;
   const busy = genStates.get(key);
@@ -80,7 +124,7 @@ export function renderTurn(api: AppApi): HTMLElement {
   }
 
   const stateKey = `${book.id}:${from.id}`;
-  const input = inputs.get(stateKey) ?? { ...DEFAULT_TURN, emotions: {} };
+  const input = inputs.get(stateKey) ?? stickyFor(book.id);
   inputs.set(stateKey, input);
 
   const directionBox = h('textarea', {
@@ -92,6 +136,12 @@ export function renderTurn(api: AppApi): HTMLElement {
       input.direction = (event.target as HTMLTextAreaElement).value;
     },
   });
+  // The direction is the primary control: put the caret there the first time
+  // this turn is shown, so the reader can start typing immediately.
+  if (!turnFocused.has(stateKey)) {
+    turnFocused.add(stateKey);
+    setTimeout(() => directionBox.focus(), 0);
+  }
 
   // ---- Page size: presets + precise word/paragraph/character targets -------
   const sizeTarget = input.sizeTarget;
@@ -139,15 +189,27 @@ export function renderTurn(api: AppApi): HTMLElement {
     { class: 'size-control' },
     segmented(
       [
+        ['para1', '¶ one paragraph'],
+        ['para3', '¶ two–three paragraphs'],
         ['shorter', 'shorter'],
         ['standard', 'standard'],
         ['longer', 'longer'],
         ['custom', 'custom…'],
       ],
-      sizeTarget ? 'custom' : input.length,
+      sizeTarget
+        ? sizeTarget.kind === 'paragraphs'
+          ? sizeTarget.value === 1
+            ? 'para1'
+            : 'para3'
+          : 'custom'
+        : input.length,
       (value) => {
         if (value === 'custom') {
           input.sizeTarget = { kind: 'words', value: 320 };
+        } else if (value === 'para1') {
+          input.sizeTarget = { kind: 'paragraphs', value: 1 };
+        } else if (value === 'para3') {
+          input.sizeTarget = { kind: 'paragraphs', value: 3 };
         } else {
           input.sizeTarget = null;
           input.length = value as LengthPreference;
@@ -224,6 +286,29 @@ export function renderTurn(api: AppApi): HTMLElement {
     ),
   );
 
+  const paceControl = segmented(
+    [
+      ['inherit', 'pace: inherit'],
+      ['slow', '🐌 slow & meditative'],
+      ['propulsive', '⚡ propulsive'],
+    ],
+    input.pace,
+    (value) => {
+      input.pace = value as Pace;
+    },
+  );
+  const beatControl = segmented(
+    [
+      ['inherit', 'ending: inherit'],
+      ['cliffhanger', '⛰ cliffhanger'],
+      ['resting', '🌙 resting point'],
+    ],
+    input.beat,
+    (value) => {
+      input.beat = value as PageBeat;
+    },
+  );
+
   const endingBox = h('input', {
     type: 'checkbox',
     checked: input.ending ? true : undefined,
@@ -241,6 +326,9 @@ export function renderTurn(api: AppApi): HTMLElement {
   const applySuggestion = (item: string) => {
     input.direction = item;
     directionBox.value = item;
+    // The direction changed: any conflict verdict about the old direction is
+    // stale and must not linger under the new one.
+    conflicts.delete(stateKey);
   };
   const stepSuggestion = (delta: number) => {
     if (list.length === 0) return;
@@ -254,16 +342,27 @@ export function renderTurn(api: AppApi): HTMLElement {
   const suggestArea = h('div', { class: 'suggest-area' });
   list.forEach((item, index) => {
     suggestArea.appendChild(
-      h('button', {
-        class: `chip chip-suggest${index === sIndex ? ' chip-on' : ''}`,
-        type: 'button',
-        text: item,
-        onclick: () => {
-          suggestIndex.set(stateKey, index);
-          applySuggestion(item);
-          api.refresh();
-        },
-      }),
+      h(
+        'span',
+        { class: 'suggest-item' },
+        h('button', {
+          class: `chip chip-suggest${index === sIndex ? ' chip-on' : ''}`,
+          type: 'button',
+          text: item,
+          onclick: () => {
+            suggestIndex.set(stateKey, index);
+            applySuggestion(item);
+            api.refresh();
+          },
+        }),
+        h('button', {
+          class: 'ghost-btn',
+          type: 'button',
+          text: '👻',
+          title: 'What if…? Write a ghost preview of this direction WITHOUT committing it',
+          onclick: () => void ghostPreview(api, book, from, stateKey, item),
+        }),
+      ),
     );
   });
   if (list.length > 1) {
@@ -332,6 +431,49 @@ export function renderTurn(api: AppApi): HTMLElement {
     'datalist',
     { id: 'rule-presets' },
     ...RULE_PRESETS.map((p) => h('option', { value: p })),
+  );
+
+  // ---- Conflict checker -----------------------------------------------------
+  const conflictList = conflicts.get(stateKey);
+  const checking = conflictBusy.has(stateKey);
+  const conflictArea = h('div', { class: 'conflict-area' });
+  if (conflictList && conflictList.length === 0) {
+    conflictArea.appendChild(
+      h('p', {
+        class: 'conflict-ok',
+        text: '✓ No conflicts found — this direction is consistent with the story.',
+      }),
+    );
+    conflictArea.appendChild(button('✕', () => conflicts.delete(stateKey), 'chip'));
+  } else if (conflictList) {
+    {
+      conflictArea.appendChild(
+        h(
+          'div',
+          { class: 'banner banner-error' },
+          '⚠️ This direction conflicts with the story so far:',
+        ),
+      );
+      conflictArea.appendChild(
+        h('ul', { class: 'conflict-list' }, ...conflictList.map((item) => h('li', { text: item }))),
+      );
+      conflictArea.appendChild(button('✕', () => conflicts.delete(stateKey), 'chip'));
+    }
+  }
+  conflictArea.appendChild(
+    h(
+      'div',
+      { class: 'row gap' },
+      button(
+        checking ? 'Checking…' : '🔍 Check this direction',
+        () => void checkConflicts(api, book, stateKey, input),
+        'ghost',
+        {
+          disabled: checking || input.direction.trim().length === 0,
+          title: 'Ask the model whether this direction contradicts anything established',
+        },
+      ),
+    ),
   );
 
   // ---- Auto-suggest --------------------------------------------------------
@@ -432,74 +574,122 @@ export function renderTurn(api: AppApi): HTMLElement {
   return h(
     'div',
     { class: 'view view-turn' },
-    fadedPage(api, book, from),
     h(
-      'section',
-      { class: 'turn-panel' },
-      h('h2', { class: 'turn-title', text: 'The page is written. What happens next?' }),
-      field('Direction', directionBox, 'A one-liner is plenty — or nothing at all.'),
+      'div',
+      { class: 'turn-layout' },
+      fadedPage(api, book, from),
       h(
-        'div',
-        { class: 'row gap' },
-        button('✨ Suggest directions', () => void suggest(api, book, stateKey, suggestArea)),
-      ),
-      suggestArea,
-      h('div', { class: 'grid-2' }, field('Page length', lengthControl), field('Tone', toneSelect)),
-      h(
-        'details',
-        { class: 'folds dials' },
+        'section',
+        { class: 'turn-panel' },
+        h('h2', {
+          class: 'turn-title',
+          text: fromTitle
+            ? 'The title is chosen. How does page one begin?'
+            : 'The page is written. What happens next?',
+        }),
+        h('button', {
+          class: 'help-link',
+          type: 'button',
+          text: '? what is all this',
+          title: 'Open the help for the turn console',
+          onclick: () => api.navigate('help', { section: 'turn' }),
+        }),
+        field('Direction', directionBox, 'A one-liner is plenty — or nothing at all.'),
         h(
-          'summary',
-          { class: 'dials-summary' },
-          h('span', {
-            text: `🎚️ Emotion dials${touchedCount > 0 ? ` — ${touchedCount} touched` : ''}`,
-          }),
-          h('span', {
-            class: 'field-hint',
-            text: '±3, structural not adjectival · 0 = inherit the mood',
-          }),
+          'div',
+          { class: 'nudges' },
+          h('span', { class: 'nudges-label', text: 'quick nudges' }),
+          ...NUDGES.map((nudge) =>
+            button(
+              nudge,
+              () => {
+                input.direction = input.direction.trim()
+                  ? `${input.direction.trim()} — ${nudge}`
+                  : nudge;
+                directionBox.value = input.direction;
+                conflicts.delete(stateKey);
+              },
+              'chip',
+              { title: `Append “${nudge}” to the direction` },
+            ),
+          ),
         ),
-        dials,
         h(
           'div',
           { class: 'row gap' },
-          button('Reset dials', () => {
-            input.emotions = {};
-            api.refresh();
+          button('✨ Suggest directions', () => void suggest(api, book, stateKey, suggestArea)),
+        ),
+        suggestArea,
+        ghostPanel(api, book, from, stateKey),
+        h(
+          'div',
+          { class: 'grid-2' },
+          field('Page length', lengthControl),
+          field('Tone', toneSelect),
+        ),
+        h(
+          'details',
+          { class: 'folds dials' },
+          h(
+            'summary',
+            { class: 'dials-summary' },
+            h('span', {
+              text: `🎚️ Emotion dials${touchedCount > 0 ? ` — ${touchedCount} touched` : ''}`,
+            }),
+            h('span', {
+              class: 'field-hint',
+              text: '±3, structural not adjectival · 0 = inherit the mood',
+            }),
+          ),
+          dials,
+          h(
+            'div',
+            { class: 'row gap' },
+            button('Reset dials', () => {
+              input.emotions = {};
+              api.refresh();
+            }),
+          ),
+        ),
+        h(
+          'div',
+          { class: 'grid-2' },
+          field('Chapter', chapterSelect),
+          field('Page format', documentSelect),
+        ),
+        h(
+          'div',
+          { class: 'grid-2' },
+          field('Pace', paceControl),
+          field('Page ending', beatControl),
+        ),
+        h(
+          'label',
+          { class: 'field check-field' },
+          endingBox,
+          h('span', { text: ' Bring the story to a close with this page' }),
+        ),
+        endingsArea,
+        templatesRow,
+        field(
+          'Standing rules — “don’t touch”',
+          rulesArea,
+          'Persist for the rest of the book, until removed.',
+        ),
+        h('div', { class: 'row gap' }, ruleInput, button('＋ Add rule', addRule)),
+        conflictArea,
+        h(
+          'div',
+          { class: 'actions turn-submit' },
+          button('Generate next page →', () => void generateNext(api, book, from, key), 'primary'),
+          button('Continue naturally', () => {
+            inputs.set(stateKey, { ...DEFAULT_TURN, emotions: {} });
+            void generateNext(api, book, from, key, true);
+          }),
+          button('✍️ I’ll write it myself', () => writeMyself(api, book, from), 'ghost', {
+            title: 'Skip the model — open a blank page and write the next beat by hand',
           }),
         ),
-      ),
-      h(
-        'div',
-        { class: 'grid-2' },
-        field('Chapter', chapterSelect),
-        field('Page format', documentSelect),
-      ),
-      h(
-        'label',
-        { class: 'field check-field' },
-        endingBox,
-        h('span', { text: ' Bring the story to a close with this page' }),
-      ),
-      endingsArea,
-      templatesRow,
-      field(
-        'Standing rules — “don’t touch”',
-        rulesArea,
-        'Persist for the rest of the book, until removed.',
-      ),
-      h('div', { class: 'row gap' }, ruleInput, button('＋ Add rule', addRule)),
-      h(
-        'div',
-        { class: 'actions' },
-        button('Generate next page →', () => void generateNext(api, book, from, key), 'primary'),
-        button('Continue naturally', () => {
-          inputs.set(stateKey, { ...DEFAULT_TURN, emotions: {} });
-          void generateNext(api, book, from, key, true);
-        }),
-        button('✍️ I’ll write it myself', () => writeMyself(api, book, from), 'ghost', {
-          title: 'Skip the model — open a blank page and write the next beat by hand',
-        }),
       ),
     ),
     renderCast(api, book),
@@ -561,15 +751,32 @@ function frontierParent(api: AppApi): string | null {
 function fadedPage(api: AppApi, book: Book, from: StoryNode): HTMLElement {
   const title = titleNodeOf(api.nodes, book);
   const titleText = title.data.kind === 'title' ? title.data.title : 'Untitled';
+  const fromTitle = from.data.kind === 'title';
   const chosen =
     from.data.kind === 'page' ? from.data.versions[from.data.chosenVersion - 1] : undefined;
   return h(
     'div',
     { class: 'faded-page' },
-    h('span', { class: 'page-num', text: `Page ${pageNumberAt(api.nodes, from.id)} · kept ✓` }),
-    h('span', { class: 'page-book', text: titleText }),
-    h('div', { class: 'page-text faded-text', text: chosen?.text ?? '' }),
+    h('span', {
+      class: 'page-num',
+      text: fromTitle ? 'The title · kept ✓' : `Page ${pageNumberAt(api.nodes, from.id)} · kept ✓`,
+    }),
+    h('span', { class: 'page-book', text: fromTitle ? taglineOf(api, book) : titleText }),
+    fromTitle
+      ? h(
+          'div',
+          { class: 'page-text faded-text title-faded' },
+          h('h2', { class: 'title-hero', text: titleText }),
+          h('p', { class: 'lede', text: taglineOf(api, book) }),
+          h('p', { class: 'book-meta', text: `Seed: “${seedTextOf(api.nodes, book)}”` }),
+        )
+      : h('div', { class: 'page-text faded-text', text: chosen?.text ?? '' }),
   );
+}
+
+function taglineOf(api: AppApi, book: Book): string {
+  const title = titleNodeOf(api.nodes, book);
+  return title.data.kind === 'title' ? title.data.tagline : '';
 }
 
 async function suggest(
@@ -654,10 +861,163 @@ function parseEndings(raw: unknown): Array<{ title: string; premise: string }> {
     });
 }
 
+async function checkConflicts(
+  api: AppApi,
+  book: Book,
+  stateKey: string,
+  input: TurnInput,
+): Promise<void> {
+  if (conflictBusy.has(stateKey)) return;
+  conflictBusy.add(stateKey);
+  conflicts.delete(stateKey);
+  api.refresh();
+  try {
+    const context = buildContext(api.nodes, book);
+    const raw = await api.generateJSON<unknown>(conflictMessages(context, input.direction), {
+      model: api.lib.settings.fastModel || book.model || api.lib.settings.endpoint.model,
+    });
+    const list = parseStringList(typeof raw === 'string' ? raw : JSON.stringify(raw)).filter(
+      (item) => !/no conflicts|none found|\[\]|consistent/i.test(item),
+    );
+    conflicts.set(stateKey, list);
+  } catch (err) {
+    conflicts.set(stateKey, [`(The checker could not run: ${api.genError(err)})`]);
+  }
+  conflictBusy.delete(stateKey);
+  api.refresh();
+}
+
+function ghostPanel(
+  api: AppApi,
+  book: Book,
+  from: StoryNode,
+  stateKey: string,
+): HTMLElement | null {
+  const key = `ghost:${stateKey}`;
+  const state = genStates.get(key);
+  const ghost = ghosts.get(stateKey);
+  if (!state && !ghost) return null;
+  if (state) {
+    return h(
+      'div',
+      { class: 'ghost-panel' },
+      h('p', {
+        class: 'ghost-title',
+        text: '👻 What if… — a ghost page (nothing is committed yet)',
+      }),
+      renderGenPanel(api, key, () => {
+        const task = ghosts.get(stateKey);
+        if (task) void ghostPreview(api, book, from, stateKey, task.direction);
+      }),
+      h(
+        'div',
+        { class: 'row gap' },
+        button('✕ Let it dissolve', () => {
+          genStates.delete(key);
+          api.refresh();
+        }),
+      ),
+    );
+  }
+  if (!ghost) return null;
+  return h(
+    'div',
+    { class: 'ghost-panel' },
+    h('p', { class: 'ghost-title', text: `👻 What if… “${ghost.direction}”` }),
+    h('div', { class: 'page-text ghost-text', text: ghost.text }),
+    h(
+      'div',
+      { class: 'row gap' },
+      button(
+        '🌿 Adopt as a branch',
+        () => {
+          const input: TurnInput = { ...DEFAULT_TURN, emotions: {}, direction: ghost.direction };
+          const frontier = getNode(api.nodes, book.frontierId);
+          const turn =
+            frontier && frontier.kind === 'turn' && frontier.parentId === from.id
+              ? frontier
+              : api.attachTurn(book, from.id, input);
+          api.attachPage(
+            book,
+            turn.id,
+            input,
+            ghost.text,
+            book.model || api.lib.settings.endpoint.model,
+            'ai',
+          );
+          ghosts.delete(stateKey);
+          genStates.delete(key);
+          api.navigate('page');
+        },
+        'primary',
+      ),
+      button('✕ Let it dissolve', () => {
+        ghosts.delete(stateKey);
+        genStates.delete(key);
+        api.refresh();
+      }),
+    ),
+  );
+}
+
+async function ghostPreview(
+  api: AppApi,
+  book: Book,
+  from: StoryNode,
+  stateKey: string,
+  direction: string,
+): Promise<void> {
+  const key = `ghost:${stateKey}`;
+  const token = api.beginGen();
+  genStates.set(key, {
+    token,
+    status: 'busy',
+    label: 'Writing a ghost page…',
+    stream: '',
+    error: '',
+  });
+  api.refresh();
+  try {
+    const ctx = buildContext(api.nodes, book);
+    const input: TurnInput = { ...DEFAULT_TURN, emotions: {}, direction };
+    const model = book.model || api.lib.settings.endpoint.model;
+    const text = await api.generateText(
+      pageMessages(ctx, input, pageNumberAt(api.nodes, from.id) + 1, book.rules),
+      {
+        model,
+        onToken: (piece) => {
+          const state = genStates.get(key);
+          if (state) state.stream += piece;
+        },
+      },
+    );
+    if (api.staleGen(token)) {
+      genStates.delete(key);
+      return;
+    }
+    const cleaned = text.trim();
+    if (!cleaned) throw new Error('The model returned an empty ghost page');
+    genStates.delete(key);
+    ghosts.set(stateKey, { text: cleaned, direction });
+    api.refresh();
+  } catch (err) {
+    genStates.delete(key);
+    if (api.staleGen(token)) return;
+    genStates.set(key, {
+      token,
+      status: 'error',
+      label: 'Ghost page failed',
+      stream: '',
+      error: api.genError(err),
+    });
+    api.refresh();
+  }
+}
+
 /** The reader authors the next page themselves — no model involved. */
 function writeMyself(api: AppApi, book: Book, from: StoryNode): void {
   const stateKey = `${book.id}:${from.id}`;
-  const input = inputs.get(stateKey) ?? { ...DEFAULT_TURN, emotions: {} };
+  const input = inputs.get(stateKey) ?? stickyFor(book.id);
   inputs.set(stateKey, input);
   const frontier = getNode(api.nodes, book.frontierId);
   const turn =
@@ -687,8 +1047,14 @@ async function generateNext(
   const stateKey = `${book.id}:${from.id}`;
   const input = naturally
     ? { ...DEFAULT_TURN, emotions: {} }
-    : (inputs.get(stateKey) ?? { ...DEFAULT_TURN, emotions: {} });
+    : (inputs.get(stateKey) ?? stickyFor(book.id));
   inputs.set(stateKey, input);
+  if (naturally) {
+    // "Continue naturally" is an explicit choice of defaults — reset the sticky.
+    stickyInputs.delete(book.id);
+  } else {
+    rememberSticky(book.id, input);
+  }
   // Retry after a failed generation reuses the recorded decision instead of
   // creating a duplicate turn node (which would fake a branch point).
   const frontier = getNode(api.nodes, book.frontierId);

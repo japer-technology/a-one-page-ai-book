@@ -6,6 +6,7 @@ import {
   attachSummary,
   bibleUpTo,
   branchTip,
+  chapterCountUpTo,
   childrenOf,
   cloneSubtree,
   collectSubtree,
@@ -77,6 +78,29 @@ describe('tree basics', () => {
   it('lists children in creation order', () => {
     const { nodes, turn, page2, page2b } = fixture();
     expect(childrenOf(nodes, turn.id).map((n) => n.id)).toEqual([page2.id, page2b.id]);
+  });
+
+  it('counts chapter starts along the spine, never by page number', () => {
+    const { nodes, title, page1, page2, turn } = fixture();
+    // Page 2 starts chapter 1; a further turn leads into chapter 2.
+    const chapter2 = makePageNode(
+      turn.id,
+      { ...DEFAULT_TURN, chapter: 'start' },
+      'model-a',
+      'Chapter 2 opens.',
+    );
+    const turn2 = makeTurnNode(chapter2.id, DEFAULT_TURN);
+    let withChapter = addNode(nodes, chapter2);
+    withChapter = addNode(withChapter, turn2);
+    expect(chapterCountUpTo(withChapter, title.id)).toBe(0);
+    expect(chapterCountUpTo(withChapter, page1.id)).toBe(0);
+    expect(chapterCountUpTo(withChapter, chapter2.id)).toBe(1);
+    // Counting up to the turn covers every page before it, so the next page
+    // opens chapter 2 — independent of its page number (3 here).
+    expect(chapterCountUpTo(withChapter, turn2.id)).toBe(1);
+    expect(chapterCountUpTo(withChapter, turn2.id) + 1).toBe(2);
+    // The other branch never started a chapter.
+    expect(chapterCountUpTo(withChapter, page2.id)).toBe(0);
   });
 });
 
@@ -157,8 +181,26 @@ describe('factories and book state', () => {
 describe('living cast and standing rules', () => {
   it('attaches a bible to a page and finds the latest along the path', () => {
     const { nodes, page1, page2, book } = fixture();
-    const bible1 = { people: [], places: [], things: [], threads: [], at: 1, updatedAt: 1 };
-    const bible2 = { people: [], places: [], things: [], threads: [], at: 2, updatedAt: 2 };
+    const bible1 = {
+      people: [],
+      places: [],
+      things: [],
+      threads: [],
+      relations: [],
+      summary: '',
+      at: 1,
+      updatedAt: 1,
+    };
+    const bible2 = {
+      people: [],
+      places: [],
+      things: [],
+      threads: [],
+      relations: [],
+      summary: '',
+      at: 2,
+      updatedAt: 2,
+    };
     const p1 = attachBible(page1, bible1);
     const p2 = attachBible(page2, bible2);
     const withBibles = { ...nodes, [page1.id]: p1, [page2.id]: p2 };
@@ -203,7 +245,16 @@ describe('authoring additions', () => {
 
   it('bibleUpTo reports the carrying node id', () => {
     const { nodes, page1, book } = fixture();
-    const bible = { people: [], places: [], things: [], threads: [], at: 1, updatedAt: 1 };
+    const bible = {
+      people: [],
+      places: [],
+      things: [],
+      threads: [],
+      relations: [],
+      summary: '',
+      at: 1,
+      updatedAt: 1,
+    };
     const withBible = { ...nodes, [page1.id]: attachBible(page1, bible) };
     const found = bibleUpTo(withBible, book.frontierId);
     expect(found?.nodeId).toBe(page1.id);

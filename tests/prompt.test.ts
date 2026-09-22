@@ -3,6 +3,8 @@ import {
   bibleMessages,
   briefMessages,
   buildContext,
+  castText,
+  conflictMessages,
   buildContextTo,
   chatMessages,
   directionText,
@@ -172,6 +174,24 @@ describe('emotion dials, rules and chapters', () => {
     expect(directionText(DEFAULT_TURN)).not.toContain('CHAPTER');
   });
 
+  it('numbers a new chapter by the chapter count, never by the page number', () => {
+    const ctx = { seed: 's', title: 't', pages: ['p1'], lastDirection: null };
+    const messages = pageMessages(ctx, { ...DEFAULT_TURN, chapter: 'start' }, 12, [], 3);
+    const content = messages[1]?.content ?? '';
+    expect(content).toContain('opens chapter 3');
+    expect(content).toContain('"Chapter 3 —');
+    expect(content).toContain('NEVER the page number');
+    // The page number is stated separately and stays a page number.
+    expect(content).toContain('page 12');
+    expect(content).not.toContain('Chapter 12');
+  });
+
+  it('falls back to chapter 1 when no chapter number is supplied', () => {
+    const text = directionText({ ...DEFAULT_TURN, chapter: 'start' });
+    expect(text).toContain('opens chapter 1');
+    expect(text).toContain('"Chapter 1 —');
+  });
+
   it('injects standing rules into page messages', () => {
     const ctx = { seed: 's', title: 't', pages: ['p1'], lastDirection: null };
     const messages = pageMessages(ctx, DEFAULT_TURN, 2, ['Don’t reveal the letter yet']);
@@ -237,6 +257,8 @@ describe('size targets, briefs and threads', () => {
         places: [],
         things: [],
         threads: [{ name: "the letter's sender", note: 'unknown' }],
+        relations: [],
+        summary: '',
         at: 1,
         updatedAt: 1,
       },
@@ -372,5 +394,50 @@ describe('rolling story summary', () => {
     expect(summaryText('   ')).toBe('');
     expect(summaryText('X happened.')).toContain('STORY SO FAR (SUMMARY');
     expect(summaryText('X happened.')).toContain('X happened.');
+  });
+});
+
+describe('coherence & craft', () => {
+  it('compiles pace and beat guidance', () => {
+    const slow = directionText({ ...DEFAULT_TURN, pace: 'slow' });
+    expect(slow).toContain('PACE: slow');
+    expect(slow).toContain('meditative');
+    const hook = directionText({ ...DEFAULT_TURN, beat: 'cliffhanger' });
+    expect(hook).toContain('cliffhanger');
+    expect(directionText(DEFAULT_TURN)).not.toContain('PACE:');
+  });
+
+  it('includes relationships and rolling summary in cast text and page prompts', () => {
+    const cast = {
+      people: [{ name: 'Elin', note: 'the keeper' }],
+      places: [],
+      things: [],
+      threads: [],
+      relations: [{ from: 'Elin', to: 'Mara', kind: 'sisters' }],
+      summary: 'The keeper found the letter.',
+      at: 1,
+      updatedAt: 1,
+    };
+    const text = castText(cast);
+    expect(text).toContain('Relationships');
+    expect(text).toContain('Elin — sisters — Mara');
+    const ctx = {
+      seed: 's',
+      title: 't',
+      pages: ['p1'],
+      lastDirection: null,
+      summary: 'The keeper found the letter.',
+    };
+    const messages = pageMessages(ctx, DEFAULT_TURN, 2);
+    expect(messages[1]?.content).toContain('STORY SO FAR (SUMMARY');
+    expect(messages[1]?.content).toContain('The keeper found the letter.');
+  });
+
+  it('asks the conflict checker for a bare JSON array', () => {
+    const ctx = { seed: 's', title: 't', pages: ['p1'], lastDirection: null };
+    const messages = conflictMessages(ctx, 'Mara is a stranger');
+    expect(messages[0]?.content).toBe(STRUCTURED_SYSTEM_PROMPT);
+    expect(messages[1]?.content).toContain('PROPOSED DIRECTION');
+    expect(messages[1]?.content).toContain('JSON array');
   });
 });

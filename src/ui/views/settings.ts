@@ -46,6 +46,29 @@ const lan = {
 };
 let lanDetected = false;
 
+/**
+ * Session draft for the form. The settings view re-renders whenever an
+ * appearance preview is applied (theme, font, wardrobe, text size) — without
+ * a draft, every preview would wipe the endpoint fields the reader was
+ * typing. The draft is the source of truth; the inputs mirror it.
+ */
+const form = {
+  name: '',
+  url: '',
+  vendor: 'openai-compat' as EndpointVendor,
+  model: '',
+  apiKey: '',
+  temperature: 0.9,
+  defaultLength: 'standard' as 'shorter' | 'standard' | 'longer',
+  autoBible: true,
+  autoSummary: true,
+  autoSuggest: false,
+  fastModel: '',
+};
+let formReady = false;
+/** The saved endpoint object the draft was seeded from (import/wipe re-seed). */
+let seededEndpoint: EndpointSettings | null = null;
+
 interface Controls {
   nameInput: HTMLInputElement;
   urlInput: HTMLInputElement;
@@ -59,15 +82,43 @@ interface Controls {
 
 export function renderSettings(api: AppApi): HTMLElement {
   const endpoint = api.lib.settings.endpoint;
+  // Seed the draft from saved settings once per session — NOT on every
+  // render, or preview re-renders would wipe unsaved edits. A wholesale
+  // settings replacement (library import, wipe) re-seeds as well.
+  if (!formReady || seededEndpoint !== endpoint) {
+    formReady = true;
+    seededEndpoint = endpoint;
+    form.name = endpoint.name;
+    form.url = endpoint.baseUrl;
+    form.vendor = endpoint.vendor;
+    form.model = endpoint.model;
+    form.apiKey = endpoint.apiKey;
+    form.temperature = endpoint.temperature;
+    form.defaultLength = api.lib.settings.defaultLength;
+    form.autoBible = api.lib.settings.autoBible;
+    form.autoSummary = api.lib.settings.autoSummary;
+    form.autoSuggest = api.lib.settings.autoSuggest;
+    form.fastModel = api.lib.settings.fastModel;
+  }
 
-  const nameInput = h('input', { class: 'input', type: 'text', value: endpoint.name });
+  const nameInput = h('input', {
+    class: 'input',
+    type: 'text',
+    value: form.name,
+    oninput: (event: Event) => {
+      form.name = (event.target as HTMLInputElement).value;
+    },
+  });
   const urlInput = h('input', {
     class: 'input',
     type: 'text',
     list: 'endpoint-presets',
-    value: endpoint.baseUrl,
+    value: form.url,
     placeholder: 'http://127.0.0.1:1234',
     spellcheck: false,
+    oninput: (event: Event) => {
+      form.url = (event.target as HTMLInputElement).value;
+    },
   });
   const urlPresets = h(
     'datalist',
@@ -76,15 +127,20 @@ export function renderSettings(api: AppApi): HTMLElement {
   );
   const vendorInput = h(
     'select',
-    { class: 'input' },
+    {
+      class: 'input',
+      onchange: (event: Event) => {
+        form.vendor = (event.target as HTMLSelectElement).value as EndpointVendor;
+      },
+    },
     h('option', {
       value: 'openai-compat',
-      selected: endpoint.vendor === 'openai-compat' ? true : undefined,
+      selected: form.vendor === 'openai-compat' ? true : undefined,
       text: 'OpenAI-compatible (/v1/chat/completions)',
     }),
     h('option', {
       value: 'ollama',
-      selected: endpoint.vendor === 'ollama' ? true : undefined,
+      selected: form.vendor === 'ollama' ? true : undefined,
       text: 'Ollama (native /api/chat)',
     }),
   );
@@ -92,7 +148,7 @@ export function renderSettings(api: AppApi): HTMLElement {
   const modelDatalist = h(
     'datalist',
     { id: 'discovered-models' },
-    ...[...new Set([...discoveredModels, endpoint.model])]
+    ...[...new Set([...discoveredModels, form.model])]
       .filter((m) => m.length > 0)
       .map((m) => h('option', { value: m })),
   );
@@ -100,18 +156,24 @@ export function renderSettings(api: AppApi): HTMLElement {
     class: 'input',
     type: 'text',
     list: 'discovered-models',
-    value: endpoint.model,
+    value: form.model,
     placeholder: 'e.g. qwen2.5-7b-instruct',
     spellcheck: false,
+    oninput: (event: Event) => {
+      form.model = (event.target as HTMLInputElement).value;
+    },
   });
 
   const keyInput = h('input', {
     class: 'input',
     type: 'password',
-    value: endpoint.apiKey,
+    value: form.apiKey,
     placeholder: 'optional — only needed if your server requires a key',
     autocomplete: 'off',
     spellcheck: false,
+    oninput: (event: Event) => {
+      form.apiKey = (event.target as HTMLInputElement).value;
+    },
   });
   const revealKey = button(
     '👁 Show',
@@ -127,14 +189,15 @@ export function renderSettings(api: AppApi): HTMLElement {
     min: '0',
     max: '2',
     step: '0.1',
-    value: String(endpoint.temperature),
+    value: String(form.temperature),
     oninput: () => {
-      tempLabel.textContent = `temperature: ${Number(tempInput.value).toFixed(1)}`;
+      form.temperature = Number(tempInput.value);
+      tempLabel.textContent = `temperature: ${form.temperature.toFixed(1)}`;
     },
   });
   const tempLabel = h('span', {
     class: 'field-hint',
-    text: `temperature: ${Number(endpoint.temperature).toFixed(1)}`,
+    text: `temperature: ${form.temperature.toFixed(1)}`,
   });
 
   const resultsBox = h('div', { class: 'scan-results' });
@@ -159,11 +222,17 @@ export function renderSettings(api: AppApi): HTMLElement {
 
   const defaultLength = h(
     'select',
-    { class: 'input' },
+    {
+      class: 'input',
+      onchange: (event: Event) => {
+        form.defaultLength = (event.target as HTMLSelectElement).value as
+          'shorter' | 'standard' | 'longer';
+      },
+    },
     ...(['shorter', 'standard', 'longer'] as const).map((v) =>
       h('option', {
         value: v,
-        selected: v === api.lib.settings.defaultLength ? true : undefined,
+        selected: v === form.defaultLength ? true : undefined,
         text: v,
       }),
     ),
@@ -171,29 +240,47 @@ export function renderSettings(api: AppApi): HTMLElement {
 
   const autoBibleBox = h('input', {
     type: 'checkbox',
-    checked: api.lib.settings.autoBible ? true : undefined,
+    checked: form.autoBible ? true : undefined,
+    onchange: (event: Event) => {
+      form.autoBible = (event.target as HTMLInputElement).checked;
+    },
   });
   const autoSummaryBox = h('input', {
     type: 'checkbox',
-    checked: api.lib.settings.autoSummary ? true : undefined,
+    checked: form.autoSummary ? true : undefined,
+    onchange: (event: Event) => {
+      form.autoSummary = (event.target as HTMLInputElement).checked;
+    },
   });
   const fastModelInput = h('input', {
     class: 'input',
     type: 'text',
     list: 'discovered-models',
-    value: api.lib.settings.fastModel,
+    value: form.fastModel,
     placeholder: 'optional — e.g. a small quick model for titles, chat & the cast',
     spellcheck: false,
+    oninput: (event: Event) => {
+      form.fastModel = (event.target as HTMLInputElement).value;
+    },
   });
   const autoSuggestBox = h('input', {
     type: 'checkbox',
-    checked: api.lib.settings.autoSuggest ? true : undefined,
+    checked: form.autoSuggest ? true : undefined,
+    onchange: (event: Event) => {
+      form.autoSuggest = (event.target as HTMLInputElement).checked;
+    },
   });
 
+  let themeValue = api.lib.settings.theme;
+  const persistAppearance = (patch: Partial<typeof api.lib.settings>): void => {
+    // Appearance changes save IMMEDIATELY — they must stick across the whole
+    // app, not just the settings page.
+    api.update((lib) => ({ ...lib, settings: { ...lib.settings, ...patch } }));
+  };
   const themeControl = segmentedTheme(api.lib.settings.theme, (theme) => {
     themeValue = theme;
+    persistAppearance({ theme });
   });
-  let themeValue = api.lib.settings.theme;
   const fontScaleInput = h('input', {
     class: 'dial-range font-scale',
     type: 'range',
@@ -207,8 +294,89 @@ export function renderSettings(api: AppApi): HTMLElement {
     class: 'field-hint',
     text: `×${Number(api.lib.settings.fontScale).toFixed(2)}`,
   });
+  // Live label while dragging; persist on release. Persisting mid-drag used to
+  // re-render the whole view and kill the drag under the pointer.
   fontScaleInput.addEventListener('input', () => {
     fontScaleLabel.textContent = `×${Number(fontScaleInput.value).toFixed(2)}`;
+  });
+  fontScaleInput.addEventListener('change', () => {
+    persistAppearance({ fontScale: Number(fontScaleInput.value) });
+  });
+  const FONT_CHOICES: Array<[string, string]> = [
+    ['auto', 'auto (reading font)'],
+    ['georgia', 'Georgia'],
+    ['palatino', 'Palatino'],
+    ['charter', 'Charter'],
+    ['serif', 'System serif'],
+    ['sans', 'Clean sans'],
+  ];
+  const DOC_FORMATS: Array<[string, string]> = [
+    ['story', '📄 story page'],
+    ['letter', '✉️ letter'],
+    ['diary', '📓 diary'],
+    ['newspaper', '📰 newspaper'],
+    ['mapnote', '🗺️ map notes'],
+    ['recipe', '🍲 recipe'],
+  ];
+  const wardrobeControls = h(
+    'div',
+    { class: 'wardrobe' },
+    ...DOC_FORMATS.map(([format, label]) =>
+      h(
+        'div',
+        { class: 'wardrobe-row' },
+        h('span', { class: 'wardrobe-label', text: label }),
+        h(
+          'select',
+          {
+            class: 'input wardrobe-select',
+            dataset: { format },
+          },
+          ...FONT_CHOICES.map(([v, flabel]) =>
+            h('option', {
+              value: v,
+              selected:
+                v === (api.lib.settings.documentFonts?.[format as never] ?? 'auto')
+                  ? true
+                  : undefined,
+              text: flabel,
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+  // The wardrobe previews live, exactly like the theme and the text size —
+  // every document format re-skins the moment its font changes.
+  for (const select of Array.from(
+    wardrobeControls.querySelectorAll<HTMLSelectElement>('.wardrobe-select'),
+  )) {
+    select.addEventListener('change', () => {
+      persistAppearance({ documentFonts: collectWardrobe(wardrobeControls) });
+    });
+  }
+  const readingFontSelect = h(
+    'select',
+    { class: 'input' },
+    ...[
+      ['georgia', 'Georgia — the classic'],
+      ['palatino', 'Palatino — literary'],
+      ['charter', 'Charter — newsprint'],
+      ['serif', 'System serif'],
+      ['sans', 'Clean sans (modern)'],
+    ].map(([v, label]) =>
+      h('option', {
+        value: v,
+        selected: v === api.lib.settings.readingFont ? true : undefined,
+        text: label,
+      }),
+    ),
+  );
+  // The reading font previews live too — no Save needed to see it change.
+  readingFontSelect.addEventListener('change', () => {
+    persistAppearance({
+      readingFont: readingFontSelect.value as 'georgia' | 'palatino' | 'charter' | 'serif' | 'sans',
+    });
   });
 
   const persistButton = button('Request persistent storage', () => void persist(api));
@@ -216,7 +384,7 @@ export function renderSettings(api: AppApi): HTMLElement {
   void fillStorageLine(storageLine);
 
   const save = () => {
-    const endpoint = collectEndpoint(controls);
+    const endpoint = collectEndpoint();
     if (endpoint.model) {
       discoveredModels.push(endpoint.model);
       refreshModelDatalist(modelInput);
@@ -226,12 +394,15 @@ export function renderSettings(api: AppApi): HTMLElement {
       settings: {
         ...lib.settings,
         endpoint,
-        defaultLength: defaultLength.value as 'shorter' | 'standard' | 'longer',
-        autoBible: autoBibleBox.checked,
-        autoSummary: autoSummaryBox.checked,
-        autoSuggest: autoSuggestBox.checked,
-        fastModel: fastModelInput.value.trim(),
+        defaultLength: form.defaultLength,
+        autoBible: form.autoBible,
+        autoSummary: form.autoSummary,
+        autoSuggest: form.autoSuggest,
+        fastModel: form.fastModel.trim(),
         theme: themeValue,
+        readingFont: readingFontSelect.value as
+          'georgia' | 'palatino' | 'charter' | 'serif' | 'sans',
+        documentFonts: collectWardrobe(wardrobeControls),
         fontScale: Number(fontScaleInput.value),
       },
     }));
@@ -422,6 +593,16 @@ export function renderSettings(api: AppApi): HTMLElement {
         h('div', { class: 'row gap' }, fontScaleInput, fontScaleLabel),
         'Scales the page typography.',
       ),
+      field(
+        'Reading font',
+        readingFontSelect,
+        'The typeface for page prose (system fonts, nothing to download).',
+      ),
+      field(
+        'The document wardrobe',
+        wardrobeControls,
+        'Each diegetic format can wear its own font. "Auto" inherits the reading font.',
+      ),
     ),
 
     h(
@@ -501,6 +682,9 @@ function resultRow(api: AppApi, result: ProbeResult, controls: Controls): HTMLEl
         : h('span', { class: 'badge badge-off', text: 'not found' });
 
   const use = () => {
+    form.name = result.candidate.label;
+    form.url = result.candidate.baseUrl;
+    form.vendor = result.candidate.vendor;
     controls.nameInput.value = result.candidate.label;
     controls.urlInput.value = result.candidate.baseUrl;
     controls.vendorInput.value = result.candidate.vendor;
@@ -508,7 +692,10 @@ function resultRow(api: AppApi, result: ProbeResult, controls: Controls): HTMLEl
       if (!discoveredModels.includes(model)) discoveredModels.push(model);
     }
     // Adopting an endpoint adopts its default model — replace any stale name.
-    if (result.models.length > 0) controls.modelInput.value = result.models[0] ?? '';
+    if (result.models.length > 0) {
+      form.model = result.models[0] ?? '';
+      controls.modelInput.value = form.model;
+    }
     refreshModelDatalist(controls.modelInput);
     api.toast(
       `Using ${result.candidate.label} (${vendorName(result.candidate.vendor)}). Press Save to keep it.`,
@@ -544,22 +731,27 @@ async function runScan(api: AppApi, controls: Controls): Promise<void> {
   controls.resultsBox.replaceChildren();
   await discover((result) => {
     scan.results.push(result);
+    // An appearance preview (theme/font/scale) can re-render the view
+    // mid-scan and detach this box — never resurrect a stale node; the
+    // completion refresh below rebuilds everything from scan.results.
+    if (!controls.resultsBox.isConnected) return;
     const row = resultRow(api, result, controls);
     row.classList.add('scan-row-fresh');
     controls.resultsBox.appendChild(row);
   });
   scan.running = false;
-  controls.scanButton.disabled = false;
-  controls.scanButton.textContent = '🔍 Scan for local LLMs';
-  refreshModelDatalist(controls.modelInput);
+  // Reconcile the whole view from module state: if the view re-rendered while
+  // the scan ran, the visible button/box are fresh nodes, not `controls`.
+  api.refresh();
 
   const best = bestReachable(scan.results);
   if (best) {
     for (const model of best.models) {
       if (!discoveredModels.includes(model)) discoveredModels.push(model);
     }
-    if (!controls.modelInput.value && best.models.length > 0) {
-      controls.modelInput.value = best.models[0] ?? '';
+    if (!form.model && best.models.length > 0) {
+      form.model = best.models[0] ?? '';
+      controls.modelInput.value = form.model;
       api.toast(`${best.candidate.label} found — model prefilled. Press Save.`, 'success');
     } else if (best.models.length === 0) {
       api.toast(
@@ -581,7 +773,7 @@ async function runScan(api: AppApi, controls: Controls): Promise<void> {
 
 /** Probe whatever the user typed in the Base URL field, as a one-off candidate. */
 async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
-  const baseUrl = normalizeBaseUrl(controls.urlInput.value);
+  const baseUrl = normalizeBaseUrl(form.url);
   if (!/^https?:\/\/[^/]+/.test(baseUrl)) {
     api.toast(
       'Type a full URL first, e.g. http://127.0.0.1:1234 or http://192.168.1.50:8080/v1',
@@ -593,7 +785,7 @@ async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
     id: 'custom',
     label: 'Custom endpoint',
     baseUrl,
-    vendor: controls.vendorInput.value as EndpointVendor,
+    vendor: form.vendor,
     note: '',
   };
   const row = h(
@@ -609,8 +801,9 @@ async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
     for (const model of result.models) {
       if (!discoveredModels.includes(model)) discoveredModels.push(model);
     }
-    if (!controls.modelInput.value && result.models.length > 0) {
-      controls.modelInput.value = result.models[0] ?? '';
+    if (!form.model && result.models.length > 0) {
+      form.model = result.models[0] ?? '';
+      controls.modelInput.value = form.model;
     }
     refreshModelDatalist(controls.modelInput);
   }
@@ -694,13 +887,19 @@ function lanServerRow(api: AppApi, server: LanServer, controls: Controls): HTMLE
     : h('span', { class: 'badge badge-warn', text: 'CORS-blocked' });
 
   const use = () => {
+    form.name = `LAN · ${server.host}`;
+    form.url = server.baseUrl;
+    form.vendor = server.vendor;
     controls.nameInput.value = `LAN · ${server.host}`;
     controls.urlInput.value = server.baseUrl;
     controls.vendorInput.value = server.vendor;
     for (const model of server.models) {
       if (!discoveredModels.includes(model)) discoveredModels.push(model);
     }
-    if (server.models.length > 0) controls.modelInput.value = server.models[0] ?? '';
+    if (server.models.length > 0) {
+      form.model = server.models[0] ?? '';
+      controls.modelInput.value = form.model;
+    }
     refreshModelDatalist(controls.modelInput);
     api.toast(`Using LAN server ${server.baseUrl}. Press Save to keep it.`, 'success');
   };
@@ -737,14 +936,16 @@ function refreshModelDatalist(modelInput: HTMLInputElement): void {
  * both Save and Test connection. Generation always reads the saved settings,
  * so a test must never be able to pass against values the app won't use.
  */
-function collectEndpoint(controls: Controls): EndpointSettings {
+function collectEndpoint(): EndpointSettings {
   return {
-    name: controls.nameInput.value.trim() || 'Local LLM',
-    baseUrl: normalizeBaseUrl(controls.urlInput.value),
-    vendor: controls.vendorInput.value as EndpointVendor,
-    model: controls.modelInput.value.trim(),
-    temperature: Number(controls.tempInput.value),
-    apiKey: controls.keyInput.value.trim(),
+    name: form.name.trim() || 'Local LLM',
+    baseUrl: normalizeBaseUrl(form.url),
+    vendor: form.vendor,
+    model: form.model.trim(),
+    temperature: Number.isFinite(form.temperature)
+      ? Math.min(2, Math.max(0, form.temperature))
+      : 0.9,
+    apiKey: form.apiKey.trim(),
   };
 }
 
@@ -752,22 +953,38 @@ async function testConnection(api: AppApi, controls: Controls): Promise<void> {
   const token = api.beginGen();
   // Persist the form FIRST, then test the SAVED endpoint — "Connected" must
   // mean the endpoint every future generation (titles, pages) will actually
-  // use, not some unsaved copy of it.
-  const endpoint = collectEndpoint(controls);
-  if (endpoint.model) discoveredModels.push(endpoint.model);
+  // use, not some unsaved copy of it. The WHOLE draft is persisted (not just
+  // the endpoint): replacing only the endpoint object would trip the draft
+  // re-seed guard on the next render and silently wipe the reader's unsaved
+  // edits to the other fields.
+  const endpoint = collectEndpoint();
+  if (endpoint.model) {
+    discoveredModels.push(endpoint.model);
+    refreshModelDatalist(controls.modelInput);
+  }
   api.update((lib) => ({
     ...lib,
-    settings: { ...lib.settings, endpoint },
+    settings: {
+      ...lib.settings,
+      endpoint,
+      defaultLength: form.defaultLength,
+      autoBible: form.autoBible,
+      autoSummary: form.autoSummary,
+      autoSuggest: form.autoSuggest,
+      fastModel: form.fastModel.trim(),
+    },
   }));
   api.toast('Testing…', 'info');
+  const started = performance.now();
   try {
     const answer = await api.generateText([{ role: 'user', content: 'Reply with exactly: OK' }], {
       model: endpoint.model,
       endpoint,
     });
     if (api.staleGen(token)) return;
+    const ms = Math.round(performance.now() - started);
     api.toast(
-      `Connected — the model said “${answer.trim().slice(0, 40)}”. Endpoint saved; your books will use it.`,
+      `Connected in ${ms} ms — the model said “${answer.trim().slice(0, 40)}”. Endpoint saved; your books will use it.`,
       'success',
     );
   } catch (err) {
@@ -798,8 +1015,9 @@ async function fillStorageLine(line: HTMLElement): Promise<void> {
 
 async function exportAll(api: AppApi): Promise<void> {
   try {
-    await exportLibraryFile(api.lib);
-    api.toast('Library exported', 'success');
+    if (await exportLibraryFile(api.lib)) {
+      api.toast('Library exported', 'success');
+    }
   } catch (err) {
     api.toast(err instanceof Error ? err.message : 'Export failed', 'error');
   }
@@ -821,15 +1039,19 @@ async function importAll(api: AppApi): Promise<void> {
 }
 
 async function wipe(api: AppApi): Promise<void> {
-  await clearLibrary();
-  api.update(() => defaultLibrary());
-  api.navigate('library');
-  api.toast('Library wiped', 'info');
+  try {
+    await clearLibrary();
+    api.update(() => defaultLibrary());
+    api.navigate('library');
+    api.toast('Library wiped', 'info');
+  } catch (err) {
+    api.toast(err instanceof Error ? err.message : 'Wipe failed', 'error');
+  }
 }
 
 function segmentedTheme(
-  value: 'dark' | 'sepia' | 'light',
-  onChange: (value: 'dark' | 'sepia' | 'light') => void,
+  value: 'dark' | 'sepia' | 'light' | 'system',
+  onChange: (value: 'dark' | 'sepia' | 'light' | 'system') => void,
 ): HTMLElement {
   const group = h(
     'div',
@@ -838,13 +1060,14 @@ function segmentedTheme(
       ['dark', 'dark'],
       ['sepia', 'sepia'],
       ['light', 'light'],
+      ['system', 'system'],
     ].map(([v, label]) =>
       h('button', {
         class: `seg${v === value ? ' seg-on' : ''}`,
         type: 'button',
         text: label,
         onclick: () => {
-          onChange(v as 'dark' | 'sepia' | 'light');
+          onChange(v as 'dark' | 'sepia' | 'light' | 'system');
           for (const seg of Array.from(group.querySelectorAll('.seg'))) {
             seg.classList.toggle('seg-on', seg.textContent === label);
           }
@@ -853,4 +1076,32 @@ function segmentedTheme(
     ),
   );
   return group;
+}
+
+function collectWardrobe(
+  controls: HTMLElement,
+): Record<
+  'story' | 'letter' | 'diary' | 'newspaper' | 'mapnote' | 'recipe',
+  'auto' | 'georgia' | 'palatino' | 'charter' | 'serif' | 'sans'
+> {
+  const out = {
+    story: 'auto',
+    letter: 'auto',
+    diary: 'auto',
+    newspaper: 'auto',
+    mapnote: 'auto',
+    recipe: 'auto',
+  } as Record<
+    'story' | 'letter' | 'diary' | 'newspaper' | 'mapnote' | 'recipe',
+    'auto' | 'georgia' | 'palatino' | 'charter' | 'serif' | 'sans'
+  >;
+  for (const select of Array.from(
+    controls.querySelectorAll<HTMLSelectElement>('.wardrobe-select'),
+  )) {
+    const format = select.dataset.format;
+    if (format && format in out) {
+      (out as Record<string, string>)[format] = select.value;
+    }
+  }
+  return out;
 }

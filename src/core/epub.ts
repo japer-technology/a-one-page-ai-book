@@ -7,99 +7,8 @@
  * whole thing is unit-testable without a browser.
  */
 import type { CompiledBook } from './compile';
-
-// ---- CRC-32 (the ZIP polynomial) -------------------------------------------
-
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
-export function crc32(bytes: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc = (CRC_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-// ---- Minimal STORE-only ZIP writer -----------------------------------------
-
-interface ZipEntry {
-  name: string;
-  data: Uint8Array;
-}
-
-class ZipWriter {
-  private entries: ZipEntry[] = [];
-
-  add(name: string, data: string | Uint8Array): void {
-    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    this.entries.push({ name, data: bytes });
-  }
-
-  finish(): Uint8Array {
-    const encoder = new TextEncoder();
-    const parts: Uint8Array[] = [];
-    const central: Uint8Array[] = [];
-    let offset = 0;
-
-    for (const entry of this.entries) {
-      const nameBytes = encoder.encode(entry.name);
-      const crc = crc32(entry.data);
-      const header = new Uint8Array(30);
-      const view = new DataView(header.buffer);
-      view.setUint32(0, 0x04034b50, true); // local file header
-      view.setUint16(4, 20, true); // version needed
-      view.setUint16(6, 0x0800, true); // UTF-8 names
-      view.setUint16(8, 0, true); // method: stored
-      view.setUint32(14, crc, true);
-      view.setUint32(18, entry.data.length, true); // compressed
-      view.setUint32(22, entry.data.length, true); // uncompressed
-      view.setUint16(26, nameBytes.length, true);
-      view.setUint16(28, 0, true); // extra len
-      parts.push(header, nameBytes, entry.data);
-
-      const record = new Uint8Array(46);
-      const rec = new DataView(record.buffer);
-      rec.setUint32(0, 0x02014b50, true); // central directory
-      rec.setUint16(4, 20, true); // version made by
-      rec.setUint16(6, 20, true); // version needed
-      rec.setUint16(8, 0x0800, true);
-      rec.setUint16(10, 0, true);
-      rec.setUint32(16, crc, true);
-      rec.setUint32(20, entry.data.length, true);
-      rec.setUint32(24, entry.data.length, true);
-      rec.setUint16(28, nameBytes.length, true);
-      rec.setUint32(42, offset, true); // local header offset
-      central.push(record, nameBytes);
-      offset += header.length + nameBytes.length + entry.data.length;
-    }
-
-    const centralSize = central.reduce((sum, part) => sum + part.length, 0);
-    const end = new Uint8Array(22);
-    const endView = new DataView(end.buffer);
-    endView.setUint32(0, 0x06054b50, true);
-    endView.setUint16(8, this.entries.length, true);
-    endView.setUint16(10, this.entries.length, true);
-    endView.setUint32(12, centralSize, true);
-    endView.setUint32(16, offset, true);
-
-    const total = parts.reduce((sum, part) => sum + part.length, 0) + centralSize + end.length;
-    const out = new Uint8Array(total);
-    let cursor = 0;
-    for (const part of [...parts, ...central, end]) {
-      out.set(part, cursor);
-      cursor += part.length;
-    }
-    return out;
-  }
-}
+import { ZipWriter } from './zip';
+import type { PdfFontPrefs } from './pdf';
 
 // ---- EPUB assembly ----------------------------------------------------------
 
@@ -108,17 +17,18 @@ function escapeXml(text: string): string {
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
 }
 
-export function epubBytes(compiled: CompiledBook): Uint8Array {
+export function epubBytes(compiled: CompiledBook, fonts?: PdfFontPrefs): Uint8Array {
   const zip = new ZipWriter();
   // The mimetype entry MUST be first and stored uncompressed.
   zip.add('mimetype', 'application/epub+zip');
   zip.add('META-INF/container.xml', containerXml());
   zip.add('OEBPS/content.opf', contentOpf(compiled));
   zip.add('OEBPS/nav.xhtml', navXhtml(compiled));
-  zip.add('OEBPS/style.css', epubCss());
+  zip.add('OEBPS/style.css', epubCss(fonts));
   zip.add('OEBPS/title.xhtml', titleXhtml(compiled));
   compiled.pages.forEach((page) => {
     zip.add(`OEBPS/p${page.number}.xhtml`, chapterXhtml(compiled, page.number, page.text));
@@ -173,7 +83,11 @@ function contentOpf(compiled: CompiledBook): string {
 
 function navXhtml(compiled: CompiledBook): string {
   const items = compiled.pages
-    .map((page) => `<li><a href="p${page.number}.xhtml">Page ${page.number}</a></li>`)
+    .map((page) =>
+      page.kind === 'prologue'
+        ? `<li><a href="p${page.number}.xhtml">Prologue</a></li>`
+        : `<li><a href="p${page.number}.xhtml">Page ${page.number}</a></li>`,
+    )
     .join('\n      ');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -192,8 +106,14 @@ function navXhtml(compiled: CompiledBook): string {
 </html>`;
 }
 
-function epubCss(): string {
-  return `body { font-family: Georgia, 'Times New Roman', serif; line-height: 1.7; margin: 5%; max-width: 36em; }
+function epubCss(fonts?: PdfFontPrefs): string {
+  // Honor the reader's font selection: sans stays sans, everything serif-y
+  // stays a classic book serif (e-readers render their own embedded choice).
+  const family =
+    fonts?.readingFont === 'sans'
+      ? "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+      : "Georgia, 'Times New Roman', serif";
+  return `body { font-family: ${family}; line-height: 1.7; margin: 5%; max-width: 36em; }
 h1 { text-align: center; margin-top: 25%; }
 p { margin: 0 0 1em 0; text-indent: 1.5em; }
 p.noindent { text-indent: 0; }
@@ -216,7 +136,11 @@ function titleXhtml(compiled: CompiledBook): string {
 }
 
 function chapterXhtml(compiled: CompiledBook, number: number, text: string): string {
-  const mood = compiled.pages[number - 1]?.mood;
+  // Find the page by its NUMBER, not by array index: the prologue (page 0)
+  // shifts every index by one and pages[] is ordered, not offset-aligned.
+  const page = compiled.pages.find((p) => p.number === number);
+  const isPrologue = page?.kind === 'prologue';
+  const mood = page?.mood;
   const paragraphs = text
     .split(/\n[ \t]*\n+/)
     .map((part) => part.trim())
@@ -226,9 +150,9 @@ function chapterXhtml(compiled: CompiledBook, number: number, text: string): str
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>Page ${number}</title><link rel="stylesheet" href="style.css"/></head>
+<head><title>${isPrologue ? 'Prologue' : `Page ${number}`}</title><link rel="stylesheet" href="style.css"/></head>
 <body>
-  <p class="mood noindent">Page ${number}${mood ? ` · ${mood.icon} ${mood.label} ${mood.value > 0 ? '+' : ''}${mood.value}` : ''}</p>
+  <p class="mood noindent">${isPrologue ? 'Prologue' : `Page ${number}`}${mood ? ` · ${mood.icon} ${mood.label} ${mood.value > 0 ? '+' : ''}${mood.value}` : ''}</p>
   ${paragraphs}
 </body>
 </html>`;
@@ -264,6 +188,7 @@ function castXhtml(compiled: CompiledBook): string {
 /** One compact line of the per-page mood map for the title page. */
 export function moodLine(compiled: CompiledBook): string {
   const marks = compiled.pages
+    .filter((page) => page.number > 0)
     .map((page) =>
       page.mood
         ? `${page.number}${page.mood.icon}${page.mood.value > 0 ? '+' : ''}${page.mood.value}`
