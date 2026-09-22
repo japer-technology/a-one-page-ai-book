@@ -533,7 +533,10 @@ function comparePane(api: AppApi, book: Book, node: StoryNode): HTMLElement {
         text: `version ${data.chosenVersion} of ${data.versions.length} · ${fmtNumber(countWords(chosen?.text ?? ''))} words`,
       }),
     ),
-    h('div', { class: 'page-text compare-text', text: chosen?.text ?? '' }),
+    h('div', {
+      class: `page-text compare-text doc-${data.direction.document}`,
+      text: chosen?.text ?? '',
+    }),
     h(
       'div',
       { class: 'archive-versions' },

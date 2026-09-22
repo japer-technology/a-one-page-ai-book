@@ -60,7 +60,12 @@ export function renderTheEnd(api: AppApi): HTMLElement {
         text: `The tree remembers: ${stats.versions} versions, ${stats.branches} branches, ${stats.nodes} moments. The compiled book is one path through it.`,
       }),
     ),
-    lastText ? h('div', { class: 'page-text', text: lastText }) : null,
+    lastText
+      ? h('div', {
+          class: `page-text doc-${lastPage?.data.kind === 'page' ? lastPage.data.direction.document : 'story'}`,
+          text: lastText,
+        })
+      : null,
     ending && ending.data.kind === 'ending' && ending.data.note
       ? h('p', { class: 'book-meta', text: `Ending note: “${ending.data.note}”` })
       : null,

@@ -770,7 +770,10 @@ function fadedPage(api: AppApi, book: Book, from: StoryNode): HTMLElement {
           h('p', { class: 'lede', text: taglineOf(api, book) }),
           h('p', { class: 'book-meta', text: `Seed: “${seedTextOf(api.nodes, book)}”` }),
         )
-      : h('div', { class: 'page-text faded-text', text: chosen?.text ?? '' }),
+      : h('div', {
+          class: `page-text faded-text doc-${from.data.kind === 'page' ? from.data.direction.document : 'story'}`,
+          text: chosen?.text ?? '',
+        }),
   );
 }
 

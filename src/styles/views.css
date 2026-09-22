@@ -185,7 +185,7 @@
 }
 
 .page-text {
-  font-family: var(--serif);
+  font-family: var(--doc-font-story, var(--serif));
   font-size: 1.16rem;
   line-height: 1.78;
   color: var(--paper);

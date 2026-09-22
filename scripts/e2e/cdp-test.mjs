@@ -70,6 +70,20 @@ async function dumpState() {
 
 const out = {};
 
+async function changeValue(selector, value, event = 'change') {
+  await evaluate(`(() => {
+    const control = document.querySelector(${JSON.stringify(selector)});
+    control.value = ${JSON.stringify(value)};
+    control.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true }));
+  })()`);
+}
+
+async function fontOf(selector) {
+  return evaluate(
+    `getComputedStyle(document.querySelector(${JSON.stringify(selector)})).fontFamily`,
+  );
+}
+
 // ---- 1. Settings: scan, use, save, test ------------------------------------
 out.booted = await waitFor("!!document.querySelector('.view-settings')", 10000, 'settings render');
 await evaluate("document.querySelector('.view-settings .btn-primary').click(); 'clicked'");
@@ -103,6 +117,58 @@ out.connectedToast = await waitForOr(
   'Connected toast',
 );
 out.savedAfterTest = await evaluate('window.__PAGE_TURN__.model()');
+
+// Appearance must survive navigation and must not wipe an unsaved endpoint.
+await changeValue('input[list="discovered-models"]', 'unsaved-model', 'input');
+const formats = ['story', 'letter', 'diary', 'newspaper', 'mapnote', 'recipe'];
+const fonts = ['georgia', 'palatino', 'charter', 'serif', 'sans'];
+const readingFonts = {};
+out.wardrobeFontsMatch = true;
+for (const font of fonts) {
+  await changeValue('#reading-font', font);
+  readingFonts[font] = await fontOf('.brand');
+  for (const format of formats) {
+    await changeValue(`.wardrobe-select[data-format="${format}"]`, font);
+    // Exercise the built CSS in the browser, including every document class.
+    const actual = await evaluate(`(() => {
+      const sample = document.createElement('div');
+      sample.className = 'page-text doc-${format}';
+      document.querySelector('.main').append(sample);
+      const family = getComputedStyle(sample).fontFamily;
+      sample.remove();
+      return family;
+    })()`);
+    out.wardrobeFontsMatch &&= actual === readingFonts[font];
+  }
+}
+out.readingFontsDistinct = new Set(Object.values(readingFonts)).size === fonts.length;
+for (const format of formats) {
+  await changeValue(`.wardrobe-select[data-format="${format}"]`, 'auto');
+}
+await changeValue('#reading-font', 'palatino');
+out.autoFontsFollowReadingFont = await evaluate(`(() => {
+  const expected = getComputedStyle(document.querySelector('.brand')).fontFamily;
+  return ${JSON.stringify(formats)}.every(format => {
+    const sample = document.createElement('div');
+    sample.className = 'page-text doc-' + format;
+    document.querySelector('.main').append(sample);
+    const actual = getComputedStyle(sample).fontFamily;
+    sample.style.fontFamily = 'var(--mono)';
+    const mono = getComputedStyle(sample).fontFamily;
+    sample.remove();
+    return actual === (format === 'mapnote' ? mono : expected);
+  });
+})()`);
+out.mapnoteAutoLabel = await evaluate(
+  `document.querySelector('.wardrobe-select[data-format="mapnote"] option[value="auto"]').textContent.includes('monospace')`,
+);
+await changeValue('.wardrobe-select[data-format="story"]', 'sans');
+await changeValue('.wardrobe-select[data-format="letter"]', 'charter');
+await changeValue('.font-scale', '1.2');
+out.appearanceKeepsEndpointDraft = await evaluate(
+  `document.querySelector('input[list="discovered-models"]').value === 'unsaved-model' && window.__PAGE_TURN__.model().model === 'mock-poet-3b'`,
+);
+await changeValue('input[list="discovered-models"]', 'mock-poet-3b', 'input');
 
 // ---- 2. New book: seed → titles → page 1 streams SSE -----------------------
 await evaluate(
@@ -157,6 +223,10 @@ if (!out.page1Appeared) {
 out.page1Text = await evaluate(
   "document.querySelector('.view-page .page-text')?.textContent ?? ''",
 );
+out.storyFontApplied = (await fontOf('.view-page .page-text')) === readingFonts.sans;
+out.textScaleApplied = await evaluate(
+  "Math.abs(parseFloat(getComputedStyle(document.querySelector('.view-page .page-text')).fontSize) - 16 * 1.2 * 1.16) < 0.01",
+);
 // The page workshop: paragraph tools, story spine, living cast, version picker.
 out.paragraphTools = await evaluate(
   "document.querySelectorAll('.view-page .para-tool').length > 0",
@@ -210,6 +280,7 @@ out.turnPanelAppeared = await waitFor(
 // The director's console: emotion dials and standing rules.
 out.emotionDials = await evaluate("!!document.querySelector('.view-turn .dial-grid')");
 out.standingRules = await evaluate("!!document.querySelector('.view-turn .rules-area')");
+out.turnStoryFontApplied = (await fontOf('.faded-text')) === readingFonts.sans;
 
 // ---- 3. Switch to Ollama and stream page 2 over NDJSON ---------------------
 await evaluate(
@@ -266,8 +337,9 @@ await evaluate(
   "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Keep this page')).click(); 'kept-again'",
 );
 await waitFor("!!document.querySelector('.turn-panel')", 10000, 'turn panel again');
+await changeValue('.turn-panel select:has(option[value="letter"])', 'letter');
 await evaluate(
-  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Continue naturally')).click(); 'next'",
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Generate next page')).click(); 'next'",
 );
 out.page2Appeared = await waitForOr(
   "[...document.querySelectorAll('.view-page .page-num')].some(n => n.textContent.includes('Page 2')) && !!document.querySelector('.view-page .page-text')",
@@ -280,6 +352,7 @@ if (!out.page2Appeared) {
 out.page2Text = await evaluate(
   "document.querySelector('.view-page .page-text')?.textContent ?? ''",
 );
+out.letterFontApplied = (await fontOf('.view-page .page-text')) === readingFonts.charter;
 
 // Cast CRUD: add TWO people, then a relationship between them.
 const addPerson = async (name) => {
@@ -335,6 +408,10 @@ out.relationAdded = await waitFor(
   5000,
   'relationship recorded',
 );
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Keep this page')).click()",
+);
+out.turnLetterFontApplied = (await fontOf('.faded-text')) === readingFonts.charter;
 
 // ---- 3b. Story map renders the tree as a timeline --------------------------
 await evaluate(
@@ -345,6 +422,14 @@ out.archiveAppeared = await waitFor(
   10000,
   'story map with two timeline entries',
 );
+for (let i = 0; i < 2; i++) {
+  await evaluate(
+    "[...document.querySelectorAll('.archive-entry button')].find(b => b.textContent === '◧ Compare').click()",
+  );
+}
+out.comparisonFontsApplied =
+  (await fontOf('.compare-text.doc-story')) === readingFonts.sans &&
+  (await fontOf('.compare-text.doc-letter')) === readingFonts.charter;
 
 // ---- 3c. Time-lapse replay regression: live entries must light up ----------
 await evaluate(
@@ -372,6 +457,12 @@ out.readerVoicePicked = await evaluate(
 );
 
 out.readerRenderDelta = (await evaluate('window.__PAGE_TURN__.renders()')) - rendersBefore;
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Begin reading')).click()",
+);
+out.readerStoryFontApplied = (await fontOf('.reader-sheet .page-text')) === readingFonts.sans;
+await evaluate('document.querySelector(\'button[title="Next page (→)"]\').click()');
+out.readerLetterFontApplied = (await fontOf('.reader-sheet .page-text')) === readingFonts.charter;
 
 // ---- 4. LAN scan over the loopback subnet -----------------------------------
 // Theme regression: sepia must re-skin the document AND the wall behind it.
@@ -416,6 +507,46 @@ out.modelAfterLanUse = await evaluate(
   'document.querySelector(\'input[list="discovered-models"]\').value',
 );
 
+// Reload from durable storage, not just the in-memory settings draft.
+await sleep(1000);
+await send('Page.reload');
+await waitFor("!!document.querySelector('#reading-font')", 10000, 'settings after reload');
+out.appearanceSurvivesReload = await evaluate(`(() => {
+  return document.querySelector('#reading-font').value === 'palatino' &&
+    document.querySelector('.wardrobe-select[data-format="story"]').value === 'sans' &&
+    document.querySelector('.wardrobe-select[data-format="letter"]').value === 'charter' &&
+    document.querySelector('.font-scale').value === '1.2' &&
+    document.documentElement.dataset.font === 'palatino';
+})()`);
+await evaluate(
+  "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Library')).click()",
+);
+await evaluate(
+  "[...document.querySelectorAll('.book-card button')].find(b => b.textContent.includes('Continue')).click()",
+);
+out.reloadedPageFontApplied = (await fontOf('.view-page .page-text')) === readingFonts.charter;
+
+// The finished-book screen must keep the closing page's document typography.
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Keep this page')).click()",
+);
+await evaluate(
+  "[...document.querySelectorAll('label')].find(l => l.textContent.includes('Bring the story to a close')).querySelector('input').click()",
+);
+await changeValue('.turn-panel select:has(option[value="letter"])', 'letter');
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Generate next page')).click()",
+);
+await waitFor(
+  "[...document.querySelectorAll('button')].some(b => b.textContent.includes('keep this closing page'))",
+  30000,
+  'closing page',
+);
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('keep this closing page')).click()",
+);
+out.endingFontApplied = (await fontOf('.view-theend .page-text')) === readingFonts.charter;
+
 console.log(JSON.stringify(out, null, 2));
 
 const ok =
@@ -452,6 +583,22 @@ const ok =
   out.readerRenderDelta <= 10 &&
   out.themeApplied === true &&
   out.wallChanged === true &&
+  out.wardrobeFontsMatch === true &&
+  out.readingFontsDistinct === true &&
+  out.autoFontsFollowReadingFont === true &&
+  out.mapnoteAutoLabel === true &&
+  out.appearanceKeepsEndpointDraft === true &&
+  out.storyFontApplied === true &&
+  out.textScaleApplied === true &&
+  out.turnStoryFontApplied === true &&
+  out.letterFontApplied === true &&
+  out.turnLetterFontApplied === true &&
+  out.comparisonFontsApplied === true &&
+  out.readerStoryFontApplied === true &&
+  out.readerLetterFontApplied === true &&
+  out.appearanceSurvivesReload === true &&
+  out.reloadedPageFontApplied === true &&
+  out.endingFontApplied === true &&
   out.lanHitAppeared === true &&
   out.modelAfterLanUse === 'mock-poet-3b';
 ws.close();

@@ -20,7 +20,12 @@
   --warn: #e0b25c;
   --muted: #9c8f7d;
 
-  --serif: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif;
+  --font-georgia: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif;
+  --font-palatino: 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+  --font-charter: Charter, 'Bitstream Charter', 'Sitka Text', Georgia, serif;
+  --font-serif: ui-serif, Georgia, 'Times New Roman', serif;
+  --font-sans: var(--sans);
+  --serif: var(--font-georgia);
   --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
   --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
 
@@ -41,19 +46,19 @@
 /* ---- Reading font stacks (system fonts only — nothing to download) -------- */
 
 :root[data-font='palatino'] {
-  --serif: 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+  --serif: var(--font-palatino);
 }
 
 :root[data-font='charter'] {
-  --serif: Charter, 'Bitstream Charter', 'Sitka Text', Georgia, serif;
+  --serif: var(--font-charter);
 }
 
 :root[data-font='serif'] {
-  --serif: ui-serif, Georgia, 'Times New Roman', serif;
+  --serif: var(--font-serif);
 }
 
 :root[data-font='sans'] {
-  --serif: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --serif: var(--font-sans);
 }
 
 /* ---- Reading themes ------------------------------------------------------ */
