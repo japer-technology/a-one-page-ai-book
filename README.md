@@ -13,7 +13,6 @@ files, and never talks to a cloud.
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · The author's guide (every control, every best
 > practice): [docs/AUTHORING.md](docs/AUTHORING.md)
 
-[![CI](https://github.com/thefederation/a-one-page-ai-book/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ---
