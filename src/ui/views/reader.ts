@@ -6,7 +6,7 @@
  * views, never here.
  */
 import type { AppApi } from '../ctx';
-import { button, fmtNumber, h } from '../dom';
+import { button, h, plural } from '../dom';
 import { compileBook } from '../../core/compile';
 import { titleNodeOf } from '../../core/tree';
 import type { Book } from '../../core/types';
@@ -175,7 +175,11 @@ export function renderReader(api: AppApi): HTMLElement {
                 class: 'menu-item',
                 type: 'button',
                 text: '🖼️ Quote card',
-                onclick: () => quoteCardFor(compiled, pageNumber),
+                onclick: () => {
+                  if (!quoteCardFor(compiled, pageNumber)) {
+                    api.toast('Could not render that quote card on this device.', 'error');
+                  }
+                },
               }),
             ]
           : []),
@@ -311,7 +315,7 @@ export function renderReader(api: AppApi): HTMLElement {
         tagline ? h('p', { class: 'lede', text: tagline }) : null,
         h('p', {
           class: 'book-meta',
-          text: `A book directed page by page · ${pageCount} pages · ${fmtNumber(compiled.words)} words`,
+          text: `A book directed page by page · ${plural(pageCount, 'page')} · ${plural(compiled.words, 'word')}`,
         }),
         compiled.seed ? h('p', { class: 'book-meta', text: `Seed: “${compiled.seed}”` }) : null,
       ),
@@ -357,12 +361,17 @@ export function renderReader(api: AppApi): HTMLElement {
       h(
         'div',
         { class: 'reader-bar' },
-        button('◀', () => go(-1), 'ghost', { disabled: pos <= 1, title: 'Previous page (←)' }),
+        // Slot 0 is the title page and ← already reaches it, so disabling here
+        // made the button disagree with the keyboard.
+        button('◀', () => go(-1), 'ghost', {
+          disabled: pos <= 0,
+          title: pos === 1 ? 'Title page (←)' : 'Previous page (←)',
+        }),
         h('span', {
           class: 'reader-progress',
           text:
             page.kind === 'prologue'
-              ? `Prologue · ${pageCount} pages`
+              ? `Prologue · ${plural(pageCount, 'page')}`
               : `${page.number} / ${pageCount}`,
         }),
         button('▶', () => go(1), 'primary', { disabled: pos >= max, title: 'Next page (→)' }),

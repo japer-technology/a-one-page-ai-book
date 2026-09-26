@@ -134,7 +134,29 @@ export function parseModelsResponse(vendor: EndpointVendor, json: unknown): stri
 
 /** "http://127.0.0.1:1234/v1/" -> "http://127.0.0.1:1234" (keeps deeper path prefixes). */
 export function normalizeBaseUrl(input: string): string {
-  return input.trim().replace(/\/+$/, '').replace(/\/v1$/, '');
+  return input
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/(?:\/v1)+$/i, '');
+}
+
+/**
+ * A base URL safe for logs, toasts and audit entries: drops any userinfo
+ * (`user:password@`) and query string, which are otherwise interpolated
+ * verbatim into the app's shareable diagnostics. Generation still uses the
+ * full, unredacted URL.
+ */
+export function redactUrl(input: string): string {
+  const cleaned = normalizeBaseUrl(input);
+  try {
+    const url = new URL(cleaned);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return cleaned.replace(/\/\/[^/@]*@/, '//');
+  }
 }
 
 export function vendorName(vendor: EndpointVendor): string {
@@ -155,7 +177,11 @@ export function llmPorts(): number[] {
   for (const candidate of CANDIDATES) {
     try {
       const port = Number(new URL(candidate.baseUrl).port);
-      if (Number.isFinite(port) && !ports.includes(port)) ports.push(port);
+      // Number('') === 0 — a portless entry would silently add port 0 to the
+      // scan grid and the "on N ports" copy.
+      if (Number.isInteger(port) && port > 0 && port < 65536 && !ports.includes(port)) {
+        ports.push(port);
+      }
     } catch {
       // skip malformed URLs
     }

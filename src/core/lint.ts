@@ -23,12 +23,15 @@ export interface LintReport {
 const TOKEN = /\b[\w'’]+\b/g;
 
 export function lintText(text: string): LintReport {
-  const words = text.match(TOKEN) ?? [];
-  const sentences = text
+  // Normalize line endings first: a CRLF page otherwise counts as a single
+  // paragraph (and its sentences run together), which skews every metric.
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const words = normalized.match(TOKEN) ?? [];
+  const sentences = normalized
     .split(/[.!?…]+[\s\n]+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  const paragraphs = text
+  const paragraphs = normalized
     .split(/\n[ \t]*\n+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
@@ -80,9 +83,11 @@ export function lintText(text: string): LintReport {
     issues.push({ severity: 'info', message: 'Little dialogue — a voice could open this up.' });
   }
   if (repeatedNgrams.length > 0) {
+    const extra = repeatedNgrams.length - 1;
     issues.push({
       severity: 'warn',
-      message: `Repeated phrasing: "${repeatedNgrams[0]}" (and ${repeatedNgrams.length - 1} more).`,
+      message:
+        `Repeated phrasing: "${repeatedNgrams[0]}"` + (extra > 0 ? ` (and ${extra} more).` : '.'),
     });
   }
   if (words.length === 0) {

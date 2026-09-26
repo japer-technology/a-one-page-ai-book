@@ -7,18 +7,35 @@
  * whole thing is unit-testable without a browser.
  */
 import type { CompiledBook } from './compile';
+import { paragraphsOf } from './compile';
 import { ZipWriter } from './zip';
 import type { PdfFontPrefs } from './pdf';
 
 // ---- EPUB assembly ----------------------------------------------------------
 
 function escapeXml(text: string): string {
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;');
+  return (
+    text
+      // Control characters are not legal XML 1.0 characters at all, so
+      // escaping cannot save them: a single \u000B anywhere in a page made the
+      // chapter "not well-formed" and the whole EPUB fail validation.
+      // eslint-disable-next-line no-control-regex -- matching them is the point
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&apos;')
+  );
+}
+
+/**
+ * EPUB 3 requires `dcterms:modified` to match exactly `YYYY-MM-DDThh:mm:ssZ` —
+ * `toISOString()` always emits milliseconds, which fails validation on EVERY
+ * export.
+ */
+function epubTimestamp(): string {
+  return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
 }
 
 export function epubBytes(compiled: CompiledBook, fonts?: PdfFontPrefs): Uint8Array {
@@ -33,6 +50,9 @@ export function epubBytes(compiled: CompiledBook, fonts?: PdfFontPrefs): Uint8Ar
   compiled.pages.forEach((page) => {
     zip.add(`OEBPS/p${page.number}.xhtml`, chapterXhtml(compiled, page.number, page.text));
   });
+  if (compiled.endingNote.trim().length > 0) {
+    zip.add('OEBPS/ending.xhtml', endingXhtml(compiled));
+  }
   if (compiled.cast) zip.add('OEBPS/cast.xhtml', castXhtml(compiled));
   return zip.finish();
 }
@@ -59,6 +79,10 @@ function contentOpf(compiled: CompiledBook): string {
     );
     spine.push(`<itemref idref="p${page.number}"/>`);
   });
+  if (compiled.endingNote.trim().length > 0) {
+    manifest.push('<item id="ending" href="ending.xhtml" media-type="application/xhtml+xml"/>');
+    spine.push('<itemref idref="ending"/>');
+  }
   if (compiled.cast) {
     manifest.push('<item id="cast" href="cast.xhtml" media-type="application/xhtml+xml"/>');
     spine.push('<itemref idref="cast"/>');
@@ -66,11 +90,11 @@ function contentOpf(compiled: CompiledBook): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <package version="3.0" unique-identifier="bookid" xmlns="http://www.idpf.org/2007/opf">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="bookid">page-turn-${Date.now()}</dc:identifier>
+    <dc:identifier id="bookid">page-turn-${escapeXml(compiled.id)}</dc:identifier>
     <dc:title>${escapeXml(compiled.title)}</dc:title>
     <dc:language>en</dc:language>
     <dc:creator>Directed page by page in Page Turn</dc:creator>
-    <meta property="dcterms:modified">${new Date().toISOString()}</meta>
+    <meta property="dcterms:modified">${epubTimestamp()}</meta>
   </metadata>
   <manifest>
     ${manifest.join('\n    ')}
@@ -99,6 +123,7 @@ function navXhtml(compiled: CompiledBook): string {
     <ol>
       <li><a href="title.xhtml">Title page</a></li>
       ${items}
+      ${compiled.endingNote.trim().length > 0 ? '<li><a href="ending.xhtml">The End</a></li>' : ''}
       ${compiled.cast ? '<li><a href="cast.xhtml">The cast</a></li>' : ''}
     </ol>
   </nav>
@@ -141,10 +166,9 @@ function chapterXhtml(compiled: CompiledBook, number: number, text: string): str
   const page = compiled.pages.find((p) => p.number === number);
   const isPrologue = page?.kind === 'prologue';
   const mood = page?.mood;
-  const paragraphs = text
-    .split(/\n[ \t]*\n+/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
+  // Use the shared splitter so a CRLF page keeps its paragraph structure
+  // instead of collapsing into one giant <p>.
+  const paragraphs = paragraphsOf(text)
     .map((part) => `<p>${escapeXml(part)}</p>`)
     .join('\n  ');
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -153,6 +177,22 @@ function chapterXhtml(compiled: CompiledBook, number: number, text: string): str
 <head><title>${isPrologue ? 'Prologue' : `Page ${number}`}</title><link rel="stylesheet" href="style.css"/></head>
 <body>
   <p class="mood noindent">${isPrologue ? 'Prologue' : `Page ${number}`}${mood ? ` · ${mood.icon} ${mood.label} ${mood.value > 0 ? '+' : ''}${mood.value}` : ''}</p>
+  ${paragraphs}
+</body>
+</html>`;
+}
+
+/** The reader's own closing note — every export used to drop it. */
+function endingXhtml(compiled: CompiledBook): string {
+  const paragraphs = paragraphsOf(compiled.endingNote)
+    .map((part) => `<p>${escapeXml(part)}</p>`)
+    .join('\n  ');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>The End</title><link rel="stylesheet" href="style.css"/></head>
+<body>
+  <h1>The End</h1>
   ${paragraphs}
 </body>
 </html>`;

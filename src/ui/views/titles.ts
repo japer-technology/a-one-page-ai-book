@@ -112,7 +112,13 @@ function titleCard(
     'article',
     {
       class: `title-card${selected ? ' selected' : ''}`,
-      onclick: () => {
+      onclick: (event: MouseEvent) => {
+        // The card's own controls live inside it. Without this guard a click on
+        // the "Edit the title…" field bubbled up, reset `sel.edited` and
+        // re-rendered — the field emptied, the caret was lost and the heading
+        // snapped back, so a mouse user could never edit a title.
+        const target = event.target;
+        if (target instanceof Element && target.closest('input, button, textarea, select')) return;
         sel.index = index;
         sel.edited = '';
         api.refresh();

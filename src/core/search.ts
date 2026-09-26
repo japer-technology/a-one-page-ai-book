@@ -10,7 +10,12 @@ export function searchScore(query: string, text: string): number {
   const q = query.toLowerCase().replace(/\s+/g, ' ').trim();
   const t = text.toLowerCase();
   if (q.length === 0) return 1;
-  if (t.includes(q)) return 100 + q.length; // exact substring: always a win
+  // An exact substring match must be unbeatable: the fuzzy scorer below awards
+  // 20+ per character at word starts, so a gappy candidate used to outrank a
+  // real, contiguous hit (query "dead letter": exact 111 vs a spaced
+  // "d e a d l e t t e r" subsequence at 218). Earlier matches rank higher.
+  const at = t.indexOf(q);
+  if (at >= 0) return 1_000_000 - at;
 
   let score = 0;
   let qi = 0;

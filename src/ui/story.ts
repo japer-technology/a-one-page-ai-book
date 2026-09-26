@@ -14,6 +14,8 @@ import { getNode, pathToRoot, summaryUpTo } from '../core/tree';
 import type { Book } from '../core/types';
 
 const busy = new Map<string, { status: 'busy' | 'error'; error: string }>();
+/** The newest page awaiting a memory update per book (trailing-queue). */
+const pendingSummary = new Map<string, string>();
 
 export function summaryBusy(bookId: string): { status: 'busy' | 'error'; error: string } | null {
   return busy.get(bookId) ?? null;
@@ -24,8 +26,16 @@ export function summaryBusy(bookId: string): { status: 'busy' | 'error'; error: 
  * call while one is running is a no-op, and `parallel: true` keeps any
  * concurrent generation alive — a memory save is harmless and idempotent, so
  * it must never invalidate in-flight page work.
+ *
+ * `manual` is set by the memory panel's own buttons: an explicit refresh click
+ * deserves a plain error toast; the automatic upkeep reports through the panel.
  */
-export async function updateSummary(api: AppApi, book: Book, pageNodeId: string): Promise<void> {
+export async function updateSummary(
+  api: AppApi,
+  book: Book,
+  pageNodeId: string,
+  { manual = false }: { manual?: boolean } = {},
+): Promise<void> {
   if (busy.get(book.id)?.status === 'busy') return;
   if (!api.lib.settings.endpoint.model) return;
   busy.set(book.id, { status: 'busy', error: '' });
@@ -45,25 +55,52 @@ export async function updateSummary(api: AppApi, book: Book, pageNodeId: string)
     const ctx = buildContextTo(api.nodes, book, pageNode.id);
     const previous = summaryUpTo(api.nodes, pageNode.id)?.summary ?? null;
     const raw = await api.generateText(summaryMessages(ctx, previous), {
-      model: api.lib.settings.fastModel || book.model || api.lib.settings.endpoint.model,
+      model: api.lib.settings.fastModel || api.lib.settings.endpoint.model,
       parallel: true,
+      // Background: the rolling summary is requested as a page lands, right
+      // before the view navigates on.
+      background: true,
+      quiet: !manual,
     });
     const clean = raw.trim();
     if (clean.length === 0) throw new Error('The model returned an empty summary');
     api.saveSummary(pageNode.id, clean);
+    // This page IS the newest request: drop the trailing marker, or a later
+    // update finishing would see it as pending and re-run this one.
+    if (pendingSummary.get(book.id) === pageNode.id) pendingSummary.delete(book.id);
     busy.delete(book.id);
     api.refresh();
+    // Trailing pass: a page that landed while this one ran was skipped by the
+    // busy-guard, so the memory would otherwise lag one page behind forever.
+    const trailing = pendingSummary.get(book.id);
+    if (trailing && trailing !== pageNode.id) {
+      pendingSummary.delete(book.id);
+      void updateSummary(api, book, trailing);
+    }
   } catch (err) {
     busy.delete(book.id);
+    if (pendingSummary.get(book.id) === pageNodeId) pendingSummary.delete(book.id);
     busy.set(book.id, { status: 'error', error: api.genError(err) });
     api.refresh();
   }
 }
 
-/** Fire-and-forget summary update when the setting allows it. */
+/**
+ * Fire-and-forget summary update when the setting allows it.
+ *
+ * The living-cast call already asks the model for the rolling summary in the
+ * same JSON and saves it on the same page node, so with the cast updater on
+ * this second call would be pure duplication: twice the model load, twice the
+ * chance of a busy-server failure, and two different summaries racing for
+ * `page.data.summary` (the cast panel's "story so far" and the memory panel
+ * were then showing different texts). One owner per page — the cast call while
+ * it is enabled, this one otherwise.
+ */
 export function maybeUpdateSummary(api: AppApi, book: Book, pageNodeId: string): void {
   if (!api.lib.settings.autoSummary) return;
+  if (api.lib.settings.autoBible) return;
   if (!api.lib.settings.endpoint.model) return;
+  pendingSummary.set(book.id, pageNodeId);
   void updateSummary(api, book, pageNodeId);
 }
 
@@ -104,7 +141,7 @@ export function renderStoryMemory(
           (event) => {
             event.preventDefault();
             event.stopPropagation();
-            void updateSummary(api, book, upTo);
+            void updateSummary(api, book, upTo, { manual: true });
           },
           'chip',
           { title: 'Ask the model to re-read the story so far and refresh the memory' },
@@ -127,7 +164,11 @@ export function renderStoryMemory(
             { class: 'banner banner-error' },
             state.error,
             ' ',
-            button('Retry', () => void updateSummary(api, book, upTo), 'chip'),
+            button('Retry', () => void updateSummary(api, book, upTo, { manual: true }), 'chip'),
+            h('p', {
+              class: 'banner-hint',
+              text: 'This is the optional story-memory upkeep — the pages you have written are unaffected. Retry, or pick a stronger model for upkeep in Settings.',
+            }),
           )
         : null,
     ),

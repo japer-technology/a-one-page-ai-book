@@ -68,13 +68,29 @@ if (!html.includes('{{__CSS__}}') || !html.includes('{{__JS__}}')) {
 }
 html = html.replace('{{__CSS__}}', () => css).replace('{{__JS__}}', () => js);
 
-// Safety: the injected script must not terminate the host <script> tag early.
+// Safety: the injected script must not terminate the host <script> tag early,
+// and must not enter the tokenizer's escaped states. esbuild escapes
+// `</script>` and `</style`, but it emits `<!--` raw — and inside <script>,
+// `<!--` followed by `<script` puts the tokenizer in a state where the real
+// `</script>` no longer closes the element (the rest of the document is
+// swallowed and the app renders blank).
 const scriptCloses = (html.match(/<\/script/gi) ?? []).length;
 if (scriptCloses !== 1) {
   throw new Error(
     `Inlined JS contains ${scriptCloses - 1} raw "</script" sequences — refusing to emit a corrupt file. ` +
       'Check esbuild escaping or the template.',
   );
+}
+for (const [label, re] of [
+  ['<!--', /<!--/],
+  ['</style', /<\/style/i],
+]) {
+  if (re.test(js) || re.test(css)) {
+    throw new Error(
+      `Inlined asset contains a raw "${label}" sequence — refusing to emit a file that would not parse. ` +
+        'Escape it in the source that introduced it.',
+    );
+  }
 }
 
 const outName = 'page-turn.html';

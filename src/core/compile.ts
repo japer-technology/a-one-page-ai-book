@@ -4,7 +4,7 @@
  */
 import type { Book, EmotionName, PageDocument, StoryBible, StoryNode, TurnInput } from './types';
 import { EMOTION_ICONS } from './types';
-import { pathToRoot, prologueOf } from './tree';
+import { pathToRoot, prologueForTitle } from './tree';
 
 export interface CompiledPage {
   number: number;
@@ -21,6 +21,8 @@ export interface CompiledPage {
 }
 
 export interface CompiledBook {
+  /** The book's id — disambiguates export filenames for same-titled books. */
+  id: string;
   title: string;
   seed: string;
   pages: CompiledPage[];
@@ -36,9 +38,18 @@ export function countWords(text: string): number {
   return trimmed.split(/\s+/).length;
 }
 
-/** Split page text into craftable paragraphs (blank-line separated). */
+/**
+ * Split page text into craftable paragraphs (blank-line separated).
+ *
+ * Handles CRLF/CR blank lines too. The original `\n[ \t]*\n+` pattern missed
+ * `A\r\n\r\nB`, so a Windows-authored page (an LLM or proxy emitting \r\n, an
+ * imported library, a hand-edited file) came back as ONE paragraph — and
+ * "rewrite this paragraph" then committed only the rewritten block, replacing
+ * the reader's whole page with it.
+ */
 export function paragraphsOf(text: string): string[] {
   const parts = text
+    .replace(/\r\n?/g, '\n')
     .split(/\n[ \t]*\n+/)
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
@@ -73,8 +84,12 @@ export function compileBook(
 
   const pages: CompiledPage[] = [];
   let cast: StoryBible | undefined;
-  // The prologue leads, if it was written.
-  const prologue = prologueOf(nodes, book);
+  // The prologue leads, if it was written — and it must be the prologue of the
+  // title ON THIS PATH. Looking it up from `book.chosenTitleId` spliced a
+  // different branch's page zero onto a re-entered branch, and made a written
+  // prologue unreachable from the reader and every export once the reader
+  // re-picked a title (the node survived in storage, invisible).
+  const prologue = titleNode ? prologueForTitle(nodes, titleNode.id) : null;
   if (prologue && prologue.data.kind === 'prologue') {
     const version = prologue.data.versions[prologue.data.chosenVersion - 1];
     if (version) {
@@ -105,6 +120,7 @@ export function compileBook(
   }
 
   return {
+    id: book.id,
     title: titleNode && titleNode.data.kind === 'title' ? titleNode.data.title : 'Untitled',
     seed: seedNode && seedNode.data.kind === 'seed' ? seedNode.data.text : '',
     pages,
@@ -152,7 +168,9 @@ export function toPlainText(compiled: CompiledBook): string {
   for (const page of compiled.pages) {
     lines.push(page.text.trim(), '', '');
   }
-  if (compiled.endingNote) lines.push('— The End —', '');
+  if (compiled.endingNote) {
+    lines.push('— The End —', '', compiled.endingNote.trim(), '');
+  }
   const mood = moodLine(compiled);
   if (mood) lines.push(mood, '');
   lines.push(castText(compiled.cast));
@@ -165,7 +183,10 @@ export function toMarkdown(compiled: CompiledBook): string {
   for (const page of compiled.pages) {
     lines.push(page.text.trim(), '', '');
   }
-  if (compiled.endingNote) lines.push('*— The End —*', '');
+  if (compiled.endingNote) {
+    lines.push('*— The End —*', '');
+    lines.push(compiled.endingNote.trim(), '');
+  }
   const mood = moodLine(compiled);
   if (mood) lines.push(mood, '');
   if (compiled.cast) {
@@ -224,7 +245,11 @@ function castMarkdown(cast: StoryBible): string {
 }
 
 export function bookFileName(compiled: CompiledBook, ext: string): string {
-  return `${slugify(compiled.title)}.${ext}`;
+  // Two different books with the same title (untitled placeholders, sequels)
+  // used to suggest the SAME filename, silently asking the picker to overwrite
+  // another book's export. The id suffix matches the bundle/mirror convention.
+  const slug = slugify(compiled.title);
+  return `${slug}-${compiled.id.slice(0, 8)}.${ext}`;
 }
 
 /** The Director's Commentary Edition: every page with the decisions that made it. */
@@ -243,7 +268,7 @@ export function toDirectorCut(compiled: CompiledBook): string {
       if (page.direction.direction.trim()) parts.push(page.direction.direction.trim());
       if (page.direction.tone !== 'inherit') parts.push(`tone: ${page.direction.tone}`);
       if (page.direction.pace !== 'inherit') parts.push(`pace: ${page.direction.pace}`);
-      if (page.direction.beat !== 'inherit') parts.push(`ending: ${page.direction.beat}`);
+      if (page.direction.beat !== 'inherit') parts.push(`beat: ${page.direction.beat}`);
       if (page.direction.sizeTarget)
         parts.push(`size: ${page.direction.sizeTarget.value} ${page.direction.sizeTarget.kind}`);
       if (page.direction.chapter !== 'none') parts.push(`chapter: ${page.direction.chapter}`);
@@ -254,6 +279,9 @@ export function toDirectorCut(compiled: CompiledBook): string {
       if (emotions.length > 0) parts.push(emotions.join(', '));
       lines.push(`> *Directed: ${parts.join(' · ') || 'continue naturally'}*`, '');
     }
+  }
+  if (compiled.endingNote.trim().length > 0) {
+    lines.push('## The End', '', compiled.endingNote.trim(), '');
   }
   lines.push('---', '', '*Directed page by page in Page Turn.*');
   return lines.join('\n').trimEnd() + '\n';

@@ -12,7 +12,7 @@
 import { CANDIDATES, modelListUrls, parseModelsResponse } from './endpoints';
 import type { EndpointCandidate } from './endpoints';
 
-export type ProbeStatus = 'reachable' | 'cors-blocked' | 'absent';
+export type ProbeStatus = 'reachable' | 'cors-blocked' | 'unauthorized' | 'absent';
 
 export interface ProbeResult {
   candidate: EndpointCandidate;
@@ -77,15 +77,24 @@ export async function probeCandidate(
     }
   }
 
-  // A resolved-but-non-OK response means the server IS reachable and CORS
-  // works (a CORS failure throws) — it just doesn't expose this model list.
+  // A resolved-but-non-OK response means SOMETHING is listening and CORS works
+  // (a CORS failure throws) — but it is not a working LLM endpoint. Reporting
+  // it as "✓ reachable" with a Use button presented unrelated dev servers on
+  // the catalog's ports as usable models, and hid the one useful signal (the
+  // HTTP status) behind a detail string the UI never rendered.
   if (lastHttpStatus !== null) {
+    // A 401/403 is a SUPPORTED configuration (key-protected endpoint), not a
+    // CORS problem: badging it "CORS-blocked" sent the reader off to configure
+    // server-side origins when the fix was pasting their API key.
+    const unauthorized = lastHttpStatus === 401 || lastHttpStatus === 403;
     return {
       candidate,
-      status: 'reachable',
+      status: unauthorized ? 'unauthorized' : 'absent',
       models: [],
       latencyMs: null,
-      detail: `server answered HTTP ${lastHttpStatus} to the model-list probe`,
+      detail: unauthorized
+        ? `answered HTTP ${lastHttpStatus} — the server is there and wants an API key (add it in Settings, then Save)`
+        : `something is listening on that port but it is not an LLM model list (HTTP ${lastHttpStatus})`,
     };
   }
 
@@ -136,8 +145,11 @@ export async function discover(
         if (!candidate) return;
         const result = await probeCandidate(candidate, timeoutMs);
         results.push(result);
-        onProgress?.(result, done, CANDIDATES.length);
+        // Bump BEFORE reporting: the callback is handed "how many are done",
+        // and reporting the pre-increment value made the first result report 0
+        // (and duplicated the count across the four workers).
         done++;
+        onProgress?.(result, done, CANDIDATES.length);
       }
     },
   );

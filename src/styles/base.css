@@ -24,12 +24,14 @@ body {
   font-size: 16px;
   line-height: 1.6;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 #app {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* ---- Chrome ------------------------------------------------------------- */
@@ -48,6 +50,8 @@ body {
 }
 
 .brand {
+  white-space: nowrap;
+  flex: none;
   font-family: var(--serif);
   font-size: 1.15rem;
   color: var(--accent);
@@ -209,9 +213,12 @@ body {
   width: 100%;
 }
 
-.input:focus {
-  outline: 2px solid rgb(232 196 122 / 0.45);
-  outline-offset: 0;
+.input:focus-visible {
+  /* Was `.input:focus`, which — as a class + pseudo-class (0,2,0) — beat the
+     global `:focus-visible` ring (0,1,0) even for keyboard focus, leaving the
+     faint gold hover ring at 1.1:1 contrast in the sepia and light themes. */
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
 }
 
 /* Keyboard users always see where they are — mouse clicks stay quiet. */
@@ -330,13 +337,25 @@ input[type='checkbox'] {
 .banner-error {
   border-color: rgb(224 118 106 / 0.5);
   background: rgb(224 118 106 / 0.08);
-  color: #f0b3ab;
+  /* Theme tokens, not a light-on-dark pastel: this is the ONLY surface for
+     generation, cast and memory failures, and it measured 1.27:1 in sepia and
+     1.47:1 in light. */
+  color: var(--danger);
 }
 
 .banner-ending {
   border-color: rgb(127 191 127 / 0.45);
   background: rgb(127 191 127 / 0.07);
-  color: #b9ddb9;
+  color: var(--ok);
+}
+
+/* The reassurance line under a failure: keeps the error text itself legible in
+   the danger colour while saying plainly that nothing was lost. */
+.banner-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  color: var(--paper-dim);
+  line-height: 1.4;
 }
 
 .badge {
@@ -385,7 +404,11 @@ input[type='checkbox'] {
 
 .toasts {
   position: fixed;
-  bottom: 1rem;
+  /* `pointer-events: none` on the overlay so a toast can never eat the click
+     meant for the sticky submit bar underneath it (which sits in the same
+     screen region and is far below in the z-order). */
+  pointer-events: none;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -396,6 +419,7 @@ input[type='checkbox'] {
 }
 
 .toast {
+  pointer-events: auto;
   background: var(--bg-card);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);

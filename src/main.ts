@@ -50,9 +50,24 @@ import {
   normalizeBookBundle,
   normalizeLibrary,
 } from './core/schema';
-import { chat, chatJSON, isTransientLLMError } from './llm/client';
+import { chat, chatJSON } from './llm/client';
+import {
+  announcesRetry,
+  retryNotice,
+  withLLMRetry,
+  type LLMAttemptContext,
+  type LLMRetryInfo,
+} from './llm/retry';
+import { redactUrl } from './llm/endpoints';
 import { compileBook } from './core/compile';
-import { loadLibrary, requestPersistence, saveLibrary } from './store/db';
+import {
+  loadLibrary,
+  peekStoredLibrary,
+  requestPersistence,
+  saveLibrary,
+  stashUnreadableDocument,
+  type LoadResult,
+} from './store/db';
 import { readOpfsLibrary, writeMdLibrary, writeOpfsLibrary } from './store/files';
 import { newId } from './core/id';
 import type { AppApi, ToastKind, ViewName } from './ui/ctx';
@@ -60,7 +75,7 @@ import { renderShell, renderToastStack, type Toast } from './ui/shell';
 import { renderLibrary } from './ui/views/library';
 import { genStates } from './ui/genpage';
 import { audit, auditLog } from './ui/audit';
-import { renderSeed } from './ui/views/seed';
+import { renderSeed, resetSeedSession } from './ui/views/seed';
 import { maybeAutoGenerate, renderTitles } from './ui/views/titles';
 import { clearSpanToolbar, renderPage } from './ui/views/page';
 import { renderTurn } from './ui/views/turn';
@@ -80,7 +95,16 @@ interface AppState {
   genCounter: number;
   renderCount: number;
   abort: AbortController | null;
+  /** Foreground requests — aborted by navigation and by a newer generation. */
   controllers: Set<AbortController>;
+  /**
+   * Background upkeep (the living cast, the rolling summary). These must
+   * survive navigation: they are started by "keep this page" and by the moment
+   * a page lands, immediately before the view moves on. Aborting them made the
+   * app's own happy path report "Generation cancelled." and silently disabled
+   * both features in the main loop (keep → turn → generate → page).
+   */
+  backgroundControllers: Set<AbortController>;
   activeRequests: number;
 }
 
@@ -94,6 +118,9 @@ interface AppState {
  * ceiling costs nothing.
  */
 const GENERATION_TIMEOUT_MS = 600_000;
+
+/** How long a toast stays on screen. */
+const TOAST_MS = 5000;
 
 /** Views that make sense as deep links (#/settings, #/library, …). */
 const HASH_VIEWS: ReadonlySet<string> = new Set([
@@ -113,11 +140,47 @@ function viewFromHash(): ViewName | null {
   return HASH_VIEWS.has(hash) ? (hash as ViewName) : null;
 }
 
+/**
+ * Why a queued request was dropped before it could be sent. `signal.reason` is
+ * the DOMException the abort was created with (`AbortError` for a cancel, or
+ * the `TimeoutError` the generation ceiling passes), which is exactly what
+ * `genError` already translates into "Generation cancelled." / "timed out".
+ */
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('Generation cancelled', 'AbortError');
+}
+
+/** One armed generation: its abort controller, its queue slot and its ceiling. */
+interface ArmedGeneration {
+  controller: AbortController;
+  background: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  /** Arm the generation ceiling — called the moment the request starts. */
+  start: () => void;
+}
+
 let toastSeq = 0;
 
 class App implements AppApi {
   private state: AppState;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Boot races storage against a short grace period. If storage loses that
+   * race the app starts from a fallback library, and nothing may be written
+   * until the real read settles — one beforeunload at that moment would
+   * replace the reader's whole shelf with an empty one.
+   */
+  private storageSettled = true;
+  /** Has the reader changed anything yet? Decides who wins a late load. */
+  private pristine = true;
+  /**
+   * Where Help was opened from. Recorded here rather than only in the `?` key
+   * handler: Help is also reachable from the header button and from the
+   * "? crafting help" / "? what is all this" links, and Escape from those used
+   * to drop the reader on the Library instead of back where they were — while
+   * the help copy promised "Esc returns to what you were doing".
+   */
+  private returnView: ViewName | null = null;
 
   constructor(lib: Library, initialView: ViewName = 'library') {
     this.state = {
@@ -130,6 +193,7 @@ class App implements AppApi {
       renderCount: 0,
       abort: null,
       controllers: new Set(),
+      backgroundControllers: new Set(),
       activeRequests: 0,
     };
   }
@@ -154,6 +218,7 @@ class App implements AppApi {
 
   navigate(view: ViewName, params: Record<string, string> = {}): void {
     audit(`navigate→${view}`);
+    if (view === 'help' && this.state.view !== 'help') this.returnView = this.state.view;
     clearSpanToolbar();
     stopReplay();
     stopReaderSpeech();
@@ -192,20 +257,42 @@ class App implements AppApi {
   }
 
   toast(message: string, kind: ToastKind = 'info'): void {
+    // De-duplicate: a failure that BOTH the generation funnel and the calling
+    // view report lands here twice (the funnel guarantees a notice, the view
+    // keeps its retry panel), and a double-clicked button reports the same
+    // thing twice. Stacking identical toasts reads as "two things broke".
+    const existing = this.state.toasts.find((t) => t.message === message && t.kind === kind);
+    if (existing) {
+      if (existing.timer) clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => this.dropToast(existing.id), TOAST_MS);
+      this.state.toasts = [...this.state.toasts.filter((t) => t.id !== existing.id), existing];
+      renderToastStack(this.state.toasts);
+      return;
+    }
     const toast: Toast = { id: ++toastSeq, message, kind };
+    toast.timer = setTimeout(() => this.dropToast(toast.id), TOAST_MS);
     this.state.toasts.push(toast);
     if (this.state.toasts.length > 4) this.state.toasts.shift();
     // Overlay-only update: a full re-render here would detach live view DOM
     // (form inputs, scan progress) and silently reset what the user is doing.
     renderToastStack(this.state.toasts);
-    setTimeout(() => {
-      this.state.toasts = this.state.toasts.filter((t) => t.id !== toast.id);
-      renderToastStack(this.state.toasts);
-    }, 5000);
+  }
+
+  private dropToast(id: number): void {
+    const next = this.state.toasts.filter((t) => t.id !== id);
+    if (next.length === this.state.toasts.length) return;
+    this.state.toasts = next;
+    renderToastStack(this.state.toasts);
   }
 
   update(recipe: (lib: Library) => Library): void {
-    this.state.lib = recipe(this.state.lib);
+    this.pristine = false;
+    const next = recipe(this.state.lib);
+    // The revision stamp is what lets a save detect that ANOTHER tab wrote a
+    // newer document: without it, a stale tab's next save silently replaced
+    // everything the newer tab had written.
+    next.meta = { updatedAt: Date.now() };
+    this.state.lib = next;
     // The living shelf: every mutation marks today in the activity calendar
     // (streaks), and every new page/version nudges the backup meter.
     try {
@@ -234,6 +321,11 @@ class App implements AppApi {
     this.render();
   }
 
+  /** Where to go when Help is dismissed (defaults to the shelf). */
+  helpReturnView(): ViewName {
+    return this.returnView ?? 'library';
+  }
+
   /** Support/debug snapshot (exposed as window.__PAGE_TURN__). */
   debug(): {
     genCounter: number;
@@ -259,32 +351,64 @@ class App implements AppApi {
       model?: string;
       endpoint?: EndpointSettings;
       onToken?: (token: string) => void;
+      onRetry?: () => void;
       parallel?: boolean;
+      background?: boolean;
+      quiet?: boolean;
     } = {},
   ): Promise<string> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    const armed = this.armGeneration(opts.parallel === true);
+    const armed = this.armGeneration(opts.parallel === true, opts.background === true);
     this.state.activeRequests++;
     this.renderActiveState();
-    return this.withRetry(
-      () =>
-        chat(
-          {
-            endpoint,
-            model,
-            temperature: endpoint.temperature,
-            signal: armed.controller.signal,
-            onToken: opts.onToken,
-          },
-          messages,
-        ),
-      endpoint.baseUrl,
+    const started = performance.now();
+    audit(`llm start model=${model || '(none)'} host=${redactUrl(endpoint.baseUrl)}`);
+    return this.enqueue(
+      opts.background === true,
       armed.controller.signal,
+      () =>
+        this.withRetry(
+          (attempt) =>
+            chat(
+              {
+                endpoint,
+                model,
+                // `attempt.temperature` nudges the sampling only after a
+                // failure where the model answered but unusably (an empty page,
+                // or prose where JSON was asked for): a near-greedy local model
+                // otherwise reproduces the same unusable answer on a
+                // byte-identical re-send. Transport failures re-send unchanged.
+                temperature: attempt.temperature(endpoint.temperature),
+                signal: armed.controller.signal,
+                onToken: opts.onToken,
+              },
+              messages,
+            ),
+          endpoint.baseUrl,
+          armed.controller.signal,
+          opts.onRetry,
+          opts.quiet === true,
+          opts.background === true,
+        ),
+      armed.start,
     )
+      .then((text) => {
+        audit(`llm ok ms=${Math.round(performance.now() - started)} chars=${text.length}`);
+        return text;
+      })
+      .catch((err) => {
+        audit(
+          `llm err ms=${Math.round(performance.now() - started)} err=${String(err).slice(0, 200)}`,
+        );
+        throw err;
+      })
       .catch((err) => {
         // Surface a notice AND rethrow — views still get their retry panels.
-        this.toast(this.genError(err), 'error');
+        // Quiet callers (fire-and-forget upkeep) report through their own
+        // panel instead: a failed cast refresh is not a failure of the page
+        // the reader just wrote, and a red toast about it reads as one.
+        if (!opts.quiet) this.toast(this.genError(err), 'error');
         throw err;
       })
       .finally(() => {
@@ -296,25 +420,57 @@ class App implements AppApi {
 
   generateJSON<T>(
     messages: ChatMessage[],
-    opts: { model?: string; endpoint?: EndpointSettings; parallel?: boolean } = {},
+    opts: {
+      model?: string;
+      endpoint?: EndpointSettings;
+      parallel?: boolean;
+      background?: boolean;
+      quiet?: boolean;
+    } = {},
   ): Promise<T> {
     const endpoint = opts.endpoint ?? this.state.lib.settings.endpoint;
     const model = opts.model ?? endpoint.model;
-    const armed = this.armGeneration(opts.parallel === true);
+    const armed = this.armGeneration(opts.parallel === true, opts.background === true);
     this.state.activeRequests++;
     this.renderActiveState();
-    return this.withRetry(
-      () =>
-        chatJSON<T>(
-          { endpoint, model, temperature: endpoint.temperature, signal: armed.controller.signal },
-          messages,
-        ),
-      endpoint.baseUrl,
+    const started = performance.now();
+    audit(`llm-json start model=${model || '(none)'} host=${redactUrl(endpoint.baseUrl)}`);
+    return this.enqueue(
+      opts.background === true,
       armed.controller.signal,
+      () =>
+        this.withRetry(
+          (attempt) =>
+            chatJSON<T>(
+              {
+                endpoint,
+                model,
+                temperature: attempt.temperature(endpoint.temperature),
+                signal: armed.controller.signal,
+              },
+              messages,
+            ),
+          endpoint.baseUrl,
+          armed.controller.signal,
+          undefined,
+          opts.quiet === true,
+          opts.background === true,
+        ),
+      armed.start,
     )
+      .then((value) => {
+        audit(`llm-json ok ms=${Math.round(performance.now() - started)}`);
+        return value;
+      })
+      .catch((err) => {
+        audit(
+          `llm-json err ms=${Math.round(performance.now() - started)} err=${String(err).slice(0, 200)}`,
+        );
+        throw err;
+      })
       .catch((err) => {
         // Surface a notice AND rethrow — views still get their retry panels.
-        this.toast(this.genError(err), 'error');
+        if (!opts.quiet) this.toast(this.genError(err), 'error');
         throw err;
       })
       .finally(() => {
@@ -325,23 +481,141 @@ class App implements AppApi {
   }
 
   /**
-   * One automatic retry for connection hiccups. Deliberately skipped when the
-   * request was aborted or timed out: the signal is dead, so a retry would
-   * fail instantly with a misleading "cancelled" error.
+   * The one-generation-slot gate. Every model request the app issues — page
+   * writes, rewrites, the title batch, the pre-writing chat, "Test connection",
+   * and the background upkeep (living cast + rolling summary) — waits its turn
+   * here.
+   *
+   * Why: LM Studio's default, llama.cpp with `-np 1` and older Ollama builds
+   * serve ONE generation at a time and answer a second concurrent request with
+   * an error (LM Studio: HTTP 400 "Only one request at a time is allowed";
+   * others 429/503) rather than queueing it. The app used to fire the cast
+   * refresh and the memory refresh in the same tick as the page it had just
+   * kept, so writing page 1 reliably produced two red "LLM server responded
+   * …" notices about calls the reader never made — and any housekeeping call
+   * still in flight could make the reader's OWN next page fail the same way.
+   * Queueing costs nothing on a multi-slot server (a single model processes
+   * one request at a time there anyway) and is the only correct behaviour on a
+   * one-slot server.
+   *
+   * Foreground work always goes ahead of background upkeep: housekeeping must
+   * never make the reader wait.
+   */
+  private foregroundQueue: Array<() => void> = [];
+  private backgroundQueue: Array<() => void> = [];
+  private requestInFlight = false;
+  /** Every model request this session has QUEUED (not counting the LAN scan). */
+  private requestTotal = 0;
+  /** Requests that had to wait for the single slot behind another one. */
+  private requestQueued = 0;
+
+  private enqueue<T>(
+    background: boolean,
+    signal: AbortSignal,
+    run: () => Promise<T>,
+    onStart?: () => void,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const start = () => {
+        signal.removeEventListener('abort', onAbort);
+        if (signal.aborted) {
+          reject(abortReason(signal));
+          return;
+        }
+        this.requestInFlight = true;
+        onStart?.();
+        // Free the slot and start the next waiter BEFORE the caller's
+        // continuation runs: otherwise a caller that immediately queues
+        // follow-up work (a page lands, then the cast refresh is requested)
+        // would enqueue against a slot that still looked busy.
+        const releaseSlot = () => {
+          this.requestInFlight = false;
+          this.pumpQueue();
+        };
+        run().then(
+          (value) => {
+            releaseSlot();
+            resolve(value);
+          },
+          (err: unknown) => {
+            releaseSlot();
+            reject(err);
+          },
+        );
+      };
+      // A request that is aborted while still queued must leave the queue
+      // immediately: otherwise a cancel (or a navigation) would leave it
+      // waiting behind a long generation, and it would still be sent to the
+      // server minutes later.
+      const onAbort = () => {
+        const queue = background ? this.backgroundQueue : this.foregroundQueue;
+        const index = queue.indexOf(start);
+        if (index >= 0) {
+          queue.splice(index, 1);
+          reject(abortReason(signal));
+        }
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.requestTotal++;
+      if (this.requestInFlight) this.requestQueued++;
+      (background ? this.backgroundQueue : this.foregroundQueue).push(start);
+      this.pumpQueue();
+    });
+  }
+
+  private pumpQueue(): void {
+    if (this.requestInFlight) return;
+    const next = this.foregroundQueue.shift() ?? this.backgroundQueue.shift();
+    if (next) next();
+    else this.renderActiveState();
+  }
+
+  /**
+   * Send a request to the local model, re-sending it while the failure is one a
+   * fresh request could survive.
+   *
+   * How many times, and how long to wait between attempts, is `llm/retry.ts`'s
+   * decision (a tested table, not a guess made here). Two things this method
+   * owns:
+   *
+   *   - the reader is told about a LONG wait, and kept quiet about a quick
+   *     re-ask — see `announcesRetry`;
+   *   - `onRetry` lets a streaming view clear its half-rendered preview, so the
+   *     second attempt does not render concatenated onto the first one.
+   *
+   * Every attempt is a complete request: a local server keeps no session, so
+   * `fn` re-sends the whole system prompt, the whole story context and the whole
+   * message list. Nothing is "continued".
+   *
+   * Cancels and timeouts are never retried — the signal is dead, so a retry
+   * would fail instantly with a misleading "cancelled" error.
    */
   private async withRetry<T>(
-    fn: () => Promise<T>,
+    fn: (ctx: LLMAttemptContext) => Promise<T>,
     baseUrl: string,
     signal: AbortSignal,
+    onRetry?: () => void,
+    quiet = false,
+    background = false,
   ): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      if (signal.aborted || !isTransientLLMError(err)) throw err;
-      audit(`withRetry retrying against ${baseUrl}`);
-      this.toast('The local server hiccuped — retrying once…', 'info');
-      return fn();
-    }
+    return withLLMRetry(fn, {
+      signal,
+      background,
+      onRetry: (info: LLMRetryInfo) => {
+        audit(
+          `llm-retry attempt=${info.attempt}/${info.totalAttempts - 1} kind=${info.kind} delay=${info.delayMs}ms host=${redactUrl(baseUrl)}`,
+        );
+        // Streaming views must reset their preview before the next attempt, or
+        // the retried stream renders concatenated onto the first one.
+        onRetry?.();
+        // Background upkeep stays silent: a retry it performs on its own is not
+        // something the reader has to watch, and its panel reports the outcome.
+        // A quick re-ask (a re-sampled structured answer) stays silent too.
+        if (!quiet && announcesRetry(info.kind, background)) {
+          this.toast(retryNotice(info), 'info');
+        }
+      },
+    });
   }
 
   /** Update ONLY the header's working light (never a full re-render). */
@@ -349,43 +623,67 @@ class App implements AppApi {
     if (typeof document === 'undefined') return;
     const chip = document.getElementById('nav-working');
     if (!chip) return;
-    chip.style.display = this.state.activeRequests > 0 ? '' : 'none';
+    // `''` only clears the INLINE style — it falls straight back to the
+    // stylesheet's `display: none`, so the light could never appear at all.
+    // The rule declares flex properties, so it wants `inline-flex`.
+    chip.style.display = this.state.activeRequests > 0 ? 'inline-flex' : 'none';
   }
 
   genActive(): number {
     return this.state.activeRequests;
   }
 
+  /** Request accounting for the support snapshot (see window.__PAGE_TURN__). */
+  requestCounts(): { total: number; queued: number; backlog: number } {
+    return {
+      total: this.requestTotal,
+      queued: this.requestQueued,
+      backlog: this.foregroundQueue.length + this.backgroundQueue.length,
+    };
+  }
+
   /**
    * One in-flight request at a time by default (a new request supersedes the
    * old one); `parallel: true` registers alongside instead of superseding —
    * used by the multi-candidate fan-out.
+   *
+   * The generation ceiling is NOT armed here: it is armed by `start()` when the
+   * request actually reaches the server. A request waiting for the single
+   * generation slot used to burn its whole 10-minute budget while queued and
+   * then fail with "Generation timed out" without ever having been sent.
    */
-  private armGeneration(parallel = false): {
-    controller: AbortController;
-    timer: ReturnType<typeof setTimeout>;
-  } {
-    if (!parallel) {
+  private armGeneration(parallel = false, background = false): ArmedGeneration {
+    if (!parallel && !background) {
       for (const controller of this.state.controllers) controller.abort();
       this.state.controllers.clear();
     }
     const controller = new AbortController();
-    this.state.controllers.add(controller);
-    this.state.abort = controller;
-    const timer = setTimeout(
-      () => controller.abort(new DOMException('Generation timed out', 'TimeoutError')),
-      GENERATION_TIMEOUT_MS,
-    );
-    return { controller, timer };
+    if (background) {
+      this.state.backgroundControllers.add(controller);
+    } else {
+      this.state.controllers.add(controller);
+      this.state.abort = controller;
+    }
+    const armed: ArmedGeneration = {
+      controller,
+      background,
+      timer: null,
+      start: () => {
+        clearTimeout(armed.timer ?? undefined);
+        armed.timer = setTimeout(
+          () => controller.abort(new DOMException('Generation timed out', 'TimeoutError')),
+          GENERATION_TIMEOUT_MS,
+        );
+      },
+    };
+    return armed;
   }
 
-  private disarmGeneration(armed: {
-    controller: AbortController;
-    timer: ReturnType<typeof setTimeout>;
-  }): void {
+  private disarmGeneration(armed: ArmedGeneration): void {
     // Clear OUR timer only — a newer request may have armed its own by now.
-    clearTimeout(armed.timer);
-    this.state.controllers.delete(armed.controller);
+    if (armed.timer !== null) clearTimeout(armed.timer);
+    if (armed.background) this.state.backgroundControllers.delete(armed.controller);
+    else this.state.controllers.delete(armed.controller);
     if (this.state.abort === armed.controller) this.state.abort = null;
   }
 
@@ -406,6 +704,9 @@ class App implements AppApi {
     for (const controller of this.state.controllers) controller.abort();
     this.state.controllers.clear();
     this.state.abort = null;
+    // Background upkeep is deliberately left running: it was started by the
+    // action that is navigating away, writes only idempotent derived data, and
+    // has no UI of its own to strand.
   }
 
   genError(err: unknown): string {
@@ -415,7 +716,7 @@ class App implements AppApi {
       return `Generation timed out after ${minutes} minutes — the model may be busy or the request too large. Try again, or pick a smaller model.`;
     }
     const message = err instanceof Error ? err.message : String(err);
-    const base = this.state.lib.settings.endpoint.baseUrl;
+    const base = redactUrl(this.state.lib.settings.endpoint.baseUrl);
     if (
       message.includes('Failed to fetch') ||
       message.includes('NetworkError') ||
@@ -532,6 +833,7 @@ class App implements AppApi {
 
   async importDropped(payload: unknown): Promise<void> {
     try {
+      audit('importDropped');
       if (
         payload &&
         typeof payload === 'object' &&
@@ -575,15 +877,21 @@ class App implements AppApi {
         return;
       }
       const lib = normalizeLibrary(payload);
+      // Replacing a NON-EMPTY shelf must always ask — the empty-library file
+      // (which a fresh profile exports) used to bypass the confirm entirely
+      // and destroy every book with a green success toast.
+      const replacing = this.state.lib.books.length > 0;
       if (
-        lib.books.length === 0 ||
+        !replacing ||
         window.confirm(
-          'Import ' +
-            lib.books.length +
-            ' book(s) from the dropped file? It will REPLACE the current library.',
+          `Import ${lib.books.length} book(s) from the dropped file? It will REPLACE the current library${lib.books.length === 0 ? ' (the file is empty)' : ''}. Your endpoint and settings stay as they are.`,
         )
       ) {
-        this.update(() => lib);
+        audit(`importLibrary books=${lib.books.length} replacing=${replacing}`);
+        // The file's settings (endpoint, API key, theme) belong to the sender's
+        // machine: adopting them silently repointed every future generation at
+        // a host the reader never configured, key included. Keep local ones.
+        this.update((cur) => ({ ...lib, settings: cur.settings }));
         this.toast(
           lib.books.length > 0
             ? 'Imported ' + lib.books.length + ' book(s)'
@@ -623,17 +931,11 @@ class App implements AppApi {
   }
 
   appendVersion(pageId: string, text: string, by: 'ai' | 'user', model?: string): void {
-    // Backup nudge: every new version is new writing worth protecting.
-    this.update((lib) => ({
-      ...lib,
-      settings: {
-        ...lib.settings,
-        exportMeter: {
-          ...lib.settings.exportMeter,
-          pages: (lib.settings.exportMeter.pages ?? 0) + 1,
-        },
-      },
-    }));
+    // NOTE: versions do NOT bump the backup meter — it counts PAGES WRITTEN.
+    // Counting rewrites meant a single-page book could accumulate dozens of
+    // "pages since export" and a fan-out of candidates inflated it the same
+    // way; the nudge's job is to say "you have written N pages nobody has
+    // backed up".
     this.update((lib) => {
       const node = getNode(lib.nodes, pageId);
       if (!node || node.kind !== 'page') return lib;
@@ -752,7 +1054,16 @@ class App implements AppApi {
     }
     this.update((lib) => ({
       ...lib,
-      books: replaceBook(lib, { ...setFrontier(book, tip.id), status: 'in-progress' }),
+      books: replaceBook(lib, {
+        ...setFrontier(book, tip.id),
+        // The chosen title must follow the frontier. `writePrologue` stores the
+        // prologue on `book.chosenTitleId` while `compileBook` reads it from the
+        // title ON THE PATH, so writing one after entering a different title
+        // put the text on the OTHER branch's prologue: invisible in the book
+        // being written, and silently overwriting what that branch had.
+        chosenTitleId: titleNode.id,
+        status: 'in-progress',
+      }),
     }));
     if (tip.kind === 'page') this.navigate('page');
     else if (tip.kind === 'turn') this.navigate('turn', { from: tip.parentId ?? titleNode.id });
@@ -785,18 +1096,10 @@ class App implements AppApi {
     const node = getNode(this.state.lib.nodes, pageId);
     const isPinned =
       node && node.data.kind === 'page' ? node.data.versions[version - 1]?.pinned === true : false;
-    const toast: Toast = {
-      id: ++toastSeq,
-      message: isPinned ? `📌 Version ${version} pinned` : `Version ${version} unpinned`,
-      kind: 'success',
-    };
-    this.state.toasts.push(toast);
-    if (this.state.toasts.length > 4) this.state.toasts.shift();
-    renderToastStack(this.state.toasts);
-    setTimeout(() => {
-      this.state.toasts = this.state.toasts.filter((t) => t.id !== toast.id);
-      renderToastStack(this.state.toasts);
-    }, 5000);
+    this.toast(
+      isPinned ? `📌 Version ${version} pinned` : `Version ${version} unpinned`,
+      'success',
+    );
   }
 
   seedFromBook(bookId: string): void {
@@ -818,6 +1121,11 @@ class App implements AppApi {
       `This is a sequel to "${title}" (a book directed page by page in Page Turn). Original seed: ${compiled.seed}. ${castLines.join(' ')} Continue the story onward — same world, new pages, the reader directs every turn.`.trim();
     const node = makeSeedNode(`Sequel to "${title}"`, emptySeedOptions(), brief);
     this.update((lib) => ({ ...lib, nodes: addNode(lib.nodes, node) }));
+    // A new book was just born, so the NEXT new book must not inherit this
+    // session's pre-writing conversation: its brief would steer a different
+    // story. The seed view's own "Begin" path resets itself; every other path
+    // that mints a seed node comes through here.
+    resetSeedSession();
     this.navigate('titles', { seed: node.id });
     this.toast('Sequel seeded — the cast rides along as the brief', 'success');
   }
@@ -858,6 +1166,13 @@ class App implements AppApi {
     }
     root.dataset.theme = theme;
     root.dataset.font = settings.readingFont;
+    // The <meta name="theme-color"> was hardcoded near-black, so a sepia or
+    // light reader kept a dark URL bar / status bar around a light page.
+    const themeColor = document.getElementById('theme-color');
+    if (themeColor) {
+      const bg = getComputedStyle(root).getPropertyValue('--bg').trim();
+      if (bg) themeColor.setAttribute('content', bg);
+    }
     root.style.setProperty('--font-scale', String(settings.fontScale));
     // Share the reading font stacks with the per-format document wardrobe.
     for (const format of ['story', 'letter', 'diary', 'newspaper', 'mapnote', 'recipe']) {
@@ -934,15 +1249,176 @@ class App implements AppApi {
     }, 300);
   }
 
+  /** Serializes saves: two overlapping saves raced on the shared OPFS .tmp file. */
+  private saving: Promise<void> | null = null;
+  /**
+   * The revision of the stored document as this tab last READ or WROTE it.
+   * Saves are compare-and-swap: if the stored revision moved on (another tab
+   * committed), this tab adopts the stored document instead of overwriting it
+   * with stale content — the pre-fix behaviour silently erased every page the
+   * other tab had written.
+   */
+  private knownStoredRevision = -1;
+
+  /** Call once at boot with the revision of the loaded document. */
+  setBaselineRevision(revision: number): void {
+    this.knownStoredRevision = revision;
+  }
+
   async persistNow(): Promise<void> {
-    try {
-      await saveLibrary(this.state.lib);
-      await writeOpfsLibrary(this.state.lib);
-      // The .md mirror: the same books as plain, readable markdown files.
-      await writeMdLibrary(this.state.lib);
-    } catch {
-      // Persistence is best-effort; the app keeps working in memory.
+    if (this.saving) {
+      // A save is already running, but ITS snapshot predates the edit that
+      // asked for this one. Returning the older promise dropped the newest
+      // state (nothing re-ran it until the next edit or a page unload), so
+      // mark the document dirty and re-save as soon as the current write
+      // finishes. `persistNowInner` snapshots `state.lib` itself, so the
+      // follow-up write carries the newest content.
+      this.dirtyWhileSaving = true;
+      return this.saving;
     }
+    this.saving = this.persistNowInner().finally(() => {
+      this.saving = null;
+      if (this.dirtyWhileSaving) {
+        this.dirtyWhileSaving = false;
+        void this.persistNow();
+      }
+    });
+    return this.saving;
+  }
+
+  /** Set when a save was requested while another was already running. */
+  private dirtyWhileSaving = false;
+
+  private async persistNowInner(): Promise<void> {
+    // Storage has not answered yet: the in-memory library is a placeholder and
+    // writing it would destroy the real one. It is saved on arrival instead.
+    if (!this.storageSettled) return;
+    // Snapshot ONCE. Reading `this.state.lib` at each await would let an edit
+    // made mid-save land in the OPFS mirror while IndexedDB kept the older
+    // document — and IndexedDB is what boot prefers, so the newer pages would
+    // silently disappear on the next launch.
+    const lib = this.state.lib;
+    try {
+      // Cross-tab guard: serialize writers where the platform supports it and
+      // re-check the stored revision inside. A stale tab must never overwrite
+      // a newer document with its boot-time copy.
+      const locked =
+        typeof navigator !== 'undefined' && 'locks' in navigator && navigator.locks?.request
+          ? await navigator.locks.request('page-turn-save', () => this.saveLocked(lib))
+          : await this.saveLocked(lib);
+      await locked;
+      this.saveFailedNoticeShown = false;
+    } catch (err) {
+      // Persistence is best-effort; the app keeps working in memory. But the
+      // reader must KNOW: a full quota (QuotaExceededError) or a dead database
+      // used to fail here invisibly, so hours of writing could evaporate with
+      // the app still claiming everything was saved.
+      this.notifySaveFailure(err);
+    }
+  }
+
+  private async saveLocked(lib: Library): Promise<void> {
+    const stored = await peekStoredLibrary();
+    // Compare-and-swap: a plain "is the stored stamp newer than mine" check
+    // fails precisely for the stale tab — its own mutation bumps ITS stamp
+    // while its content is older. The only reliable signal is that the stored
+    // revision no longer matches the revision this tab last read.
+    if (
+      this.knownStoredRevision !== -1 &&
+      stored !== null &&
+      stored.updatedAt !== this.knownStoredRevision
+    ) {
+      // Another tab committed since we last saw the document. Adopt theirs:
+      // overwriting it used to be silent, permanent loss of their pages.
+      const loaded = await loadLibrary();
+      if (loaded.ok) {
+        audit('persistNow adopted document written by another tab');
+        this.state.lib = loaded.lib;
+        this.knownStoredRevision = loaded.lib.meta.updatedAt;
+        this.render();
+        this.toast(
+          'Another Page Turn tab saved newer changes — they were loaded and this tab is in sync.',
+          'info',
+        );
+        return; // their document is already stored; nothing to write
+      }
+    }
+    await saveLibrary(lib);
+    this.knownStoredRevision = lib.meta.updatedAt;
+    await writeOpfsLibrary(lib);
+    // The .md mirror: the same books as plain, readable markdown files.
+    await writeMdLibrary(lib);
+    audit('persistNow ok');
+  }
+
+  private saveFailedNoticeShown = false;
+
+  private notifySaveFailure(err: unknown): void {
+    audit(`persistNow failed err=${String(err)}`);
+    const quotaFull =
+      err instanceof DOMException &&
+      (err.name === 'QuotaExceededError' || err.name === 'QuotaExceededErr');
+    // One notice per session is enough — the saves keep failing, and a toast
+    // on every keystroke-debounce would be spam. (It re-arms after a success.)
+    if (this.saveFailedNoticeShown) return;
+    this.saveFailedNoticeShown = true;
+    this.toast(
+      quotaFull
+        ? '⚠ Storage is full — your latest changes are only in memory and may be lost on close. Export your library, then delete some books.'
+        : '⚠ Saving to local storage failed — your latest changes are only in memory. Export a backup and reload.',
+      'error',
+    );
+  }
+
+  /**
+   * Called when boot gave up waiting on the database. The app is usable
+   * immediately, but stays write-locked until the real read lands: then the
+   * late library is adopted (if the reader has not written anything yet) and
+   * normal saving resumes.
+   *
+   * A late read that FAILED must keep the write lock. Taking `?.lib ?? null`
+   * here threw away `LoadResult.ok`, so a failed read looked like "nothing was
+   * stored": saving was switched back on and the placeholder library was
+   * written straight over the reader's intact-but-unreadable document.
+   */
+  holdPersistenceUntil(load: Promise<LoadResult | null>): void {
+    this.storageSettled = false;
+    void load.then(
+      (late) => {
+        if (!late) {
+          // Nothing usable came back and we know nothing about storage: stay
+          // write-locked rather than guess.
+          return;
+        }
+        if (!late.ok) {
+          audit(`boot: the late read failed — saving stays off (${late.error ?? 'unknown'})`);
+          void stashUnreadableDocument(late.raw).then(
+            (key) =>
+              this.toast(
+                `Your saved library could not be read (${late.error ?? 'unknown error'}). It has NOT been overwritten, and saving is off for this session so nothing can replace it${key ? ' — a recovery copy was kept' : ''}. Open the browser console for details.`,
+                'error',
+              ),
+            () => undefined,
+          );
+          return; // storageSettled stays false: saves are refused from here on
+        }
+        if (this.pristine && late.lib.books.length > 0) {
+          this.state.lib = late.lib;
+          this.render();
+        }
+        // The baseline must be the revision of the document that is ACTUALLY
+        // stored. Boot set it to the fallback document's stamp (0 on a fresh
+        // profile), so the very next save saw a "moved" revision, adopted the
+        // stored copy and discarded the reader's words — with a toast blaming
+        // another tab.
+        this.knownStoredRevision = late.lib.meta.updatedAt;
+        this.storageSettled = true;
+        void this.persistNow();
+      },
+      () => {
+        // The read rejected outright: we still know nothing about storage.
+      },
+    );
   }
 
   // ---- Render -------------------------------------------------------------
@@ -1010,10 +1486,40 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 }
 
 async function boot(): Promise<void> {
-  let lib: Library | null = null;
-  lib = await withTimeout(loadLibrary(), 1500, null);
+  // Race storage — but remember whether it actually answered in time, and
+  // whether it SUCCEEDED. A timed-out read means "slow", and a failed read
+  // means "unreadable": neither is "empty", and neither may ever be saved back
+  // over the real document.
+  let dbAnswered = false;
+  const dbLoad = loadLibrary().then((value) => {
+    dbAnswered = true;
+    return value;
+  });
+  const first = await withTimeout(dbLoad, 1500, null);
+  let lib: Library | null = first?.lib ?? null;
   const opfs = await withTimeout(readOpfsLibrary(), 1500, null);
-  if (opfs && (!lib || lib.books.length === 0) && opfs.books.length > 0) lib = opfs;
+  let opfsStamp: string | null = null;
+  // The mirror is a RECOVERY copy, never an override. It used to be adopted
+  // whenever the loaded library had no books — but a successfully read, empty
+  // library is a deliberate "I deleted everything", and adopting a stale
+  // mirror resurrected the deleted books and wrote them back into IndexedDB.
+  // Use it only when the database could not be read at all, or when the mirror
+  // is demonstrably newer than what we loaded.
+  const dbUnreadable = first === null || !first.ok;
+  if (opfs && opfs.lib.books.length > 0 && (!lib || (dbUnreadable && !lib.books.length))) {
+    lib = opfs.lib;
+    opfsStamp = opfs.mirroredAt;
+  } else if (
+    opfs &&
+    lib &&
+    lib.books.length === 0 &&
+    !dbUnreadable &&
+    opfs.lib.meta.updatedAt > lib.meta.updatedAt + 1000
+  ) {
+    audit('boot: adopted a newer OPFS mirror over an empty stored library');
+    lib = opfs.lib;
+    opfsStamp = opfs.mirroredAt;
+  }
   try {
     lib = lib ? normalizeLibrary(lib) : defaultLibrary();
   } catch {
@@ -1021,9 +1527,63 @@ async function boot(): Promise<void> {
   }
 
   const app = new App(lib, viewFromHash() ?? 'library');
+  app.setBaselineRevision(lib.meta.updatedAt);
+  if (!dbAnswered) {
+    // Pass the whole LoadResult: a late FAILURE must keep saving disabled.
+    app.holdPersistenceUntil(dbLoad);
+  } else if (first && !first.ok) {
+    // The stored library exists but could not be read. Park a copy under a
+    // SEPARATE key — which cannot damage the original.
+    const recoveredFromOpfs = lib.books.length > 0;
+    const stampNote = opfsStamp
+      ? ` (mirror copy from ${new Date(opfsStamp).toLocaleString()})`
+      : '';
+    if (!recoveredFromOpfs) {
+      // Nothing usable to show: keep saving disabled forever, so the fallback
+      // on screen can never be written over the real thing.
+      app.holdPersistenceUntil(new Promise<never>(() => {}));
+    }
+    // When the OPFS mirror DID have a working copy, saving is left ENABLED on
+    // purpose: the next save repairs the corrupt record with real data (the
+    // corrupt one stays parked under the stash key). Write-locking here would
+    // have stranded the reader in a working app that can never save again.
+    void stashUnreadableDocument(first.raw).then(
+      (key) => {
+        console.error(
+          `Page Turn: the stored library failed to load.${
+            recoveredFromOpfs
+              ? ' The OPFS mirror had a working copy, so the app is usable and saving will repair the record.'
+              : ' Saving is disabled so it cannot be overwritten.'
+          }${key ? ` A recovery copy is preserved in IndexedDB under "${key}".` : ''}`,
+          first.error,
+        );
+        if (key) {
+          console.warn(
+            `Page Turn: the unreadable stored document is parked in IndexedDB under "${key}" — ${recoverySize(first.raw)}. It was NOT printed here because it contains your book text.`,
+          );
+        } else {
+          // Last resort: the park copy failed too. Print WITHOUT the key.
+          console.warn(
+            'Page Turn: the unreadable stored document could not be parked; a key-free copy follows.',
+            redactKeyInJson(first.raw),
+          );
+        }
+        setTimeout(
+          () =>
+            app.toast(
+              recoveredFromOpfs
+                ? `Your saved library could not be read (${first.error ?? 'unknown error'}) — the mirror copy${stampNote} was loaded instead, and your next changes will repair the record${key ? ' (a backup was kept)' : ''}.`
+                : `Your saved library could not be read (${first.error ?? 'unknown error'}). It has NOT been overwritten, and saving is off for this session so nothing can replace it${key ? ' — a recovery copy was kept' : ''}. Open the browser console for details.`,
+              recoveredFromOpfs ? 'info' : 'error',
+            ),
+          0,
+        );
+      },
+      () => undefined,
+    );
+  }
   app.render();
 
-  let beforeHelp: ViewName | null = null;
   window.addEventListener('keydown', (event) => {
     if (event.key !== '?' && event.key !== 'Escape') return;
     const target = event.target;
@@ -1035,12 +1595,10 @@ async function boot(): Promise<void> {
       return;
     if (event.key === '?' && app.view !== 'help') {
       event.preventDefault();
-      beforeHelp = app.view;
       app.navigate('help');
     } else if (event.key === 'Escape' && app.view === 'help') {
       event.preventDefault();
-      app.navigate(beforeHelp ?? 'library');
-      beforeHelp = null;
+      app.navigate(app.helpReturnView());
     }
   });
 
@@ -1083,10 +1641,23 @@ async function boot(): Promise<void> {
     view: () => app.view,
     params: () => ({ ...app.params }),
     bookId: () => app.book?.id ?? null,
-    model: () => app.lib.settings.endpoint,
+    // Mask the bearer secret: the debug handle is exposed to anything that can
+    // run code in this page's console, and the key should never be returned
+    // from a support snapshot by accident.
+    model: () => ({
+      ...app.lib.settings.endpoint,
+      apiKey: app.lib.settings.endpoint.apiKey ? '<set>' : '',
+    }),
     genCounter: () => app.debug().genCounter,
     renders: () => app.debug().renderCount,
     genStateKeys: () => [...genStates.keys()],
+    /** Model requests, for "why is my server busy / how much has this cost me?" */
+    requests: () => ({
+      total: app.requestCounts().total,
+      queued: app.requestCounts().queued,
+      inFlight: app.genActive(),
+      backlog: app.requestCounts().backlog,
+    }),
     audit: () => [...auditLog],
   };
   console.info(
@@ -1094,6 +1665,25 @@ async function boot(): Promise<void> {
   );
   if (!lib.settings.endpoint.model) {
     console.info('No model selected yet — open Settings and scan for your local LLM.');
+  }
+}
+
+/** Rough size of the unreadable document, for the console summary. */
+function recoverySize(raw: unknown): string {
+  if (typeof raw === 'object' && raw !== null) {
+    const lib = raw as { books?: unknown[]; nodes?: Record<string, unknown> };
+    return `${lib.books?.length ?? 0} book(s), ${Object.keys(lib.nodes ?? {}).length} node(s)`;
+  }
+  return 'a stored document';
+}
+
+/** Best-effort JSON redaction of the apiKey field for a console dump. */
+function redactKeyInJson(raw: unknown): unknown {
+  try {
+    const text = JSON.stringify(raw, null, 2);
+    return JSON.parse(text.replace(/"apiKey"\s*:\s*"[^"]*"/g, '"apiKey": "<redacted>"'));
+  } catch {
+    return raw;
   }
 }
 

@@ -59,13 +59,39 @@ export interface AppApi {
       model?: string;
       endpoint?: EndpointSettings;
       onToken?: (token: string) => void;
+      /**
+       * Runs right before EACH automatic retry of a retryable failure — how
+       * many there are and how long they wait is `llm/retry.ts`'s policy.
+       * Streaming views use it to reset the partially-rendered stream, so a
+       * later attempt does not render concatenated on top of an earlier one.
+       */
+      onRetry?: () => void;
       /** Keep other in-flight requests alive (parallel candidates). */
       parallel?: boolean;
+      /**
+       * Background upkeep (the living cast, the rolling summary): survives
+       * navigation and a newer generation, because it is started by the very
+       * action that navigates away. It also queues BEHIND the reader's own
+       * work, so housekeeping never delays a page.
+       */
+      background?: boolean;
+      /**
+       * Report a failure only through the caller's own panel, not as a global
+       * error toast. For fire-and-forget upkeep: a cast refresh that could not
+       * be parsed is not a failure of the page the reader just wrote.
+       */
+      quiet?: boolean;
     },
   ): Promise<string>;
   generateJSON<T>(
     messages: ChatMessage[],
-    opts?: { model?: string; endpoint?: EndpointSettings; parallel?: boolean },
+    opts?: {
+      model?: string;
+      endpoint?: EndpointSettings;
+      parallel?: boolean;
+      background?: boolean;
+      quiet?: boolean;
+    },
   ): Promise<T>;
   /** Generation token: increment before an await, check after, to ignore stale results. */
   beginGen(): number;

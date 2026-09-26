@@ -6,6 +6,7 @@
  */
 import type { Library } from './types';
 import { compileBook, moodLine, slugify, toMarkdown } from './compile';
+import { plural } from './format';
 import { seedTextOf, statsOf, titleOf } from './tree';
 
 export interface MdEntry {
@@ -54,7 +55,7 @@ export function mdLibraryEntries(lib: Library): MdEntry[] {
     const title = titleOf(lib.nodes, book);
     const stats = statsOf(lib.nodes, book);
     lines.push(
-      `- **${title}** — ${stats.pages} pages · ${stats.words} words kept · [${bookMdName(lib, book.id)}](${bookMdName(lib, book.id)})`,
+      `- **${title}** — ${plural(stats.pages, 'page')} · ${plural(stats.words, 'word')} kept · [${bookMdName(lib, book.id)}](${bookMdName(lib, book.id)})`,
     );
   }
   if (lib.books.length === 0) lines.push('(The shelf is empty.)');

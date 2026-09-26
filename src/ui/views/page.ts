@@ -6,9 +6,10 @@
  * and pages. The living cast follows along.
  */
 import type { AppApi } from '../ctx';
-import { button, fmtDate, fmtNumber, h, pruneMap } from '../dom';
+import { button, fmtDate, h, plural, pruneMap } from '../dom';
 import { compileBook, countWords, joinParagraphs, paragraphsOf } from '../../core/compile';
 import {
+  branchTip,
   chapterCountUpTo,
   childrenOf,
   getNode,
@@ -28,7 +29,13 @@ import {
   paragraphMessages,
   rewriteSpanMessages,
 } from '../../core/prompt';
-import { generateCandidates, generatePage, genStates, renderGenPanel } from '../genpage';
+import {
+  clearGenState,
+  generateCandidates,
+  generatePage,
+  genStates,
+  renderGenPanel,
+} from '../genpage';
 import { maybeUpdateBible, renderCast } from '../cast';
 import { maybeUpdateSummary, renderStoryMemory } from '../story';
 import { quoteCardFor } from '../quote';
@@ -49,6 +56,12 @@ const renaming = new Map<string, string>();
 const diffOpen = new Set<string>();
 const headingEdit = new Map<string, string>();
 const candidatesBusy = new Set<string>();
+/**
+ * The tweak box has no model state behind it, so a re-render used to discard a
+ * half-typed tweak — and a re-render is exactly what lands when the background
+ * cast or summary update finishes.
+ */
+const tweakDraft = new Map<string, string>();
 /** Previous chosen version per page, for the one-click Undo. */
 const lastCommit = new Map<string, number>();
 
@@ -155,8 +168,9 @@ export function renderPage(api: AppApi): HTMLElement {
           button(
             'Save as your version',
             () => {
-              api.appendVersion(page.id, edit.text, 'user');
+              // Close the editor BEFORE the mutation re-renders the view.
               editState.set(page.id, { open: false, text: '' });
+              api.appendVersion(page.id, edit.text, 'user');
               maybeUpdateBible(api, book, page.id);
               maybeUpdateSummary(api, book, page.id);
               api.toast('Saved as a version edited by you', 'success');
@@ -174,7 +188,11 @@ export function renderPage(api: AppApi): HTMLElement {
   const tweakInput = h('input', {
     class: 'input',
     type: 'text',
+    value: tweakDraft.get(book.id) ?? '',
     placeholder: '“make the keeper’s hands shake” / “end on the door, not the letter”',
+    oninput: (event: Event) => {
+      tweakDraft.set(book.id, (event.target as HTMLInputElement).value);
+    },
   });
 
   const keepLabel = data.direction.ending
@@ -239,7 +257,7 @@ export function renderPage(api: AppApi): HTMLElement {
         h(
           'div',
           { class: 'page-meta' },
-          h('span', { text: `${fmtNumber(countWords(chosen.text))} words` }),
+          h('span', { text: plural(countWords(chosen.text), 'word') }),
           h('span', { text: `${data.model || book.model || 'model'}` }),
         ),
         body,
@@ -301,7 +319,11 @@ export function renderPage(api: AppApi): HTMLElement {
           ),
           button(
             '🖼️ Quote card',
-            () => quoteCardFor(compileBook(api.nodes, book), pageNum),
+            () => {
+              if (!quoteCardFor(compileBook(api.nodes, book), pageNum)) {
+                api.toast('Could not render that quote card on this device.', 'error');
+              }
+            },
             'ghost',
             {
               title: 'Render this page as a shareable image',
@@ -759,8 +781,12 @@ function candidatesSection(api: AppApi, book: Book, page: StoryNode): HTMLElemen
 }
 
 function retryCandidate(api: AppApi, book: Book, page: StoryNode, key: string): void {
+  // Retry in THIS candidate's own slot, so the panel the reader clicked is the
+  // one that comes back to life.
+  const index = Number(key.split(':').pop());
+  const slot = Number.isInteger(index) && index >= 0 ? index : 0;
   genStates.delete(key);
-  void generateCandidates(api, book, page, 1);
+  void generateCandidates(api, book, page, 1, slot);
 }
 
 async function runCandidates(api: AppApi, book: Book, page: StoryNode): Promise<void> {
@@ -805,7 +831,14 @@ function clearCraftState(pageId: string): void {
 function rollsLeft(book: Book, page: StoryNode): number {
   const mode = book.ironMode ?? 'none';
   if (mode === 'none') return Number.POSITIVE_INFINITY;
-  const used = page.data.kind === 'page' ? Math.max(0, page.data.versions.length - 1) : 0;
+  // Count only MODEL re-rolls. Versions are also appended by the reader's own
+  // edits (paragraph save, page editor, span replace, chapter heading), and
+  // counting those meant three hand-edits locked a page the model had never
+  // once been asked to rewrite — contradicting "three re-rolls per page".
+  const used =
+    page.data.kind === 'page'
+      ? page.data.versions.slice(1).filter((version) => version.by === 'ai').length
+      : 0;
   const budget = mode === 'three' ? 3 : 0;
   return Math.max(0, budget - used);
 }
@@ -834,7 +867,7 @@ function lintCard(page: StoryNode): HTMLElement | null {
       h('span', { text: `🩺 Story linter: ${lintVerdict(report)}` }),
       h('span', {
         class: 'field-hint',
-        text: `${report.words} words · ${report.sentences} sentences · ${report.paragraphs} paragraphs`,
+        text: `${plural(report.words, 'word')} · ${plural(report.sentences, 'sentence')} · ${plural(report.paragraphs, 'paragraph')}`,
       }),
     ),
     h(
@@ -869,10 +902,16 @@ function commitUserVersion(
   editKey: string,
 ): void {
   if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
-  api.appendVersion(page.id, joinParagraphs(paras), 'user');
+  // Close the editor BEFORE the mutation re-renders the view: `appendVersion`
+  // goes through `update()` → `render()` synchronously, and the paragraph
+  // block renders an open `paraEdit` entry ahead of everything else — so the
+  // saved paragraph came back looking unchanged with its textarea still open,
+  // and a second click on that stale Save button appended a byte-identical
+  // version.
   paraEdit.delete(editKey);
   paraPanel.delete(editKey); // rewrite/insert panels share the paragraph key
   if (editKey === `${page.id}:append`) paraPanel.delete(`${page.id}:add`);
+  api.appendVersion(page.id, joinParagraphs(paras), 'user');
   maybeUpdateBible(api, book, page.id);
   maybeUpdateSummary(api, book, page.id);
   api.toast(message, 'success');
@@ -908,12 +947,18 @@ async function aiParagraph(
     const messages = isAdd
       ? insertParagraphMessages(ctx, pageNumber, pageText, instruction, book.rules)
       : paragraphMessages(ctx, pageNumber, pageText, paras[index] ?? '', instruction, book.rules);
-    const model = book.model || api.lib.settings.endpoint.model;
+    const model = api.lib.settings.endpoint.model;
     const text = await api.generateText(messages, {
       model,
       onToken: (piece) => {
         const state = genStates.get(genKey);
         if (state) state.stream += piece;
+      },
+      // A retry re-sends the same paragraph request; without clearing the
+      // preview the panel shows attempt 1's paragraph then attempt 2's.
+      onRetry: () => {
+        const state = genStates.get(genKey);
+        if (state) state.stream = '';
       },
     });
     if (api.staleGen(token)) {
@@ -930,11 +975,25 @@ async function aiParagraph(
         ? (page.data.versions[page.data.chosenVersion - 1]?.text ?? '')
         : '';
     const fresh = paragraphsOf(chosenNow);
+    // The model rewrote a paragraph that may no longer be there — the reader
+    // can save, reorder or delete it while the request streams, and this panel
+    // does not block those tools. Writing the rewrite into whatever now sits at
+    // `index` silently destroyed THEIR paragraph.
+    if (!isAdd && fresh[index] !== paras[index]) {
+      clearGenState(genKey, token);
+      paraPanel.delete(`${page.id}:${index}`);
+      api.refresh();
+      api.toast(
+        'That paragraph changed while the model was writing — nothing was overwritten. Ask again.',
+        'info',
+      );
+      return;
+    }
     const next = [...fresh];
     if (isAdd) next.push(cleaned);
     else if (next[index] !== undefined) next[index] = cleaned;
     else next.push(cleaned);
-    genStates.delete(genKey);
+    clearGenState(genKey, token);
     paraPanel.delete(isAdd ? `${page.id}:add` : `${page.id}:${index}`);
     if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
     api.appendVersion(page.id, joinParagraphs(next), 'ai', model);
@@ -943,7 +1002,7 @@ async function aiParagraph(
     api.refresh();
     api.toast('Paragraph written — saved as a new version', 'success');
   } catch (err) {
-    genStates.delete(genKey);
+    clearGenState(genKey, token);
     if (api.staleGen(token)) {
       api.refresh();
       return;
@@ -1053,7 +1112,7 @@ function versionPicker(api: AppApi, page: StoryNode): HTMLElement {
               api.chooseVersion(page.id, index + 1);
             },
           },
-          `${version.pinned ? '📌 ' : ''}v${version.v} · ${version.by === 'user' ? 'you' : 'ai'} · ${fmtNumber(countWords(version.text))} words · ${fmtDate(version.at)}`,
+          `${version.pinned ? '📌 ' : ''}v${version.v} · ${version.by === 'user' ? 'you' : 'ai'} · ${plural(countWords(version.text), 'word')} · ${fmtDate(version.at)}`,
         ),
       ),
     ),
@@ -1061,40 +1120,70 @@ function versionPicker(api: AppApi, page: StoryNode): HTMLElement {
   return h('div', { class: 'version-picker-block' }, picker, list);
 }
 
+/**
+ * How many pages can be reached forward from `page`: 1 normally, more once the
+ * reader has forked. The fork lives on the turn that FOLLOWS a page, so a
+ * page's own child count is always 1 and could never show the branch mark.
+ */
+function forwardPaths(nodes: Record<string, StoryNode>, pageId: string): number {
+  const turns = childrenOf(nodes, pageId).filter((n) => n.kind === 'turn');
+  if (turns.length === 0) return 1;
+  let total = 0;
+  for (const turn of turns) {
+    total += Math.max(1, childrenOf(nodes, turn.id).filter((n) => n.kind === 'page').length);
+  }
+  return Math.max(total, 1);
+}
+
 // ---- Story spine (walk the pages) -----------------------------------------
 
 function spineNav(api: AppApi, book: Book, page: StoryNode): HTMLElement {
-  const spine = spinePages(api.nodes, page.id);
+  // The spine must cover pages AHEAD of the current one, so it is taken from
+  // the branch tip, not from `book.frontierId` and certainly not from
+  // `page.id` (whose path holds only its ancestors, making "next page"
+  // impossible — ▶ and → then jumped to the turn console and forked a new
+  // branch instead of walking forward). Walking back moves the frontier, so
+  // the frontier alone would also make the dots vanish behind you.
+  const spine = spinePages(api.nodes, branchTip(api.nodes, book.frontierId).id);
   const idx = spine.findIndex((p) => p.id === page.id);
   const frontier = getNode(api.nodes, book.frontierId);
   const atFrontier = frontier?.id === page.id;
   const prevPage = idx > 0 ? spine[idx - 1] : null;
+  // Guard on idx: a page reached from another branch has idx -1, and
+  // `spine[idx + 1]` would then be `spine[0]` — a jump to page 1.
   const nextPage = idx >= 0 && idx < spine.length - 1 ? spine[idx + 1] : null;
-  const nextLabel = nextPage ? `Page ${idx + 2} ▶` : atFrontier ? 'The turn ▶' : 'Frontier ▶';
+  const nextLabel = nextPage
+    ? `Page ${idx + 2} ▶`
+    : atFrontier
+      ? 'The turn ▶'
+      : frontier
+        ? 'Frontier ▶'
+        : 'The turn ▶';
   const nextAction = () => {
     if (nextPage) api.openPageAt(book, nextPage.id);
-    else if (atFrontier) api.navigate('turn', { from: page.id });
-    else if (frontier) {
-      // Walking back from the frontier: the ▶ button must land on whatever
-      // the frontier is — a turn console, the ending, or the frontier page.
-      if (frontier.kind === 'turn') {
-        api.navigate('turn', { from: frontier.parentId ?? book.chosenTitleId });
-      } else if (frontier.kind === 'ending') {
-        api.navigate('theend');
-      } else {
-        api.openPageAt(book, frontier.id);
-      }
+    else if (atFrontier || !frontier) api.navigate('turn', { from: page.id });
+    // Walking back from the frontier: the ▶ button must land on whatever
+    // the frontier is — a turn console, the ending, or the frontier page.
+    else if (frontier.kind === 'turn') {
+      api.navigate('turn', { from: frontier.parentId ?? book.chosenTitleId });
+    } else if (frontier.kind === 'ending') {
+      api.navigate('theend');
+    } else {
+      api.openPageAt(book, frontier.id);
     }
   };
 
   const dots = spine.map((p, i) => {
-    const branches = childrenOf(api.nodes, p.id).length;
+    // A fork happens at the TURN that follows a page, so counting the page's
+    // own children always returned 1 and the "paths grow from here" mark never
+    // appeared. Count the pages reachable forward instead.
+    const branches = forwardPaths(api.nodes, p.id);
     return h(
       'button',
       {
         class: `spine-dot${i === idx ? ' on' : ''}`,
         type: 'button',
-        title: `Page ${i + 1}${branches > 1 ? ` · ${branches} paths grow from here` : ''}`,
+        title: `Page ${i + 1}${branches > 1 ? ` · ${plural(branches, 'path')} grow from here` : ''}`,
         onclick: () => api.openPageAt(book, p.id),
       },
       `${i + 1}${branches > 1 ? '·' : ''}`,
@@ -1134,6 +1223,11 @@ function installKeys(api: AppApi, book: Book, page: StoryNode): void {
     const page = keyPage;
     if (!api || !book || !page || api.view !== 'page') return;
     if (page.data.kind !== 'page') return;
+    // The keys are installed only by the page view for a PAGE frontier, so
+    // they can still point at the previously read book while a new book's
+    // first-page screen (or a turn console) is on screen. Without this check
+    // the arrow keys moved the OTHER book's frontier and navigated into it.
+    if (api.book?.id !== book.id) return;
     const target = event.target;
     if (
       target instanceof HTMLElement &&
@@ -1162,13 +1256,15 @@ function installKeys(api: AppApi, book: Book, page: StoryNode): void {
         }
         return;
       }
-      const spine = spinePages(api.nodes, page.id);
+      // The branch tip's spine: pressing → moves to the NEXT EXISTING page and
+      // only opens the turn console once there is nothing ahead.
+      const spine = spinePages(api.nodes, branchTip(api.nodes, book.frontierId).id);
       const idx = spine.findIndex((p) => p.id === page.id);
-      const targetPage = delta > 0 ? spine[idx + 1] : spine[idx - 1];
+      const targetPage = idx >= 0 ? (delta > 0 ? spine[idx + 1] : spine[idx - 1]) : undefined;
       if (targetPage) {
         event.preventDefault();
         api.openPageAt(book, targetPage.id);
-      } else if (delta > 0 && idx === spine.length - 1) {
+      } else if (delta > 0) {
         event.preventDefault();
         api.navigate('turn', { from: page.id });
       }
@@ -1337,8 +1433,14 @@ function pageHeader(api: AppApi, book: Book, pageNum: number): HTMLElement {
           button(
             'Save',
             () => {
-              api.renameTitle(book, renaming.get(book.id) ?? titleText);
+              // Read the typed value FIRST, then clear the editor state BEFORE
+              // mutating: `renameTitle` re-renders synchronously, and a
+              // `renaming` entry still set at that moment rendered the input
+              // (with Save/✕) straight back — the rename looked like it had
+              // not taken.
+              const nextTitle = renaming.get(book.id) ?? titleText;
               renaming.delete(book.id);
+              api.renameTitle(book, nextTitle);
             },
             'chip',
           ),
@@ -1452,6 +1554,10 @@ function considerSelection(api: AppApi, book: Book, page: StoryNode, paras: stri
 let spanToolbarEl: HTMLElement | null = null;
 
 export function clearSpanToolbar(): void {
+  // Also drop the abandoned inline replacement: `mountSpanToolbar` reopens in
+  // edit mode whenever `spanEdit` holds this paragraph, so a stale draft came
+  // back pre-filled and "Replace" then overwrote a NEW selection with it.
+  spanEdit.clear();
   spanTask.clear();
   removeSpanToolbar();
 }
@@ -1604,33 +1710,54 @@ async function aiSpanRewrite(
       task.instruction,
       book.rules,
     );
-    const model = book.model || api.lib.settings.endpoint.model;
+    const model = api.lib.settings.endpoint.model;
     const rewritten = await api.generateText(messages, {
       model,
       onToken: (piece) => {
         const state = genStates.get(genKey);
         if (state) state.stream += piece;
       },
+      // A retry re-sends the same span request; without clearing the preview the
+      // panel shows attempt 1's span followed by attempt 2's.
+      onRetry: () => {
+        const state = genStates.get(genKey);
+        if (state) state.stream = '';
+      },
     });
     if (api.staleGen(token)) {
-      genStates.delete(genKey);
+      clearGenState(genKey, token);
       return;
     }
     const cleaned = rewritten.trim();
     if (!cleaned) throw new Error('The model returned an empty span');
-    genStates.delete(genKey);
-    spanTask.delete(genKey);
     // Commit against the CURRENT chosen text (concurrent edits elsewhere on
-    // the page must survive this rewrite).
+    // the page must survive this rewrite) — but ONLY when the paragraph this
+    // rewrite was written against is still the one at that index. The reader
+    // can reorder, edit or delete paragraphs while the request streams (the
+    // span panel does not block the tools), and splicing request-time offsets
+    // into different text corrupted an innocent sentence — or, after a delete,
+    // the paragraph that took its place.
     const chosenNow =
       page.data.kind === 'page'
         ? (page.data.versions[page.data.chosenVersion - 1]?.text ?? '')
         : '';
     const fresh = paragraphsOf(chosenNow);
+    if (fresh[index] !== paragraph) {
+      clearGenState(genKey, token);
+      spanTask.delete(genKey);
+      api.refresh();
+      api.toast(
+        'That paragraph changed while the model was writing — nothing was overwritten. Ask again.',
+        'info',
+      );
+      return;
+    }
     const currentParagraph = fresh[index] ?? paragraph;
     const next = [...fresh];
     next[index] =
       currentParagraph.slice(0, task.start) + cleaned + currentParagraph.slice(task.end);
+    clearGenState(genKey, token);
+    spanTask.delete(genKey);
     if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
     api.appendVersion(page.id, joinParagraphs(next), 'ai', model);
     maybeUpdateBible(api, book, page.id);
@@ -1638,7 +1765,7 @@ async function aiSpanRewrite(
     api.refresh();
     api.toast('Selection rewritten — saved as a new version', 'success');
   } catch (err) {
-    genStates.delete(genKey);
+    clearGenState(genKey, token);
     if (api.staleGen(token)) {
       api.refresh();
       return;
@@ -1674,9 +1801,13 @@ function headingRow(api: AppApi, page: StoryNode, text: string): HTMLElement | n
   const save = () => {
     const next = [...lines];
     next[headingIndex] = headingEdit.get(page.id) ?? heading;
+    // Clear the editor state BEFORE mutating: appendVersion re-renders
+    // synchronously, so deleting afterwards left the just-rendered view with
+    // the editor still open — the save looked like it had failed, and a second
+    // click appended a second, identical version.
+    headingEdit.delete(page.id);
     lastCommit.set(page.id, data.chosenVersion);
     api.appendVersion(page.id, next.join('\n'), 'user');
-    headingEdit.delete(page.id);
     api.toast('Chapter heading saved as a new version', 'success');
   };
   return h(

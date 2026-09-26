@@ -4,14 +4,14 @@
  */
 import type { AppApi } from '../ctx';
 import type { Book } from '../../core/types';
-import { button, fmtNumber, h } from '../dom';
+import { button, h, plural } from '../dom';
 import { compileBook } from '../../core/compile';
 import { pathToRoot, statsOf, titleNodeOf } from '../../core/tree';
 import { exportCompiled } from '../export';
 import { renderCast } from '../cast';
 import { renderStoryMemory } from '../story';
 import { buildContext, portraitMessages, prologueMessages } from '../../core/prompt';
-import { genStates, renderGenPanel } from '../genpage';
+import { clearGenState, genStates, renderGenPanel } from '../genpage';
 import { scoreNotes } from '../../core/midi';
 import { playScore } from '../sound';
 
@@ -53,11 +53,11 @@ export function renderTheEnd(api: AppApi): HTMLElement {
       h('h1', { class: 'title-hero', text: title }),
       h('p', {
         class: 'book-meta',
-        text: `${compiled.pages.length} pages · ${fmtNumber(compiled.words)} words kept`,
+        text: `${plural(compiled.pages.length, 'page')} · ${plural(compiled.words, 'word')} kept`,
       }),
       h('p', {
         class: 'book-meta',
-        text: `The tree remembers: ${stats.versions} versions, ${stats.branches} branches, ${stats.nodes} moments. The compiled book is one path through it.`,
+        text: `The tree remembers: ${plural(stats.versions, 'version')}, ${plural(stats.branches, 'branch', 'branches')}, ${plural(stats.nodes, 'moment')}. The compiled book is one path through it.`,
       }),
     ),
     lastText
@@ -76,9 +76,14 @@ export function renderTheEnd(api: AppApi): HTMLElement {
           h('h2', { class: 'portrait-title', text: '🪞 The Director’s Portrait' }),
           h('p', { class: 'portrait-text', text: portrait }),
         )
-      : genStates.get(portraitKey)
-        ? renderGenPanel(api, portraitKey, () => void writePortrait(api, book, portraitKey))
-        : null,
+      : null,
+    // The progress/error panel is a SEPARATE child: nesting it in the portrait
+    // branch's `else` meant that once a portrait existed, regenerating it
+    // showed no spinner at all and a failure showed no retry — the old
+    // portrait simply sat there unchanged.
+    genStates.get(portraitKey)
+      ? renderGenPanel(api, portraitKey, () => void writePortrait(api, book, portraitKey))
+      : null,
     hasPrologue && compiled.pages[0]
       ? h(
           'div',
@@ -107,7 +112,10 @@ export function renderTheEnd(api: AppApi): HTMLElement {
         hasPrologue ? '↻ Rewrite the prologue' : '🌱 Write the prologue',
         () => void writePrologue(api, book, prologueKey),
         'ghost',
-        { title: 'Page zero that plants the ending’s seeds' },
+        {
+          title: 'Page zero that plants the ending’s seeds',
+          disabled: genStates.get(prologueKey)?.status === 'busy',
+        },
       ),
       button(
         '🪞 The Director’s Portrait',
@@ -115,6 +123,7 @@ export function renderTheEnd(api: AppApi): HTMLElement {
         'ghost',
         {
           title: 'A playful reading of your directing style',
+          disabled: genStates.get(portraitKey)?.status === 'busy',
         },
       ),
       button('⇓ .epub', () => void exportCompiled(api, compiled, 'epub'), 'ghost', {
@@ -153,6 +162,9 @@ export function renderTheEnd(api: AppApi): HTMLElement {
 }
 
 async function writePrologue(api: AppApi, book: Book, key: string): Promise<void> {
+  // One request at a time for this panel: a double-click used to start two and
+  // silently supersede the first.
+  if (genStates.get(key)?.status === 'busy') return;
   const token = api.beginGen();
   genStates.set(key, {
     token,
@@ -164,26 +176,38 @@ async function writePrologue(api: AppApi, book: Book, key: string): Promise<void
   api.refresh();
   try {
     const ctx = buildContext(api.nodes, book);
-    const model = book.model || api.lib.settings.endpoint.model;
+    const model = api.lib.settings.endpoint.model;
     const text = await api.generateText(prologueMessages(ctx), {
       model,
       onToken: (piece) => {
         const state = genStates.get(key);
         if (state) state.stream += piece;
       },
+      onRetry: () => {
+        const state = genStates.get(key);
+        if (state) state.stream = '';
+      },
     });
     if (api.staleGen(token)) {
-      genStates.delete(key);
+      clearGenState(key, token);
       return;
     }
     const cleaned = text.trim();
     if (!cleaned) throw new Error('The model returned an empty prologue');
-    genStates.delete(key);
+    clearGenState(key, token);
     api.writePrologue(book, cleaned, model);
     api.toast('The prologue that knew — page zero is written', 'success');
   } catch (err) {
-    genStates.delete(key);
-    if (api.staleGen(token)) return;
+    // Cancelled or superseded: remove ONLY our own panel. Returning without
+    // clearing left `genStates[key]` busy forever — and `abortGeneration` does
+    // not touch genStates, so the spinner (and its dead Cancel button) came
+    // back every time the reader re-opened The End.
+    if (api.staleGen(token)) {
+      clearGenState(key, token);
+      api.refresh();
+      return;
+    }
+    clearGenState(key, token);
     genStates.set(key, {
       token,
       status: 'error',
@@ -196,6 +220,7 @@ async function writePrologue(api: AppApi, book: Book, key: string): Promise<void
 }
 
 async function writePortrait(api: AppApi, book: Book, key: string): Promise<void> {
+  if (genStates.get(key)?.status === 'busy') return;
   const token = api.beginGen();
   genStates.set(key, {
     token,
@@ -208,7 +233,7 @@ async function writePortrait(api: AppApi, book: Book, key: string): Promise<void
   try {
     const ctx = buildContext(api.nodes, book);
     const stats = statsOf(api.nodes, book);
-    const model = book.model || api.lib.settings.endpoint.model;
+    const model = api.lib.settings.endpoint.model;
     const text = await api.generateText(
       portraitMessages(ctx, {
         pages: stats.pages,
@@ -222,20 +247,29 @@ async function writePortrait(api: AppApi, book: Book, key: string): Promise<void
           const state = genStates.get(key);
           if (state) state.stream += piece;
         },
+        onRetry: () => {
+          const state = genStates.get(key);
+          if (state) state.stream = '';
+        },
       },
     );
     if (api.staleGen(token)) {
-      genStates.delete(key);
+      clearGenState(key, token);
       return;
     }
     const cleaned = text.trim();
     if (!cleaned) throw new Error('The model returned an empty portrait');
-    genStates.delete(key);
+    clearGenState(key, token);
     api.savePortrait(book, cleaned);
     api.toast('Your portrait hangs in the book', 'success');
   } catch (err) {
-    genStates.delete(key);
-    if (api.staleGen(token)) return;
+    // Cancelled or superseded: remove ONLY our own panel (see writePrologue).
+    if (api.staleGen(token)) {
+      clearGenState(key, token);
+      api.refresh();
+      return;
+    }
+    clearGenState(key, token);
     genStates.set(key, {
       token,
       status: 'error',

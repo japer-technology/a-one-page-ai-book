@@ -25,6 +25,19 @@ export interface GenState {
 
 export const genStates = new Map<string, GenState>();
 
+/**
+ * Drop a generation's panel state — but only while it is still OURS.
+ *
+ * Deleting unconditionally is wrong when a newer request has already claimed
+ * the same key (an old request's late staleness check wiped the new panel and
+ * its spinner); deleting never is equally wrong (a cancelled request left a
+ * spinner whose Cancel button could not clear it, because `abortGeneration`
+ * only bumps the staleness token — it does not touch `genStates`).
+ */
+export function clearGenState(key: string, token: number): void {
+  if (genStates.get(key)?.token === token) genStates.delete(key);
+}
+
 export type GenTarget = { kind: 'new'; parentId: string } | { kind: 'version'; pageId: string };
 
 /** Generate a page with the app's endpoint settings, attach it, re-render. Returns the node, or null.
@@ -62,17 +75,24 @@ export async function generatePage(
       book.rules,
       resolvedChapter,
     );
-    const model = book.model || api.lib.settings.endpoint.model;
+    const model = api.lib.settings.endpoint.model;
     const text = await api.generateText(messages, {
       model,
       onToken: (piece) => {
         const state = genStates.get(key);
         if (state) state.stream += piece;
       },
+      // A transient failure retries the SAME request; without a reset the
+      // panel shows attempt 1's tokens followed by attempt 2's, as though the
+      // page had been written twice.
+      onRetry: () => {
+        const state = genStates.get(key);
+        if (state) state.stream = '';
+      },
     });
     audit(`generatePage got text len=${text.length} stale=${api.staleGen(token)}`);
     if (api.staleGen(token)) {
-      genStates.delete(key);
+      clearGenState(key, token);
       return null;
     }
     let node: StoryNode;
@@ -95,7 +115,7 @@ export async function generatePage(
     return node;
   } catch (err) {
     audit(`generatePage error stale=${api.staleGen(token)} err=${String(err)}`);
-    genStates.delete(key);
+    clearGenState(key, token);
     if (api.staleGen(token)) {
       // Cancelled (cancel button or navigation) or superseded by a newer
       // generation — leave no stuck "busy" panel behind.
@@ -166,6 +186,12 @@ export async function generateCandidates(
   book: Book,
   page: StoryNode,
   count: number,
+  /**
+   * First candidate slot to use. Retrying a failed candidate must land in ITS
+   * slot; starting from 0 re-registered the request under candidate 1's panel,
+   * so the failed panel vanished and the spinner appeared in the wrong place.
+   */
+  startIndex = 0,
 ): Promise<number> {
   if (page.data.kind !== 'page') return 0;
   const direction = page.data.direction;
@@ -177,14 +203,21 @@ export async function generateCandidates(
     book.rules,
     chapterCountUpTo(api.nodes, page.id),
   );
-  const model = book.model || api.lib.settings.endpoint.model;
+  const model = api.lib.settings.endpoint.model;
+  const label = (slot: number) => `Candidate ${slot + 1} — writing an alternative…`;
+  // ONE token per batch only to register the panels; each candidate's panel
+  // carries it, and that is what decides whether a result is still wanted.
+  // A retry of a SINGLE candidate starts a new batch, so comparing against the
+  // batch token would make the sibling candidate still streaming in the older
+  // batch look superseded — its finished text was thrown away, its panel
+  // deleted, and no version ever appeared (the reader saw a panel vanish).
   const token = api.beginGen();
-  const keys = Array.from({ length: count }, (_, i) => `cand:${page.id}:${i}`);
+  const keys = Array.from({ length: count }, (_, i) => `cand:${page.id}:${startIndex + i}`);
   for (const [i, key] of keys.entries()) {
     genStates.set(key, {
       token,
       status: 'busy',
-      label: `Candidate ${i + 1} of ${count} — writing an alternative…`,
+      label: label(startIndex + i),
       stream: '',
       error: '',
     });
@@ -192,6 +225,8 @@ export async function generateCandidates(
   api.refresh();
 
   const run = async (key: string): Promise<number> => {
+    // Is this panel still the one THIS request registered?
+    const mine = (): boolean => genStates.get(key)?.token === token;
     try {
       const text = await api.generateText(messages, {
         model,
@@ -200,19 +235,26 @@ export async function generateCandidates(
           const state = genStates.get(key);
           if (state) state.stream += piece;
         },
+        onRetry: () => {
+          const state = genStates.get(key);
+          if (state) state.stream = '';
+        },
       });
-      if (api.staleGen(token)) {
-        genStates.delete(key);
-        return 0;
-      }
+      // A newer request owns this slot now: drop the text rather than append
+      // a version under someone else's panel.
+      if (!mine()) return 0;
       const cleaned = text.trim();
       if (cleaned.length === 0) throw new Error('The model returned an empty page');
       genStates.delete(key);
       api.appendVersion(page.id, cleaned, 'ai', model);
       return 1;
     } catch (err) {
+      const cancelled = err instanceof DOMException && err.name === 'AbortError';
+      if (!mine()) return 0; // superseded — never touch the newer panel
       genStates.delete(key);
-      if (api.staleGen(token)) return 0;
+      // Cancelled: leave no error panel behind for a request the reader
+      // stopped (and which `abortGeneration` cannot clear by itself).
+      if (cancelled) return 0;
       genStates.set(key, {
         token,
         status: 'error',

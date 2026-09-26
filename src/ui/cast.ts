@@ -25,6 +25,13 @@ interface CastUIState {
   adding: GroupKey | null;
   editing: string | null; // `${group}:${index}`
   draft: { name: string; note: string; details: string };
+  /**
+   * Whether the panel is expanded. Forcing `open` on every construction meant
+   * that a collapse was undone by the next re-render — which happens after
+   * nearly every action (generation finishing, a cast edit, an automatic cast
+   * update, navigation), so the panel could never be kept out of the way.
+   */
+  open: boolean;
 }
 
 const castUI = new Map<string, CastUIState>();
@@ -51,8 +58,17 @@ export function castBusy(bookId: string): { status: 'busy' | 'error'; error: str
  * Kick off a cast update for a page (fire-and-forget). Idempotent: a second
  * call while one is running is a no-op, and starting any other generation
  * marks this one stale so it can never clobber newer work.
+ *
+ * `manual` is set by the panel's own buttons: an explicit "refresh the cast"
+ * click deserves a plain error toast, while the automatic upkeep that runs
+ * after every page reports through the panel only.
  */
-export async function updateBible(api: AppApi, book: Book, pageNodeId: string): Promise<void> {
+export async function updateBible(
+  api: AppApi,
+  book: Book,
+  pageNodeId: string,
+  { manual = false }: { manual?: boolean } = {},
+): Promise<void> {
   if (busy.get(book.id)?.status === 'busy') return;
   if (!api.lib.settings.endpoint.model) return;
   busy.set(book.id, { status: 'busy', error: '' });
@@ -70,8 +86,12 @@ export async function updateBible(api: AppApi, book: Book, pageNodeId: string): 
     // deliberately do NOT bump the staleness token: a cast save is harmless
     // and idempotent, so it must never invalidate in-flight page work.
     const raw = await api.generateJSON<unknown>(bibleMessages(ctx, previous), {
-      model: api.lib.settings.fastModel || book.model || api.lib.settings.endpoint.model,
+      model: api.lib.settings.fastModel || api.lib.settings.endpoint.model,
       parallel: true,
+      // Background: navigation must not abort the cast extraction that the
+      // very click that navigated had just requested.
+      background: true,
+      quiet: !manual,
     });
     const parsed = parseBible(typeof raw === 'string' ? raw : JSON.stringify(raw), previous);
     parsed.at = pageNumberAt(api.nodes, pageNodeId);
@@ -82,6 +102,9 @@ export async function updateBible(api: AppApi, book: Book, pageNodeId: string): 
     if (api.lib.settings.autoSummary && parsed.summary.trim().length > 0) {
       api.saveSummary(pageNodeId, parsed.summary.trim());
     }
+    // This page IS the newest request: drop the trailing marker, or a later
+    // update finishing would see it as a pending page and re-run this one.
+    if (pendingBible.get(book.id) === pageNodeId) pendingBible.delete(book.id);
     busy.delete(book.id);
     api.refresh();
     // Trailing pass: if a newer page was requested while this one ran, its
@@ -93,6 +116,9 @@ export async function updateBible(api: AppApi, book: Book, pageNodeId: string): 
     }
   } catch (err) {
     busy.delete(book.id);
+    // A superseded request must not leave its marker behind, or the next
+    // successful update would pick it up and re-extract an old page.
+    if (pendingBible.get(book.id) === pageNodeId) pendingBible.delete(book.id);
     busy.set(book.id, { status: 'error', error: api.genError(err) });
     api.refresh();
   }
@@ -126,7 +152,11 @@ export function renderCast(
     adding: null,
     editing: null,
     draft: { name: '', note: '', details: '' },
+    open: opts.open !== false,
   };
+  // Honour an explicit `open` request only on the FIRST render for this book;
+  // afterwards the reader's own collapse/expand wins.
+  if (opts.open !== undefined && !castUI.has(book.id)) ui.open = opts.open;
   castUI.set(book.id, ui);
 
   // Edits are saved onto the node that carries the shown cast — or the most
@@ -213,14 +243,21 @@ export function renderCast(
           { class: 'banner banner-error' },
           state.error,
           ' ',
-          button('Retry', () => void updateBible(api, book, upTo), 'chip'),
+          button('Retry', () => void updateBible(api, book, upTo, { manual: true }), 'chip'),
+          // The upkeep runs on its own: the reader's page was written and kept
+          // before this call was ever made, and saying so stops a failed cast
+          // refresh from reading as "the app is broken, your page is at risk".
+          h('p', {
+            class: 'banner-hint',
+            text: 'This is the optional cast upkeep — the pages you have written are unaffected. Retry, or pick a stronger model for upkeep in Settings.',
+          }),
         )
       : null,
   );
 
-  return h(
+  const details = h(
     'details',
-    { class: 'cast', open: opts.open === false ? undefined : true },
+    { class: 'cast', open: ui.open ? true : undefined },
     h(
       'summary',
       { class: 'cast-summary' },
@@ -238,7 +275,7 @@ export function renderCast(
           (event) => {
             event.preventDefault();
             event.stopPropagation();
-            void updateBible(api, book, upTo);
+            void updateBible(api, book, upTo, { manual: true });
           },
           'chip',
           { title: 'Ask the model to re-read the story so far and refresh the cast' },
@@ -247,6 +284,11 @@ export function renderCast(
     ),
     body,
   );
+  // Remember the reader's choice — the panel is re-created on every render.
+  details.addEventListener('toggle', () => {
+    ui.open = details.open;
+  });
+  return details;
 }
 
 function castEntry(
@@ -279,6 +321,7 @@ function castEntry(
         class: 'cast-tool',
         type: 'button',
         text: '✎',
+        'aria-label': `Rename or edit ${entry.name}`,
         title: 'Rename / edit this entry',
         onclick: () => {
           ui.editing = key;
@@ -291,6 +334,7 @@ function castEntry(
         class: 'cast-tool cast-tool-danger',
         type: 'button',
         text: '✕',
+        'aria-label': `Remove ${entry.name}`,
         title: 'Remove this entry',
         onclick: () => {
           if (!targetNodeId) return;
@@ -449,7 +493,7 @@ async function renameSurgery(
     return;
   }
   const token = api.beginGen();
-  const model = book.model || api.lib.settings.endpoint.model;
+  const model = api.lib.settings.endpoint.model;
   for (let i = 0; i < targets.length; i++) {
     const pageNode = targets[i];
     if (!pageNode || pageNode.data.kind !== 'page') continue;
@@ -471,6 +515,12 @@ async function renameSurgery(
           onToken: (piece) => {
             const state = genStates.get(key);
             if (state) state.stream += piece;
+          },
+          // A retry re-sends the same surgery; without clearing the preview the
+          // panel shows attempt 1's page followed by attempt 2's.
+          onRetry: () => {
+            const state = genStates.get(key);
+            if (state) state.stream = '';
           },
         },
       );
@@ -629,6 +679,7 @@ function relationsSection(
                 type: 'button',
                 title: 'Remove this relationship',
                 text: '✕',
+                'aria-label': `Remove the relationship ${relation.from} — ${relation.kind} — ${relation.to}`,
                 onclick: () => {
                   if (!targetNodeId) return;
                   api.saveBible(

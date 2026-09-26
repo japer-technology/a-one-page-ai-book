@@ -30,7 +30,7 @@ import type {
   TurnInput,
 } from '../../core/types';
 import { DEFAULT_TURN, DOCUMENT_META, DOCUMENT_FORMATS, EMOTION_NAMES } from '../../core/types';
-import { generatePage, genStates, renderGenPanel } from '../genpage';
+import { clearGenState, generatePage, genStates, renderGenPanel } from '../genpage';
 import { renderCast } from '../cast';
 import { renderStoryMemory } from '../story';
 import { startEditingPage } from './page';
@@ -59,7 +59,20 @@ function rememberSticky(bookId: string, input: TurnInput): void {
 }
 
 const ghosts = new Map<string, { text: string; direction: string }>();
+/** The direction each ghost preview was REQUESTED with (survives a failure). */
+const ghostRequests = new Map<string, string>();
 const conflictBusy = new Set<string>();
+/**
+ * Standing-rule and tweak drafts. These inputs have no model state behind them,
+ * so a re-render used to silently discard whatever the reader had half-typed —
+ * and a re-render is exactly what happens when the background cast or summary
+ * update lands while they are typing.
+ */
+const ruleDraft = { text: '' };
+/** Requests started by the turn console itself, so its buttons can go busy. */
+const turnBusy = new Set<string>();
+/** Set when a conflict check itself FAILED, as opposed to finding conflicts. */
+const conflictErrors = new Map<string, string>();
 /** Turns whose direction box has already received the caret. */
 const turnFocused = new Set<string>();
 
@@ -134,6 +147,10 @@ export function renderTurn(api: AppApi): HTMLElement {
     value: input.direction,
     oninput: (event: Event) => {
       input.direction = (event.target as HTMLTextAreaElement).value;
+      // The conflict checker is disabled while the direction is empty; nothing
+      // re-renders on typing, so it must be switched on live or it stays
+      // unreachable for the whole visit to the turn console.
+      checkButton.disabled = input.direction.trim().length === 0;
     },
   });
   // The direction is the primary control: put the caret there the first time
@@ -314,6 +331,10 @@ export function renderTurn(api: AppApi): HTMLElement {
     checked: input.ending ? true : undefined,
     onchange: (event: Event) => {
       input.ending = (event.target as HTMLInputElement).checked;
+      // Built once and revealed in place. The gallery used to be created only
+      // when `input.ending` was already true at render time, so ticking the box
+      // left the promised “Propose endings” button invisible.
+      endingsArea.hidden = !input.ending;
     },
   });
 
@@ -329,6 +350,8 @@ export function renderTurn(api: AppApi): HTMLElement {
     // The direction changed: any conflict verdict about the old direction is
     // stale and must not linger under the new one.
     conflicts.delete(stateKey);
+    conflictErrors.delete(stateKey);
+    checkButton.disabled = false;
   };
   const stepSuggestion = (delta: number) => {
     if (list.length === 0) return;
@@ -391,7 +414,11 @@ export function renderTurn(api: AppApi): HTMLElement {
     class: 'input rule-input',
     type: 'text',
     list: 'rule-presets',
+    value: ruleDraft.text,
     placeholder: '“Don’t reveal the letter yet” — lasts until you remove it',
+    oninput: (event: Event) => {
+      ruleDraft.text = (event.target as HTMLInputElement).value;
+    },
     onkeydown: (event: KeyboardEvent) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -402,8 +429,11 @@ export function renderTurn(api: AppApi): HTMLElement {
   const addRule = () => {
     const rule = ruleInput.value.trim();
     if (!rule) return;
-    api.setRules(book, [...rules, rule]);
+    // Clear the draft BEFORE the mutation: setRules re-renders synchronously,
+    // so clearing afterwards would only touch a detached node.
+    ruleDraft.text = '';
     ruleInput.value = '';
+    api.setRules(book, [...rules, rule]);
   };
   const rulesArea = h(
     'div',
@@ -436,7 +466,22 @@ export function renderTurn(api: AppApi): HTMLElement {
   // ---- Conflict checker -----------------------------------------------------
   const conflictList = conflicts.get(stateKey);
   const checking = conflictBusy.has(stateKey);
+  const conflictError = conflictErrors.get(stateKey) ?? '';
   const conflictArea = h('div', { class: 'conflict-area' });
+  if (conflictError) {
+    // A network failure is not a continuity problem: showing it inside the red
+    // "this direction conflicts" banner invented a story conflict out of an
+    // unreachable server.
+    conflictArea.appendChild(
+      h(
+        'div',
+        { class: 'banner' },
+        conflictError,
+        ' ',
+        button('Retry', () => void checkConflicts(api, book, stateKey, input), 'chip'),
+      ),
+    );
+  }
   if (conflictList && conflictList.length === 0) {
     conflictArea.appendChild(
       h('p', {
@@ -444,7 +489,18 @@ export function renderTurn(api: AppApi): HTMLElement {
         text: '✓ No conflicts found — this direction is consistent with the story.',
       }),
     );
-    conflictArea.appendChild(button('✕', () => conflicts.delete(stateKey), 'chip'));
+    conflictArea.appendChild(
+      button(
+        '✕',
+        () => {
+          // Refresh: without it the dismissed verdict stayed on screen until
+          // some unrelated render (a cast or memory update) happened to run.
+          conflicts.delete(stateKey);
+          api.refresh();
+        },
+        'chip',
+      ),
+    );
   } else if (conflictList) {
     {
       conflictArea.appendChild(
@@ -457,24 +513,30 @@ export function renderTurn(api: AppApi): HTMLElement {
       conflictArea.appendChild(
         h('ul', { class: 'conflict-list' }, ...conflictList.map((item) => h('li', { text: item }))),
       );
-      conflictArea.appendChild(button('✕', () => conflicts.delete(stateKey), 'chip'));
+      conflictArea.appendChild(
+        button(
+          '✕',
+          () => {
+            // Refresh: without it the dismissed verdict stayed on screen until
+            // some unrelated render (a cast or memory update) happened to run.
+            conflicts.delete(stateKey);
+            api.refresh();
+          },
+          'chip',
+        ),
+      );
     }
   }
-  conflictArea.appendChild(
-    h(
-      'div',
-      { class: 'row gap' },
-      button(
-        checking ? 'Checking…' : '🔍 Check this direction',
-        () => void checkConflicts(api, book, stateKey, input),
-        'ghost',
-        {
-          disabled: checking || input.direction.trim().length === 0,
-          title: 'Ask the model whether this direction contradicts anything established',
-        },
-      ),
-    ),
+  const checkButton = button(
+    checking ? 'Checking…' : '🔍 Check this direction',
+    () => void checkConflicts(api, book, stateKey, input),
+    'ghost',
+    {
+      disabled: checking || input.direction.trim().length === 0,
+      title: 'Ask the model whether this direction contradicts anything established',
+    },
   );
+  conflictArea.appendChild(h('div', { class: 'row gap' }, checkButton));
 
   // ---- Auto-suggest --------------------------------------------------------
   if (
@@ -489,29 +551,34 @@ export function renderTurn(api: AppApi): HTMLElement {
 
   // ---- Proposed endings ----------------------------------------------------
   const endingList = endings.get(stateKey) ?? [];
-  const endingsArea = input.ending
-    ? h(
-        'div',
-        { class: 'endings-area' },
-        h(
-          'div',
-          { class: 'row gap' },
-          button('✨ Propose endings', () => void proposeEndings(api, book, stateKey, endingsArea)),
-        ),
-        ...endingList.map((ending) =>
-          h('button', {
-            class: 'chip chip-suggest',
-            type: 'button',
-            text: `${ending.title} — ${ending.premise}`,
-            title: 'Use this ending as the direction',
-            onclick: () => {
-              input.direction = `${ending.title}: ${ending.premise}`;
-              directionBox.value = input.direction;
-            },
-          }),
-        ),
-      )
-    : null;
+  const endingsArea = h(
+    'div',
+    { class: 'endings-area', hidden: !input.ending },
+    h(
+      'div',
+      { class: 'row gap' },
+      button(
+        '✨ Propose endings',
+        () => void proposeEndings(api, book, stateKey, endingsArea),
+        'ghost',
+        {
+          disabled: turnBusy.has(`endings:${stateKey}`),
+        },
+      ),
+    ),
+    ...endingList.map((ending) =>
+      h('button', {
+        class: 'chip chip-suggest',
+        type: 'button',
+        text: `${ending.title} — ${ending.premise}`,
+        title: 'Use this ending as the direction',
+        onclick: () => {
+          input.direction = `${ending.title}: ${ending.premise}`;
+          directionBox.value = input.direction;
+        },
+      }),
+    ),
+  );
 
   // ---- Turn templates (saved mood recipes) ---------------------------------
   const templates = api.lib.settings.templates ?? [];
@@ -608,6 +675,12 @@ export function renderTurn(api: AppApi): HTMLElement {
                   : nudge;
                 directionBox.value = input.direction;
                 conflicts.delete(stateKey);
+                // A stale verdict about the OLD text must go, and the Check
+                // button's disabled state is computed at render time — a nudge
+                // was the only way to fill the direction box without it, so
+                // "Check this direction" stayed dead for the whole visit.
+                checkButton.disabled = false;
+                api.refresh();
               },
               'chip',
               { title: `Append “${nudge}” to the direction` },
@@ -617,7 +690,12 @@ export function renderTurn(api: AppApi): HTMLElement {
         h(
           'div',
           { class: 'row gap' },
-          button('✨ Suggest directions', () => void suggest(api, book, stateKey, suggestArea)),
+          button(
+            turnBusy.has(`suggest:${stateKey}`) ? '✨ Thinking…' : '✨ Suggest directions',
+            () => void suggest(api, book, stateKey, suggestArea),
+            'ghost',
+            { disabled: turnBusy.has(`suggest:${stateKey}`) },
+          ),
         ),
         suggestArea,
         ghostPanel(api, book, from, stateKey),
@@ -788,22 +866,30 @@ async function suggest(
   stateKey: string,
   area: HTMLElement,
 ): Promise<void> {
+  // One request at a time: a double-click used to start two model calls and
+  // abort the first, which then reported "Generation cancelled.".
+  const busyKey = `suggest:${stateKey}`;
+  if (turnBusy.has(busyKey)) return;
+  turnBusy.add(busyKey);
   const token = api.beginGen();
   area.replaceChildren(spinner(), ' thinking…');
   try {
     const context = buildContext(api.nodes, book);
     const raw = await api.generateJSON<string[]>(suggestionsMessages(context, 3), {
-      model: api.lib.settings.fastModel || book.model || api.lib.settings.endpoint.model,
+      model: api.lib.settings.fastModel || api.lib.settings.endpoint.model,
     });
     if (api.staleGen(token)) return;
     const list = raw.filter((s) => typeof s === 'string' && s.length > 0).slice(0, 3);
     suggestions.set(stateKey, list);
     suggestIndex.set(stateKey, 0);
     api.refresh();
-  } catch (err) {
+  } catch {
     if (api.staleGen(token)) return;
     area.replaceChildren();
-    api.toast(api.genError(err), 'error');
+    // Already reported by the generation funnel; a second toast is noise.
+  } finally {
+    turnBusy.delete(busyKey);
+    api.refresh();
   }
 }
 
@@ -815,21 +901,26 @@ async function proposeEndings(
   area: HTMLElement | null,
 ): Promise<void> {
   if (!area) return;
+  const busyKey = `endings:${stateKey}`;
+  if (turnBusy.has(busyKey)) return;
+  turnBusy.add(busyKey);
   const token = api.beginGen();
   area.replaceChildren(spinner(), ' dreaming up endings…');
   try {
     const context = buildContext(api.nodes, book);
     const raw = await api.generateJSON<unknown>(endingsMessages(context, 3), {
-      model: api.lib.settings.fastModel || book.model || api.lib.settings.endpoint.model,
+      model: api.lib.settings.fastModel || api.lib.settings.endpoint.model,
     });
     if (api.staleGen(token)) return;
     const parsed = parseEndings(raw);
     endings.set(stateKey, parsed);
     api.refresh();
-  } catch (err) {
+  } catch {
     if (api.staleGen(token)) return;
     area.replaceChildren();
-    api.toast(api.genError(err), 'error');
+  } finally {
+    turnBusy.delete(busyKey);
+    api.refresh();
   }
 }
 
@@ -873,18 +964,22 @@ async function checkConflicts(
   if (conflictBusy.has(stateKey)) return;
   conflictBusy.add(stateKey);
   conflicts.delete(stateKey);
+  conflictErrors.delete(stateKey);
   api.refresh();
   try {
     const context = buildContext(api.nodes, book);
     const raw = await api.generateJSON<unknown>(conflictMessages(context, input.direction), {
-      model: api.lib.settings.fastModel || book.model || api.lib.settings.endpoint.model,
+      model: api.lib.settings.fastModel || api.lib.settings.endpoint.model,
     });
     const list = parseStringList(typeof raw === 'string' ? raw : JSON.stringify(raw)).filter(
       (item) => !/no conflicts|none found|\[\]|consistent/i.test(item),
     );
     conflicts.set(stateKey, list);
   } catch (err) {
-    conflicts.set(stateKey, [`(The checker could not run: ${api.genError(err)})`]);
+    // Keep this OUT of `conflicts`: the render maps a non-empty list to the red
+    // "this direction conflicts with the story" banner, which turned an
+    // unreachable model into an invented continuity problem.
+    conflictErrors.set(stateKey, api.genError(err));
   }
   conflictBusy.delete(stateKey);
   api.refresh();
@@ -909,8 +1004,11 @@ function ghostPanel(
         text: '👻 What if… — a ghost page (nothing is committed yet)',
       }),
       renderGenPanel(api, key, () => {
-        const task = ghosts.get(stateKey);
-        if (task) void ghostPreview(api, book, from, stateKey, task.direction);
+        // Retry the direction that actually FAILED. `ghosts` is only written on
+        // success, so reading it here made the Retry button a no-op after a
+        // failure — or, worse, silently re-ran a stale earlier ghost.
+        const wanted = ghostRequests.get(stateKey);
+        if (wanted !== undefined) void ghostPreview(api, book, from, stateKey, wanted);
       }),
       h(
         'div',
@@ -940,14 +1038,7 @@ function ghostPanel(
             frontier && frontier.kind === 'turn' && frontier.parentId === from.id
               ? frontier
               : api.attachTurn(book, from.id, input);
-          api.attachPage(
-            book,
-            turn.id,
-            input,
-            ghost.text,
-            book.model || api.lib.settings.endpoint.model,
-            'ai',
-          );
+          api.attachPage(book, turn.id, input, ghost.text, api.lib.settings.endpoint.model, 'ai');
           ghosts.delete(stateKey);
           genStates.delete(key);
           api.navigate('page');
@@ -972,6 +1063,9 @@ async function ghostPreview(
 ): Promise<void> {
   const key = `ghost:${stateKey}`;
   const token = api.beginGen();
+  // Remember what was ASKED for, before the request can fail: the error
+  // panel's Retry needs the direction, and `ghosts` only ever holds successes.
+  ghostRequests.set(stateKey, direction);
   genStates.set(key, {
     token,
     status: 'busy',
@@ -983,7 +1077,7 @@ async function ghostPreview(
   try {
     const ctx = buildContext(api.nodes, book);
     const input: TurnInput = { ...DEFAULT_TURN, emotions: {}, direction };
-    const model = book.model || api.lib.settings.endpoint.model;
+    const model = api.lib.settings.endpoint.model;
     const text = await api.generateText(
       pageMessages(ctx, input, pageNumberAt(api.nodes, from.id) + 1, book.rules),
       {
@@ -992,19 +1086,23 @@ async function ghostPreview(
           const state = genStates.get(key);
           if (state) state.stream += piece;
         },
+        onRetry: () => {
+          const state = genStates.get(key);
+          if (state) state.stream = '';
+        },
       },
     );
     if (api.staleGen(token)) {
-      genStates.delete(key);
+      clearGenState(key, token);
       return;
     }
     const cleaned = text.trim();
     if (!cleaned) throw new Error('The model returned an empty ghost page');
-    genStates.delete(key);
+    clearGenState(key, token);
     ghosts.set(stateKey, { text: cleaned, direction });
     api.refresh();
   } catch (err) {
-    genStates.delete(key);
+    clearGenState(key, token);
     if (api.staleGen(token)) return;
     genStates.set(key, {
       token,
@@ -1027,14 +1125,7 @@ function writeMyself(api: AppApi, book: Book, from: StoryNode): void {
     frontier && frontier.kind === 'turn' && frontier.parentId === from.id
       ? frontier
       : api.attachTurn(book, from.id, input);
-  const node = api.attachPage(
-    book,
-    turn.id,
-    input,
-    '',
-    book.model || api.lib.settings.endpoint.model,
-    'user',
-  );
+  const node = api.attachPage(book, turn.id, input, '', api.lib.settings.endpoint.model, 'user');
   api.toast('Your page — write it, then keep it like any other', 'info');
   startEditingPage(node.id);
   api.navigate('page');

@@ -29,12 +29,16 @@ export function parseJSONLoose<T>(text: string): T {
       // keep looking
     }
   }
-  const slice = firstBalanced(text);
-  if (slice !== null) {
+  // Try EVERY balanced slice, not just the first. A model that writes
+  // "Here are 3 titles [as JSON]:" produces a balanced `[...]` in the prose
+  // before its real payload; stopping at the first balanced slice rejected
+  // perfectly good JSON (and the title salvage path then invented titles out
+  // of the raw JSON text).
+  for (const slice of balancedSlices(text)) {
     try {
       return JSON.parse(repairTrailingCommas(slice)) as T;
     } catch {
-      // fall through to error
+      // keep looking
     }
   }
   throw new Error(`Model output was not valid JSON. Got: ${text.slice(0, 120)}…`);
@@ -70,7 +74,12 @@ function repairTrailingCommas(text: string): string {
   return out;
 }
 
-function firstBalanced(text: string): string | null {
+/**
+ * Every balanced `{…}` / `[…]` slice in the text, in order of appearance.
+ * Wrapper-level slices (the outermost pair) come first at each start position —
+ * a start inside an already-closed slice yields only shorter, inner slices.
+ */
+function balancedSlices(text: string): string[] {
   const starts: Array<{ index: number; open: string; close: string }> = [];
   let inString = false;
   let escaped = false;
@@ -89,7 +98,12 @@ function firstBalanced(text: string): string | null {
     if (ch === '{' || ch === '[')
       starts.push({ index: i, open: ch, close: ch === '{' ? '}' : ']' });
   }
-  // Walk each candidate start, tracking nesting.
+  // Walk each candidate start, tracking nesting. A `[`-rooted slice is tried
+  // before an equally-positioned `{`-rooted one because the callers that need
+  // salvage most often want a list.
+  starts.sort((a, b) => a.index - b.index || (a.open === b.open ? 0 : a.open === '[' ? -1 : 1));
+  const out: string[] = [];
+  const seen = new Set<string>();
   for (const start of starts) {
     let depth = 0;
     let inString = false;
@@ -106,11 +120,18 @@ function firstBalanced(text: string): string | null {
       else if (ch === start.open) depth++;
       else if (ch === start.close) {
         depth--;
-        if (depth === 0) return text.slice(start.index, i + 1);
+        if (depth === 0) {
+          const slice = text.slice(start.index, i + 1);
+          if (!seen.has(slice)) {
+            seen.add(slice);
+            out.push(slice);
+          }
+          break;
+        }
       }
     }
   }
-  return null;
+  return out;
 }
 
 /** Parse a list of strings from loosely-formatted output (JSON array, {titles:[...]}, or newline list). */

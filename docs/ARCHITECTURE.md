@@ -40,6 +40,7 @@ emit** a file that violates the single-file contract (see §5).
 │   ├── llm/              local-LLM layer
 │   │   ├── endpoints.ts    catalog of known servers + model-list parsers
 │   │   ├── probe.ts        discovery: CORS fetch → no-cors presence fallback
+│   │   ├── retry.ts        how often a call is re-sent, and which failures deserve it
 │   │   └── client.ts       chat: OpenAI-compatible + Ollama native, SSE streaming
 │   ├── store/            local-file layer
 │   │   ├── db.ts           IndexedDB: the whole library is ONE JSON document
@@ -167,6 +168,23 @@ JSON per line — Ollama native) vs plain JSON when a server ignores `stream: tr
 readers drain partial lines across chunk boundaries and salvage a final line without a trailing
 newline. Every request carries a hard 120 s timeout (per-request, never a shared slot); HTTP 401/403
 errors explain themselves ("add the API key in Settings").
+
+**Retries (`llm/retry.ts`).** A local server is a process the reader runs themselves, and its
+ordinary conditions — a second tab holding its one generation slot, a model still being paged in
+from disk, a proxy blinking after a restart, a 200 that carries nothing because the slot was
+contended — are not the reader's mistake and usually clear in seconds. Each is classified into a
+kind (`busy`, `warming`, `unreachable`, `gateway`, `empty`, `bad-json`, `fatal`) and given its own
+attempt count and backoff ladder; only `fatal` — a wrong key, a wrong model name, a real
+server-reported generation error, an abort or a timeout — fails on the first attempt. Because a
+local server keeps **no session between requests**, every retry is the same complete request
+re-sent: the whole system prompt, the whole story context and the whole message list, nothing
+"continued". After a failure where the model answered but unusably (nothing, or prose where JSON was
+asked for) the retry nudges the temperature, because a near-greedy local model reproduces the
+identical mistake otherwise. Background upkeep gets a shorter ladder, so housekeeping never makes
+the reader wait; a long wait is announced in a toast, a few-hundred-millisecond re-ask is not.
+Streams are released on **every** exit path, including a mid-stream server error, because an
+abandoned generation keeps holding the slot on a single-slot server and would make the reader's own
+next request fail.
 
 ## 7. Prompt engineering: calibrated, not adjectival
 

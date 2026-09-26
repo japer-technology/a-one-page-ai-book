@@ -94,7 +94,18 @@ export function buildContextTo(
   for (let i = pages.length - 1; i >= 0; i--) {
     const page = pages[i];
     if (page === undefined) continue;
-    if (words + page.words > pagesBudget) break;
+    if (words + page.words > pagesBudget) {
+      // The newest page must never be lost. Because the loop walks newest →
+      // oldest, a single oversized page used to `break` on the first iteration
+      // and empty the whole verbatim history — the prompt then carried the
+      // "nothing exists yet" line while announcing "This will be page 5", which
+      // invites the model to restart the story. Keep its tail instead.
+      if (trimmed.length === 0) {
+        const tail = tailWords(page.text, pagesBudget);
+        if (tail.length > 0) trimmed.unshift(tail);
+      }
+      break;
+    }
     trimmed.unshift(page.text);
     words += page.words;
   }
@@ -107,6 +118,17 @@ export function buildContextTo(
     cast,
     summary,
   };
+}
+
+/**
+ * The last `max` words of a page, marked as a tail. Used when the newest page
+ * alone blows the context budget — the most recent prose is exactly what the
+ * next page has to continue from, so something of it must survive.
+ */
+function tailWords(text: string, max: number): string {
+  const words = text.trim().split(/\s+/);
+  if (words.length <= max) return text.trim();
+  return `[…]\n${words.slice(words.length - max).join(' ')}`;
 }
 
 export const TONE_GUIDANCE: Record<Tone, string> = {
@@ -428,8 +450,15 @@ export function pageMessages(
   rules: string[] = [],
   chapterNumber?: number,
 ): ChatMessage[] {
+  // The page-1 sentinel is only true for page 1: with a target page number
+  // beyond that, an empty history means the budget dropped it, and telling the
+  // model "nothing exists yet" makes it start the book over.
   const history =
-    ctx.pages.length > 0 ? ctx.pages.join('\n\n') : '(This is page 1 — nothing exists yet.)';
+    ctx.pages.length > 0
+      ? ctx.pages.join('\n\n')
+      : targetPageNumber <= 1
+        ? '(This is page 1 — nothing exists yet.)'
+        : '(The earlier pages were omitted for length — continue the story in progress.)';
   const standing = rulesText(rules);
   const brief = briefText(ctx.brief);
   const cast = castText(ctx.cast);
@@ -596,6 +625,84 @@ Rules you never break:
 - Keep every reply under 70 words. Be specific, not generic.
 - Remember the whole conversation; build on what they said.
 - If they seem stuck, offer two contrasting directions and let them pick.`;
+
+/**
+ * The dice: N fresh story seeds to start a book from.
+ *
+ * This used to be a hard-wired list of twelve lines in the view, so "I'm
+ * feeling lucky" could only ever offer the same twelve ideas — the one button
+ * in the app whose whole point is surprise was the one place the model was
+ * never asked. The seed notes the reader has already filled in are passed
+ * along so a roll stays in the register they asked for, and the seeds already
+ * offered are excluded so repeated rolls keep producing something new.
+ */
+export function luckySeedMessages(
+  count: number,
+  options: SeedOptions = {
+    genre: '',
+    perspective: '',
+    tense: '',
+    tone: '',
+    audience: '',
+    lengthHint: '',
+  },
+  avoid: string[] = [],
+): ChatMessage[] {
+  const notes: string[] = [];
+  if (options.genre) notes.push(`genre: ${options.genre}`);
+  if (options.perspective) notes.push(`${options.perspective} person`);
+  if (options.tense) notes.push(`${options.tense} tense`);
+  if (options.tone) notes.push(`baseline tone: ${options.tone}`);
+  if (options.audience) notes.push(`audience: ${options.audience}`);
+  if (options.lengthHint) notes.push(`intended length: ${options.lengthHint.replaceAll('-', ' ')}`);
+  const register =
+    notes.length > 0 ? `\nKeep every seed in this register: ${notes.join('; ')}.` : '';
+  const avoidBlock =
+    avoid.length > 0
+      ? `\n\nDo NOT reuse, reword or lightly rephrase any of these already-offered ideas:\n${avoid
+          .slice(-20)
+          .map((idea) => `- ${idea}`)
+          .join('\n')}`
+      : '';
+  return [
+    { role: 'system', content: STRUCTURED_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `Propose ${count} different story SEEDS — the single opening line a writer could build a whole book from.${register}
+
+Each seed must be:
+- ONE sentence. No titles, no numbering, no commentary, no quotation marks around it.
+- concrete: a person, a place, and something that has just gone wrong or become possible;
+- evocative but plain — a hook, not a pitch;
+- distinct IN KIND from the others: different genre, setting and premise, never ${count} flavours of one idea.
+
+Respond with ONLY a JSON array of ${count} strings.${avoidBlock}`,
+    },
+  ];
+}
+
+/** How many recent exchanges of the pre-writing chat the partner is shown. */
+export const CHAT_EXCHANGES_SENT = 8;
+
+/**
+ * The slice of a long pre-writing conversation the model is actually shown:
+ * the OPENING exchange plus the most recent ones.
+ *
+ * The whole history used to be sent every turn, so each request was bigger
+ * than the last (2 messages, then 4, then 6 …) with no ceiling — one long
+ * brainstorm turned every later reply into a slow, expensive request that
+ * buried the newest idea under the oldest ones. The opening exchange is kept
+ * because that is where the reader said what they actually wanted.
+ */
+export function trimChatHistory(
+  history: ChatMessage[],
+  keepExchanges = CHAT_EXCHANGES_SENT,
+): ChatMessage[] {
+  const max = Math.max(2, keepExchanges * 2);
+  if (history.length <= max) return [...history];
+  const opening = history.slice(0, 2);
+  return [...opening, ...history.slice(-(max - opening.length))];
+}
 
 /** Messages for the pre-writing chat: system + rolling history. */
 export function chatMessages(history: ChatMessage[]): ChatMessage[] {

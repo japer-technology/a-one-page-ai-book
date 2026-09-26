@@ -28,6 +28,12 @@ describe('endpoint catalog', () => {
   it('normalizes base urls', () => {
     expect(normalizeBaseUrl('http://127.0.0.1:1234/v1/')).toBe('http://127.0.0.1:1234');
     expect(normalizeBaseUrl('  http://x:1//  ')).toBe('http://x:1');
+    // Repeated/upper-case version segments must all go — otherwise the client
+    // would post to /v1/v1/chat/completions and 404 on every generation.
+    expect(normalizeBaseUrl('http://x:1/v1/v1')).toBe('http://x:1');
+    expect(normalizeBaseUrl('http://x:1/V1')).toBe('http://x:1');
+    // A deeper path prefix is kept; only the trailing version segment drops.
+    expect(normalizeBaseUrl('http://x:1/proxy/path/v1')).toBe('http://x:1/proxy/path');
   });
 });
 

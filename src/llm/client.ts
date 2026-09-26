@@ -8,6 +8,7 @@
  */
 import type { ChatMessage, EndpointSettings } from '../core/types';
 import { parseJSONLoose } from '../core/parsers';
+import { normalizeBaseUrl } from './endpoints';
 
 export interface GenOptions {
   endpoint: EndpointSettings;
@@ -20,6 +21,31 @@ export interface GenOptions {
 
 const MAX_TOKENS = 2400;
 
+/**
+ * A 200 response can still carry a failure. llama.cpp, vLLM and LM Studio all
+ * emit `{error: …}` inside the stream when generation dies mid-flight (OOM,
+ * context overflow, model unloaded). Ignoring it committed a page that stops
+ * mid-sentence as though it were complete, and reported "empty page" when
+ * nothing had arrived — throwing away the server's actual reason.
+ */
+function errorFromPayload(json: unknown): Error | null {
+  if (typeof json !== 'object' || json === null) return null;
+  const error = (json as { error?: unknown }).error;
+  if (error === undefined || error === null) return null;
+  const text =
+    typeof error === 'string'
+      ? error
+      : typeof (error as { message?: unknown }).message === 'string'
+        ? String((error as { message: unknown }).message)
+        : JSON.stringify(error);
+  return new Error(`LLM server reported an error while generating: ${text.slice(0, 300)}`);
+}
+
+/** A real server error must escape the per-line parse; an unparsable line must not. */
+function rethrowServerError(err: unknown): void {
+  if (err instanceof Error && err.message.startsWith('LLM server reported')) throw err;
+}
+
 function httpError(status: number, body: string): Error {
   const short = body.slice(0, 300).replace(/\s+/g, ' ').trim();
   if (status === 401 || status === 403) {
@@ -27,7 +53,71 @@ function httpError(status: number, body: string): Error {
       `LLM server rejected the request (HTTP ${status}${short ? `: ${short}` : ''}). If this endpoint requires an API key, add it in Settings.`,
     );
   }
+  if (isServerBusyStatus(status, body)) {
+    return new Error(
+      `LLM server is busy (HTTP ${status}${short ? `: ${short}` : ''}) — its one generation slot is already in use. Wait for the current request to finish, or raise the concurrency limit in the server's settings.`,
+    );
+  }
+  if (isServerWarmingStatus(status, body)) {
+    return new Error(
+      `The local LLM server is still loading the model (HTTP ${status}${short ? `: ${short}` : ''}) — it answers as soon as the weights are in memory.`,
+    );
+  }
   return new Error(`LLM server responded ${status}${short ? `: ${short}` : ''}`);
+}
+
+/**
+ * Did the server answer "I can only do one thing at a time"? Local servers
+ * configured with a single generation slot (LM Studio's default, llama.cpp
+ * with `-np 1`) reject a second concurrent request instead of queueing it:
+ * 429/503, or LM Studio's HTTP 400 "Only one request at a time is allowed".
+ */
+function isServerBusyStatus(status: number, body: string): boolean {
+  if (status === 429 || status === 503) return true;
+  if (status !== 400 && status !== 409) return false;
+  return /one request at a time|only one request|busy|concurrent|already processing|slot/i.test(
+    body,
+  );
+}
+
+/**
+ * A "server is busy" failure: the request never reached the model, so trying it
+ * again once the slot frees is meaningful (unlike a 404 or a malformed body).
+ */
+export function isServerBusyError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes('one generation slot') ||
+    message.includes('one request at a time is allowed') ||
+    /LLM server responded (429|503)(\b|:)/.test(message)
+  );
+}
+
+/**
+ * Is the server up but not ready to generate? Ollama answers 503 with
+ * "model … is not loaded"/"is loading, please wait", LM Studio answers 400 or
+ * 500 with "Model is loading.", and a server that unloaded the model under
+ * memory pressure has to page it back in before it can answer. The request
+ * never reached the model, so it is worth re-sending — but only after a longer
+ * pause than a busy slot needs, which is why this is a separate verdict from
+ * "busy" rather than more busy wording.
+ *
+ * A 404 is deliberately excluded: that is Ollama's "model 'x' not found", which
+ * is a wrong model name in Settings, not a readiness problem.
+ */
+export function isServerWarmingError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /still loading the model|is loading|loading the model|loading model|not loaded|please wait|unloading|warming up|warm up/i.test(
+    message,
+  );
+}
+
+function isServerWarmingStatus(status: number, body: string): boolean {
+  if (status === 401 || status === 403 || status === 404) return false;
+  if (status < 400 || status > 599) return false;
+  return /model .{0,60}(?:is loading|not loaded|loading)|is loading|loading the model|loading, please wait|weights/i.test(
+    body,
+  );
 }
 
 /** Headers shared by both dialects, including the optional bearer key. */
@@ -69,45 +159,77 @@ async function readSSE(response: Response, onToken: (t: string) => void): Promis
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const { rest, stop } = drainLines(buffer, (line) => {
-      if (!line.startsWith('data:')) return false;
-      const payload = line.slice(5).trim();
-      if (payload === '[DONE]') return true;
-      try {
-        const json = JSON.parse(payload) as {
-          choices?: Array<{ delta?: { content?: string } }>;
-          message?: { content?: string };
-        };
-        const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
-        if (typeof delta === 'string' && delta.length > 0) onToken(delta);
-      } catch {
-        // ignore partial lines; they resume on the next chunk
-      }
-      return false;
-    });
-    buffer = rest;
-    if (stop) return;
-  }
-  // A server may end without a trailing newline — salvage the last line.
-  const leftover = buffer.trim();
-  if (leftover.length > 0 && leftover.startsWith('data:')) {
-    const payload = leftover.slice(5).trim();
-    if (payload !== '[DONE]') {
-      try {
-        const json = JSON.parse(payload) as {
-          choices?: Array<{ delta?: { content?: string } }>;
-          message?: { content?: string };
-        };
-        const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
-        if (typeof delta === 'string' && delta.length > 0) onToken(delta);
-      } catch {
-        // nothing salvageable
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const { rest, stop } = drainLines(buffer, (line) => {
+        if (!line.startsWith('data:')) return false;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') return true;
+        try {
+          const json = JSON.parse(payload) as {
+            error?: unknown;
+            choices?: Array<{ delta?: { content?: string } }>;
+            message?: { content?: string };
+          };
+          const error = errorFromPayload(json);
+          if (error) throw error;
+          const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
+          if (typeof delta === 'string' && delta.length > 0) onToken(delta);
+        } catch (err) {
+          rethrowServerError(err);
+          // Otherwise it is a partial line; it resumes on the next chunk.
+        }
+        return false;
+      });
+      buffer = rest;
+      // Release the stream on an early stop so the socket is not held open.
+      if (stop) return;
+    }
+    // A server may end without a trailing newline — salvage the last line.
+    const leftover = buffer.trim();
+    if (leftover.length > 0 && leftover.startsWith('data:')) {
+      const payload = leftover.slice(5).trim();
+      if (payload !== '[DONE]') {
+        try {
+          const json = JSON.parse(payload) as {
+            error?: unknown;
+            choices?: Array<{ delta?: { content?: string } }>;
+            message?: { content?: string };
+          };
+          const error = errorFromPayload(json);
+          if (error) throw error;
+          const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
+          if (typeof delta === 'string' && delta.length > 0) onToken(delta);
+        } catch (err) {
+          rethrowServerError(err);
+        }
       }
     }
+  } finally {
+    await releaseStream(reader);
+  }
+}
+
+/**
+ * Let go of a response body on EVERY exit path, including the exceptional one.
+ *
+ * A stream abandoned without cancelling the reader keeps its connection open
+ * and, on a local server with a single generation slot, keeps the abandoned
+ * generation running — which is the very thing that makes the reader's own
+ * next request answer "the server is busy". A mid-stream `{error: …}` (OOM,
+ * context overflow) used to unwind straight out of the read loop with the
+ * socket still held, so one failed generation could poison every request after
+ * it. `cancel()` on an already-closed stream is a no-op, so this is safe on the
+ * normal path too.
+ */
+async function releaseStream(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    await reader.cancel();
+  } catch {
+    // Already released, or the transport is gone — nothing left to do.
   }
 }
 
@@ -117,34 +239,74 @@ async function readNdjson(response: Response, onToken: (t: string) => void): Pro
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const { rest, stop } = drainLines(buffer, (line) => {
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const { rest, stop } = drainLines(buffer, (line) => {
+        try {
+          const json = JSON.parse(line) as {
+            error?: unknown;
+            message?: { content?: string };
+            done?: boolean;
+          };
+          const error = errorFromPayload(json);
+          if (error) throw error;
+          const delta = json.message?.content;
+          if (typeof delta === 'string' && delta.length > 0) onToken(delta);
+          if (json.done === true) return true;
+        } catch (err) {
+          rethrowServerError(err);
+          // Otherwise it is a partial line; it resumes on the next chunk.
+        }
+        return false;
+      });
+      buffer = rest;
+      if (stop) return;
+    }
+    // Final line without a trailing newline is still a line.
+    const leftover = buffer.trim();
+    if (leftover.length > 0) {
       try {
-        const json = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
+        const json = JSON.parse(leftover) as { error?: unknown; message?: { content?: string } };
+        const error = errorFromPayload(json);
+        if (error) throw error;
         const delta = json.message?.content;
         if (typeof delta === 'string' && delta.length > 0) onToken(delta);
-        if (json.done === true) return true;
-      } catch {
-        // ignore partial lines; they resume on the next chunk
+      } catch (err) {
+        rethrowServerError(err);
       }
-      return false;
-    });
-    buffer = rest;
-    if (stop) return;
-  }
-  // Final line without a trailing newline is still a line.
-  const leftover = buffer.trim();
-  if (leftover.length > 0) {
-    try {
-      const json = JSON.parse(leftover) as { message?: { content?: string } };
-      const delta = json.message?.content;
-      if (typeof delta === 'string' && delta.length > 0) onToken(delta);
-    } catch {
-      // nothing salvageable
     }
+  } finally {
+    await releaseStream(reader);
+  }
+}
+
+/**
+ * A 200 whose body is empty or not JSON must not surface as a raw
+ * `SyntaxError: Unexpected end of JSON input` / `Unexpected token 'd'`.
+ * Proxies and older builds do occasionally answer a stream request with a
+ * mislabelled or empty body.
+ */
+async function readJsonBody<T>(response: Response): Promise<T> {
+  const text = await response.text().catch(() => '');
+  if (text.trim().length === 0) {
+    throw new Error(
+      'The LLM server returned an empty response body. Check the endpoint in Settings (and whether the model is still loaded).',
+    );
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    if (text.trimStart().startsWith('data:')) {
+      throw new Error(
+        'The LLM server sent a stream for a non-streaming request. Try again, or switch the protocol in Settings.',
+      );
+    }
+    throw new Error(
+      `The LLM server returned something that is not JSON: ${text.slice(0, 200).replace(/\s+/g, ' ')}`,
+    );
   }
 }
 
@@ -167,27 +329,21 @@ async function readJSONError(response: Response): Promise<string> {
 }
 
 /**
- * A connection-level failure worth ONE automatic retry: the server may just
- * have hiccuped. Aborts and timeouts are NOT transient — a timed-out request
- * has a dead signal (a retry would fail instantly with a misleading error).
+ * A connection-level failure worth re-sending, and how many times, is decided
+ * by `llm/retry.ts` (see `isTransientLLMError` there). It lives in its own
+ * module because the policy is a data table that deserves unit tests, while
+ * this module is about talking to the server.
  */
-export function isTransientLLMError(err: unknown): boolean {
-  if (err instanceof DOMException && err.name === 'AbortError') return false;
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    message.includes('Failed to fetch') ||
-    message.includes('NetworkError') ||
-    message.includes('Load failed') ||
-    message.includes('fetch failed') ||
-    message.includes('ECONNREFUSED')
-  );
-}
 
 export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<string> {
   const { endpoint, model, signal, onToken } = opts;
   const temperature = opts.temperature ?? endpoint.temperature ?? 0.9;
   const stream = typeof onToken === 'function';
-  const base = endpoint.baseUrl.replace(/\/+$/, '');
+  // The same normalization every other entry point uses. Stripping only
+  // trailing slashes meant a base URL ending in `/v1` — which Settings strips
+  // but the schema does not, so an imported or hand-edited library can carry
+  // one — posted to `/v1/v1/chat/completions` and 404'd on every generation.
+  const base = normalizeBaseUrl(endpoint.baseUrl);
 
   if (!model) throw new Error('No model selected — pick one in Settings first.');
 
@@ -226,7 +382,11 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
         }
         // fall through: the server ignored stream:true and sent plain JSON
       }
-      const json = (await response.json()) as { message?: { content?: string } };
+      const json = await readJsonBody<{ error?: unknown; message?: { content?: string } }>(
+        response,
+      );
+      const serverError = errorFromPayload(json);
+      if (serverError) throw serverError;
       const content = json.message?.content ?? '';
       if (content.trim().length === 0) throw new Error('LLM returned an empty page');
       return content;
@@ -262,9 +422,15 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
     return full;
   }
 
-  const json = (await response.json()) as {
+  const json = await readJsonBody<{
+    error?: unknown;
     choices?: Array<{ message?: { content?: string } }>;
-  };
+  }>(response);
+  // A 200 that carries the server's error: OOM, model not loaded, context
+  // overflow. Reporting it as "empty page" pointed the reader at the wrong
+  // problem entirely.
+  const serverError = errorFromPayload(json);
+  if (serverError) throw serverError;
   const content = json.choices?.[0]?.message?.content ?? '';
   if (content.trim().length === 0) throw new Error('LLM returned an empty page');
   return content;

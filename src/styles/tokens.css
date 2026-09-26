@@ -18,6 +18,7 @@
   --danger: #e0766a;
   --ok: #7fbf7f;
   --warn: #e0b25c;
+  --cool: #7fa8bf;
   --muted: #9c8f7d;
 
   --font-georgia: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif;
@@ -81,7 +82,10 @@
   --danger: #a33b2f;
   --ok: #4c7a4c;
   --warn: #8a6a1e;
-  --muted: #8a755a;
+  --cool: #3f6b87;
+  /* Was #8a755a — only 3.33:1 on this background, which put every label,
+     hint, meta line and badge below AA in the sepia theme. */
+  --muted: #6f5d45;
 
   --chrome: rgb(234 223 200 / 0.92);
   --inset: rgb(0 0 0 / 0.05);
@@ -109,6 +113,7 @@
   --danger: #a63a32;
   --ok: #3a703a;
   --warn: #755a10;
+  --cool: #35617c;
   --muted: #6f685a;
 
   --chrome: rgb(255 255 255 / 0.92);

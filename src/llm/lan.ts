@@ -12,6 +12,7 @@
  * path, with common-subnet chips as shortcuts.
  */
 import { probeCandidate } from './probe';
+import type { ProbeResult } from './probe';
 import type { EndpointVendor } from '../core/types';
 
 export interface LanHit {
@@ -24,6 +25,13 @@ export interface LanServer extends LanHit {
   models: string[];
   vendor: EndpointVendor;
   corsOk: boolean;
+  /**
+   * The raw probe verdict. `corsOk` alone cannot distinguish "CORS refused
+   * this origin" from "the server is there and wants an API key", and badging
+   * a key-protected server as CORS-blocked sent the reader off to change
+   * server-side origin settings instead of pasting their key.
+   */
+  status: ProbeResult['status'];
   latencyMs: number | null;
   detail: string;
 }
@@ -187,6 +195,7 @@ export async function identifyLanServer(hit: LanHit, timeoutMs = 1800): Promise<
     models: result.models,
     vendor,
     corsOk: result.status === 'reachable',
+    status: result.status,
     latencyMs: result.latencyMs,
     detail: result.detail,
   };

@@ -9,6 +9,8 @@ export interface Toast {
   id: number;
   message: string;
   kind: ToastKind;
+  /** Lifetime handle, so a repeated (de-duplicated) toast can restart its clock. */
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 const NAV: Array<{ view: ViewName; label: string }> = [
@@ -102,7 +104,9 @@ export function renderShell(api: AppApi, viewContent: HTMLElement, toasts: Toast
 }
 
 function modelLabel(api: AppApi): string {
-  const model = api.book?.model ?? api.lib.settings.endpoint.model;
+  // The endpoint's model is the one the app generates with; a book's saved
+  // name is provenance, not the active model.
+  const model = api.lib.settings.endpoint.model;
   return model ? model : 'no model';
 }
 

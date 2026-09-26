@@ -13,12 +13,21 @@ export async function exportCompiled(
   format: ExportFormat,
 ): Promise<void> {
   try {
-    const exported = await exportCompiledFile(compiled, format, {
+    const outcome = await exportCompiledFile(compiled, format, {
       readingFont: api.lib.settings.readingFont,
       documentFonts: api.lib.settings.documentFonts,
     });
-    // A cancelled picker is a no-op: the backup nudge must keep counting.
-    if (exported) api.markExported();
+    // A cancelled picker is a silent no-op. A single-book export must NOT
+    // reset the whole-library backup nudge (exporting one chapter used to
+    // silence the only backup prompt the app has).
+    if (outcome === 'saved') {
+      api.toast('Book exported', 'success');
+    } else if (outcome === 'download-attempted') {
+      api.toast(
+        'Export started — check your Downloads folder. Allow downloads if it is missing.',
+        'info',
+      );
+    }
   } catch (err) {
     api.toast(err instanceof Error ? err.message : 'Export failed', 'error');
   }

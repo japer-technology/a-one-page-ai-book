@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chat, chatJSON, isTransientLLMError } from '../src/llm/client';
+import { chat, chatJSON, isServerBusyError } from '../src/llm/client';
+// The retry policy (and the verdict on which failures are worth another
+// request) lives in llm/retry.ts; its own expectations are in tests/retry.test.ts.
+import { isTransientLLMError } from '../src/llm/retry';
 import type { EndpointSettings } from '../src/core/types';
 
 const openai: EndpointSettings = {
@@ -145,6 +148,82 @@ describe('Ollama dialect', () => {
   });
 });
 
+// A local server with ONE generation slot keeps generating for a client that
+// walked away: leaving the response body open on an error path holds the slot,
+// which is what makes the reader's own NEXT request answer "the server is busy".
+describe('the response stream is always released', () => {
+  /** A stream that reports whether the reader was cancelled. */
+  function trackedStream(chunks: string[], contentType: string) {
+    const state = { cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+        // Deliberately never closed: the error arrives while the stream is open.
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    });
+    return {
+      state,
+      response: new Response(body, { status: 200, headers: { 'content-type': contentType } }),
+    };
+  }
+
+  it('cancels the reader when the server reports an error mid-SSE-stream', async () => {
+    const { state, response } = trackedStream(
+      [
+        'data: {"choices":[{"delta":{"content":"Once "}}]}\n\n',
+        'data: {"error":{"message":"context overflow"}}\n\n',
+      ],
+      'text/event-stream',
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response),
+    );
+    const err = await chat({ endpoint: openai, model: 'm', onToken: () => {} }, MESSAGES).catch(
+      (e: unknown) => e,
+    );
+    expect((err as Error).message).toContain('context overflow');
+    expect(state.cancelled).toBe(true);
+  });
+
+  it('cancels the reader when the server reports an error mid-NDJSON-stream', async () => {
+    const { state, response } = trackedStream(
+      [
+        '{"model":"m","message":{"content":"Once "},"done":false}\n',
+        '{"error":"CUDA out of memory"}\n',
+      ],
+      'application/x-ndjson',
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response),
+    );
+    const err = await chat({ endpoint: ollama, model: 'm', onToken: () => {} }, MESSAGES).catch(
+      (e: unknown) => e,
+    );
+    expect((err as Error).message).toContain('CUDA out of memory');
+    expect(state.cancelled).toBe(true);
+  });
+
+  it('releases the reader after a normal [DONE] without holding the socket', async () => {
+    const { state, response } = trackedStream(
+      ['data: {"choices":[{"delta":{"content":"A page."}}]}\n\n', 'data: [DONE]\n\n'],
+      'text/event-stream',
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response),
+    );
+    expect(await chat({ endpoint: openai, model: 'm', onToken: () => {} }, MESSAGES)).toBe(
+      'A page.',
+    );
+    expect(state.cancelled).toBe(true);
+  });
+});
+
 describe('errors', () => {
   it('explains 401 as a key problem', async () => {
     vi.stubGlobal(
@@ -184,6 +263,92 @@ describe('isTransientLLMError', () => {
     );
     expect(isTransientLLMError(new DOMException('x', 'AbortError'))).toBe(false);
     expect(isTransientLLMError(new DOMException('x', 'TimeoutError'))).toBe(false);
-    expect(isTransientLLMError(new Error('Model output was not valid JSON'))).toBe(false);
+  });
+
+  it('re-sends an answer the model produced but made unusable', () => {
+    // A small local model that ignored the JSON instruction is exactly the case
+    // a re-ask fixes: sampling is stochastic, and the retry nudges the
+    // temperature. Calling this fatal showed a red error on the first try.
+    expect(isTransientLLMError(new Error('Model output was not valid JSON. Got: …'))).toBe(true);
+    expect(isTransientLLMError(new Error('LLM returned an empty page'))).toBe(true);
+    expect(isTransientLLMError(new Error('The LLM server returned an empty response body.'))).toBe(
+      true,
+    );
+  });
+
+  it('re-sends a server that is not ready yet, and a 5xx it or its proxy emitted', () => {
+    expect(isTransientLLMError(new Error('LLM server responded 500: Model is loading.'))).toBe(
+      true,
+    );
+    expect(isTransientLLMError(new Error('The local LLM server is still loading the model'))).toBe(
+      true,
+    );
+    expect(isTransientLLMError(new Error('LLM server responded 502: bad gateway'))).toBe(true);
+  });
+
+  it('never re-sends a wrong key, a wrong model name or a real generation failure', () => {
+    expect(
+      isTransientLLMError(
+        new Error(
+          'LLM server rejected the request (HTTP 401). If this endpoint requires an API key',
+        ),
+      ),
+    ).toBe(false);
+    expect(isTransientLLMError(new Error('LLM server responded 404: model not found'))).toBe(false);
+    expect(
+      isTransientLLMError(
+        new Error('LLM server reported an error while generating: context overflow'),
+      ),
+    ).toBe(false);
+  });
+});
+
+// A local server with a single generation slot (LM Studio's default, llama.cpp
+// with `-np 1`) rejects a second concurrent request instead of queueing it.
+// Symptom this protects: writing page 1 of a new book showed "LLM server
+// responded 400: Only one request at a time is allowed" notices about the
+// app's own background upkeep calls.
+describe('a busy single-slot server', () => {
+  it('recognises the 429 the app gets when a second request overlaps', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({ error: { message: 'Only one request at a time is allowed.' } }, 429),
+      ),
+    );
+    const err = await chat({ endpoint: openai, model: 'm' }, MESSAGES).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('busy');
+    expect((err as Error).message).toContain('generation slot');
+    expect(isServerBusyError(err)).toBe(true);
+    // Worth re-sending — the slot frees as soon as the other request ends.
+    expect(isTransientLLMError(err)).toBe(true);
+  });
+
+  it('recognises LM Studio\u2019s HTTP 400 wording as busy, not as a bad request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({ error: 'Only one request at a time is allowed on this server.' }, 400),
+      ),
+    );
+    const err = await chat({ endpoint: openai, model: 'm' }, MESSAGES).catch((e: unknown) => e);
+    expect(isServerBusyError(err)).toBe(true);
+    expect((err as Error).message).toContain('generation slot');
+  });
+
+  it('still reports an ordinary 400 as an ordinary failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ error: 'model not found' }, 400)),
+    );
+    const err = await chat({ endpoint: openai, model: 'm' }, MESSAGES).catch((e: unknown) => e);
+    expect((err as Error).message).toContain('LLM server responded 400');
+    expect(isServerBusyError(err)).toBe(false);
+    expect(isTransientLLMError(err)).toBe(false);
+  });
+
+  it('a 503 is transient too — the server is still loading the model', () => {
+    expect(isTransientLLMError(new Error('LLM server responded 503'))).toBe(true);
   });
 });

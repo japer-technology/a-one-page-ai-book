@@ -118,6 +118,8 @@ export function renderHelp(api: AppApi): HTMLElement {
       title: 'Troubleshooting',
       body: [
         'No model? Settings → 🔍 Scan for local LLMs. CORS-blocked means a server answered but refused this page’s origin — enable CORS for localhost, or run from a localhost URL (pnpm dev). API key required? Add it in Settings.',
+        '“The server is busy”? Most local servers (LM Studio, llama.cpp with -np 1) serve ONE request at a time. Page Turn queues its own work so it never asks twice at once, but another app or tab may be holding the slot — wait, then retry. On a server that supports it, raising its concurrency limit helps too. window.__PAGE_TURN__.requests() shows how many this session has made.',
+        'A network panel full of requests after “Scan local network”? That is the scan: one subnet sweep is up to ~2 800 short probes across the 11 known LLM ports, most of which are expected to find nothing. It is bounded, cancellable, and unrelated to your story.',
         'Nothing happens when you generate? Local models can take minutes per page — watch the streaming panel; Cancel always works.',
         'Everything else is in Settings → Help, and window.__PAGE_TURN__ in the devtools console shows live state.',
       ],

@@ -12,6 +12,7 @@ const base = (pages: Array<{ number: number; text: string; words: number }>) => 
   pages,
   words: 1,
   endingNote: '',
+  id: 'b1',
 });
 
 describe('fuzz edge inputs', () => {
@@ -392,6 +393,7 @@ describe('audit-fix regressions', () => {
       pages: [],
       words: 0,
       endingNote: '',
+      id: 'b1',
     };
     const bytes = pdfBytes(compiled);
     const text = new TextDecoder('latin1').decode(bytes);

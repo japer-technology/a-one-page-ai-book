@@ -14,6 +14,16 @@ import type { CompiledBook } from './compile';
 // ---- CP1252 (WinAnsi) encoding ---------------------------------------------
 
 const CP1252: Record<number, number> = {
+  0x0152: 0x8c, // Œ
+  0x0153: 0x9c, // œ
+  0x0160: 0x8a, // Š
+  0x0161: 0x9a, // š
+  0x0178: 0x9f, // Ÿ
+  0x017d: 0x8e, // Ž
+  0x017e: 0x9e, // ž
+  0x0192: 0x83, // ƒ
+  0x02c6: 0x88, // ˆ
+  0x02dc: 0x98, // ˜
   0x2013: 0x96, // –
   0x2014: 0x97, // —
   0x2018: 0x91, // '
@@ -33,7 +43,13 @@ const CP1252: Record<number, number> = {
   0x2122: 0x99, // ™
 };
 
-/** Encode text as CP1252 bytes, dropping characters that cannot be represented. */
+/**
+ * Encode text as CP1252 bytes, dropping characters that cannot be represented.
+ *
+ * WinAnsiEncoding DOES define Œ œ Š š Ž ž Ÿ ƒ ˆ ˜ (0x8C 0x9C 0x8A 0x9A 0x8E
+ * 0x9E 0x9F 0x83 0x88 0x98) — leaving them out of the table deleted them
+ * mid-word, so "cœur" printed as "cur".
+ */
 export function cp1252(text: string): Uint8Array {
   const out: number[] = [];
   for (const ch of text) {
@@ -318,17 +334,45 @@ export function wrapText(
     const words = paragraph.split(/\s+/);
     let current = '';
     for (const word of words) {
-      const candidate = current.length === 0 ? word : `${current} ${word}`;
-      if (textWidth(candidate, fontSize, font) <= maxWidth || current.length === 0) {
-        current = candidate;
-      } else {
-        lines.push(current);
-        current = word;
+      // A single token wider than the column (a long URL, base64-ish model
+      // output, or a script with no spaces) used to be emitted as one line and
+      // drawn straight off the page — up to 5× the page width. Hard-break it.
+      for (const piece of breakWord(word, fontSize, font, maxWidth)) {
+        const candidate = current.length === 0 ? piece : `${current} ${piece}`;
+        if (textWidth(candidate, fontSize, font) <= maxWidth || current.length === 0) {
+          current = candidate;
+        } else {
+          lines.push(current);
+          current = piece;
+        }
       }
     }
     if (current.length > 0) lines.push(current);
   }
   return lines;
+}
+
+/**
+ * Split a token into chunks that each fit `maxWidth`, preferring to keep the
+ * whole token when it already fits. The widest fitting prefix is taken each
+ * time, so the result can never overflow (and always makes progress).
+ */
+function breakWord(word: string, fontSize: number, font: PdfFontKey, maxWidth: number): string[] {
+  if (textWidth(word, fontSize, font) <= maxWidth) return [word];
+  const chars = [...word];
+  const pieces: string[] = [];
+  let piece = '';
+  for (const char of chars) {
+    const candidate = piece + char;
+    if (piece.length > 0 && textWidth(candidate, fontSize, font) > maxWidth) {
+      pieces.push(piece);
+      piece = char;
+    } else {
+      piece = candidate;
+    }
+  }
+  if (piece.length > 0) pieces.push(piece);
+  return pieces;
 }
 
 // ---- Font selection ---------------------------------------------------------
@@ -418,8 +462,11 @@ function paginate(lines: TextLine[], streams: Uint8Array[], leading = LEADING): 
       const x = line.center
         ? Math.max(MARGIN, (PAGE_W - textWidth(piece, line.size, font)) / 2)
         : MARGIN;
+      // NO `BT`/`ET` here: `flush()` already wraps the whole stream in one text
+      // object, and PDF 32000-1 §9.4.2 forbids nesting them (poppler and
+      // Acrobat tolerate it, strict validators and preflight do not).
       ops.push(
-        `BT /${FONT_REF[font]} ${line.size} Tf ${color} 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm (${escapePdfString(piece)}) Tj ET`,
+        `/${FONT_REF[font]} ${line.size} Tf ${color} 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm (${escapePdfString(piece)}) Tj`,
       );
       y -= LINE_GAP;
     }
@@ -536,6 +583,27 @@ export function pdfBytes(compiled: CompiledBook, prefs?: PdfFontPrefs): Uint8Arr
     paginate(lines, streams, leading);
   }
 
+  if (compiled.endingNote) {
+    // The reader's own closing note, not just the heading: every export used
+    // to drop the text the reader wrote on "The End".
+    paginate(
+      [
+        { text: 'The End', size: 14, gapBefore: 40, center: true, font: baseFont },
+        ...compiled.endingNote
+          .split(/\r?\n/)
+          .filter((line) => line.trim().length > 0)
+          .map((line) => ({
+            text: line.trim(),
+            size: 10,
+            gapBefore: 10,
+            center: true as const,
+            font: baseFont,
+          })),
+      ],
+      streams,
+    );
+  }
+
   // Cast appendix (flows after the last page).
   if (compiled.cast) {
     const lines: TextLine[] = [{ text: 'The cast', size: 16, gapBefore: 24, font: baseFont }];
@@ -556,10 +624,6 @@ export function pdfBytes(compiled: CompiledBook, prefs?: PdfFontPrefs): Uint8Arr
     group('Things', compiled.cast.things);
     group('Open threads', compiled.cast.threads);
     paginate(lines, streams);
-  }
-
-  if (compiled.endingNote) {
-    paginate([{ text: 'The End', size: 14, gapBefore: 40, center: true, font: baseFont }], streams);
   }
 
   return assemblePdf(streams);

@@ -16,13 +16,31 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   const node = document.createElement(tag);
   if (props) {
     for (const [key, value] of Object.entries(props)) {
-      if (value === null || value === undefined || value === false) continue;
+      if (value === null || value === undefined || value === false) {
+        // `false` is a meaningful VALUE for ARIA/data state attributes: "false"
+        // is not the same as absent. Dropping it silently made
+        // `'aria-expanded': false` render no attribute at all.
+        if (value === false && (key.startsWith('aria-') || key.startsWith('data-'))) {
+          node.setAttribute(key, 'false');
+        }
+        continue;
+      }
       if (key === 'class' || key === 'className') {
         node.className = String(value);
       } else if (key === 'dataset') {
         Object.assign(node.dataset, value as Record<string, string>);
       } else if (key === 'style') {
-        node.setAttribute('style', String(value));
+        // Accept both the declaration string every current caller passes and
+        // the object form hyperscript users expect — `String({})` would emit
+        // style="[object Object]" and silently drop every declaration.
+        node.setAttribute(
+          'style',
+          typeof value === 'object'
+            ? Object.entries(value as Record<string, string | number>)
+                .map(([prop, val]) => `${prop}:${val}`)
+                .join(';')
+            : String(value),
+        );
       } else if (key.startsWith('on') && typeof value === 'function') {
         node.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
       } else if (key === 'text') {
@@ -79,16 +97,44 @@ export function button(
   return btn;
 }
 
-/** A small labeled control wrapper. */
+let fieldSeq = 0;
+
+/**
+ * A small labeled control wrapper.
+ *
+ * This deliberately does NOT use a wrapping `<label>`: a label forwards every
+ * click anywhere inside it (including on its own caption text and hint) to its
+ * *first labelable descendant*. Controls that are composites — the segmented
+ * page-length picker, the standing-rules chips — contain `<button>`s, so a
+ * caption click would silently activate the first one and, for the rules
+ * chips, delete the reader's standing rule. Naming is instead carried by
+ * `aria-labelledby` (single form control) or `role="group"` (composite), which
+ * keeps the accessible name without the accidental activation.
+ */
 export function field(
   label: string,
   control: HTMLElement,
   hint?: string | HTMLElement,
 ): HTMLElement {
+  const labelId = `field-label-${++fieldSeq}`;
+  const labelEl = h('span', { class: 'field-label', id: labelId, text: label });
+  const isFormControl =
+    control instanceof HTMLInputElement ||
+    control instanceof HTMLSelectElement ||
+    control instanceof HTMLTextAreaElement;
+  if (
+    isFormControl &&
+    !control.hasAttribute('aria-label') &&
+    !control.hasAttribute('aria-labelledby')
+  ) {
+    control.setAttribute('aria-labelledby', labelId);
+  }
   return h(
-    'label',
-    { class: 'field' },
-    h('span', { class: 'field-label', text: label }),
+    'div',
+    isFormControl
+      ? { class: 'field' }
+      : { class: 'field', role: 'group', 'aria-labelledby': labelId },
+    labelEl,
     control,
     hint ? h('span', { class: 'field-hint' }, typeof hint === 'string' ? hint : hint) : null,
   );
@@ -118,6 +164,5 @@ export function pruneMap<K, V>(map: Map<K, V>, max: number): void {
   }
 }
 
-export function fmtNumber(n: number): string {
-  return new Intl.NumberFormat().format(n);
-}
+/** Re-exported so views keep one import site for their formatting helpers. */
+export { fmtNumber, plural } from '../core/format';

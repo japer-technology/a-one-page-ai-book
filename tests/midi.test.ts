@@ -7,6 +7,7 @@ function book(): CompiledBook {
     title: 'T',
     seed: 's',
     words: 4,
+    id: 'b1',
     endingNote: '',
     pages: [
       { number: 1, text: 'a', words: 1, mood: { icon: '🕳️', label: 'dread', value: 2 } },

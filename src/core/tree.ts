@@ -30,10 +30,37 @@ export function getNode(nodes: Record<string, StoryNode>, id: string | null): St
   return id === null ? null : (nodes[id] ?? null);
 }
 
+/**
+ * Parent → children index, memoised per node map.
+ *
+ * `childrenOf` used to scan every node in the library, and it is called once
+ * per visited node by `collectSubtree`, `statsOf`, `branchTip` and the library
+ * sort. On a 20-book / 6 000-node shelf that made a single `statsOf` cost ~0.7 s
+ * and the shelf ~15 s (sort-by-length ~70 s of frozen UI). Node maps are
+ * replaced immutably on every mutation, so the map's identity is a safe cache
+ * key and a WeakMap lets old snapshots be collected.
+ */
+const childIndexCache = new WeakMap<Record<string, StoryNode>, Map<string, StoryNode[]>>();
+
+function childIndex(nodes: Record<string, StoryNode>): Map<string, StoryNode[]> {
+  const cached = childIndexCache.get(nodes);
+  if (cached) return cached;
+  const index = new Map<string, StoryNode[]>();
+  for (const node of Object.values(nodes)) {
+    const parentId = node.parentId;
+    if (parentId === null) continue;
+    const siblings = index.get(parentId);
+    if (siblings) siblings.push(node);
+    else index.set(parentId, [node]);
+  }
+  for (const siblings of index.values()) siblings.sort((a, b) => a.createdAt - b.createdAt);
+  childIndexCache.set(nodes, index);
+  return index;
+}
+
 export function childrenOf(nodes: Record<string, StoryNode>, id: string): StoryNode[] {
-  return Object.values(nodes)
-    .filter((n) => n.parentId === id)
-    .sort((a, b) => a.createdAt - b.createdAt);
+  // Copy: callers must never be able to corrupt the shared index.
+  return [...(childIndex(nodes).get(id) ?? [])];
 }
 
 /** Root-first path from the given node up to its root. */
@@ -199,6 +226,19 @@ export function removeSubtree(
 }
 
 // ---- Node factories -------------------------------------------------------
+//
+// Every factory COPIES the caller's TurnInput. The turn console keeps the very
+// object it handed to `attachTurn`/`attachPage` and mutates it in place on each
+// dial, tone or chapter click, so aliasing meant that re-entering a turn (the
+// documented way to branch) silently rewrote the direction already recorded on
+// the page — changing its mood-map entry, its Director's Cut line and its
+// audit trail. The prologue used to share one module-level `DEFAULT_TURN`
+// across every book in the library.
+
+/** Snapshot a direction so no later UI edit can reach back into the tree. */
+function freezeTurn(input: TurnInput): TurnInput {
+  return structuredClone(input);
+}
 
 export function makeSeedNode(text: string, options: SeedOptions, brief = ''): StoryNode {
   return {
@@ -236,7 +276,7 @@ export function makePageNode(
       kind: 'page',
       versions: [{ v: 1, text, by, at: Date.now(), model }],
       chosenVersion: 1,
-      direction,
+      direction: freezeTurn(direction),
       model,
     },
   };
@@ -248,7 +288,7 @@ export function makeTurnNode(parentId: string, input: TurnInput = DEFAULT_TURN):
     kind: 'turn',
     parentId,
     createdAt: Date.now(),
-    data: { kind: 'turn', input },
+    data: { kind: 'turn', input: freezeTurn(input) },
   };
 }
 
@@ -324,15 +364,28 @@ export function makePrologueNode(
       versions: [{ v: 1, text, by: 'ai', at: Date.now(), model }],
       chosenVersion: 1,
       model,
-      direction,
+      direction: freezeTurn(direction),
     },
   };
 }
 
 /** The prologue of a book (child of the chosen title), if written. */
 export function prologueOf(nodes: Record<string, StoryNode>, book: Book): StoryNode | null {
-  const prologues = childrenOf(nodes, book.chosenTitleId).filter((n) => n.kind === 'prologue');
-  return prologues[0] ?? null;
+  return prologueForTitle(nodes, book.chosenTitleId);
+}
+
+/**
+ * The prologue belonging to a specific title node. A compiled path must use the
+ * title ON that path, not the book's currently chosen one: compiling a branch
+ * re-entered through another proposed title used to splice the chosen branch's
+ * page zero onto it, and re-picking a title made the reader's prologue
+ * unreachable from the reader and every export while it still sat in storage.
+ */
+export function prologueForTitle(
+  nodes: Record<string, StoryNode>,
+  titleNodeId: string,
+): StoryNode | null {
+  return childrenOf(nodes, titleNodeId).find((n) => n.kind === 'prologue') ?? null;
 }
 
 /** Pin (or unpin) a version so it sorts first and is never lost. */

@@ -5,7 +5,7 @@
  * ghosted but clickable — click any moment to re-enter and fork from it.
  */
 import type { AppApi } from '../ctx';
-import { button, fmtNumber, h } from '../dom';
+import { button, fmtNumber, h, plural } from '../dom';
 import { countWords } from '../../core/compile';
 import {
   branchTip,
@@ -127,7 +127,12 @@ export function renderArchive(api: AppApi): HTMLElement {
       h('p', { class: 'book-meta', text: `Seed: “${seed}”` }),
       h('p', {
         class: 'book-meta',
-        text: `${spine.length} pages on the chosen path · ${subtree.length} moments · ${branchCount} branch points · ${subtree.filter((n) => n.kind === 'page').reduce((sum, n) => sum + (n.data.kind === 'page' ? n.data.versions.length : 0), 0)} versions kept`,
+        text: `${plural(spine.length, 'page')} on the chosen path · ${plural(subtree.length, 'moment')} · ${plural(branchCount, 'branch point')} · ${plural(
+          subtree
+            .filter((n) => n.kind === 'page')
+            .reduce((sum, n) => sum + (n.data.kind === 'page' ? n.data.versions.length : 0), 0),
+          'version',
+        )} kept`,
       }),
     ),
     h(
@@ -150,11 +155,20 @@ export function renderArchive(api: AppApi): HTMLElement {
         api.navigate('reader', { book: book.id, to: ending?.id ?? book.frontierId }),
       ),
       button('🏁 The frontier', () => {
+        // `openPageAt` silently returns for anything that is not a page, so a
+        // finished book (frontier = the ending) or a brand-new one (frontier =
+        // the title) gave a button that did nothing at all.
         const frontier = getNode(nodes, book.frontierId);
-        if (frontier?.kind === 'turn') {
+        if (book.status === 'finished' || frontier?.kind === 'ending') {
+          api.navigate('theend');
+        } else if (frontier?.kind === 'turn') {
           api.navigate('turn', { from: frontier.parentId ?? book.chosenTitleId });
+        } else if (frontier?.kind === 'title') {
+          api.navigate('page');
+        } else if (frontier) {
+          api.openPageAt(book, frontier.id);
         } else {
-          api.openPageAt(book, book.frontierId);
+          api.toast('This book has no frontier any more.', 'error');
         }
       }),
     ),

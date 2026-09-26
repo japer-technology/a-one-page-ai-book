@@ -294,6 +294,13 @@ export interface Library {
   books: Book[];
   nodes: Record<string, StoryNode>;
   settings: Settings;
+  /**
+   * Monotonic-ish stamp of the last mutation. Bumped by every `update()` and
+   * compared at save time so a STALE tab (opened before another tab wrote)
+   * can never overwrite the newer document with its boot-time copy — which
+   * used to silently erase every page the other tab had written.
+   */
+  meta: { updatedAt: number };
 }
 
 export const LIBRARY_SCHEMA_VERSION = 8;

@@ -23,8 +23,18 @@ await new Promise((resolve, reject) => {
 
 let seq = 0;
 const pending = new Map();
+/**
+ * Bumped on every new document. A `Page.reload` resolves immediately, so the
+ * assertions that follow can otherwise run against the OLD document (or a
+ * half-torn-down one) and see `document.querySelector(...)` return null for
+ * elements that exist perfectly well a moment later.
+ */
+let documentEpoch = 0;
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
+  if (msg.method === 'Page.frameNavigated' && !msg.params?.frame?.parentId) {
+    documentEpoch++;
+  }
   if (msg.id && pending.has(msg.id)) {
     pending.get(msg.id)(msg);
     pending.delete(msg.id);
@@ -45,6 +55,27 @@ async function evaluate(expression) {
     throw new Error(JSON.stringify(result.result.exceptionDetails));
   return result.result?.result?.value;
 }
+/**
+ * Reload and wait until the fresh document is actually interactive. Waiting on
+ * an element alone is not enough: the old document satisfies the same selector.
+ */
+async function reloadAndWait(selector, label = selector, timeoutMs = 20000) {
+  const before = documentEpoch;
+  await send('Page.enable');
+  await send('Page.reload');
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (documentEpoch > before) {
+      const ready = await evaluate(
+        `document.readyState === 'complete' && !!document.querySelector(${JSON.stringify(selector)})`,
+      ).catch(() => false);
+      if (ready) return true;
+    }
+    await sleep(200);
+  }
+  throw new Error(`reload: timed out waiting for ${label}`);
+}
+
 async function waitFor(expression, timeoutMs, label) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -509,8 +540,7 @@ out.modelAfterLanUse = await evaluate(
 
 // Reload from durable storage, not just the in-memory settings draft.
 await sleep(1000);
-await send('Page.reload');
-await waitFor("!!document.querySelector('#reading-font')", 10000, 'settings after reload');
+await reloadAndWait('#reading-font', 'settings after reload');
 out.appearanceSurvivesReload = await evaluate(`(() => {
   return document.querySelector('#reading-font').value === 'palatino' &&
     document.querySelector('.wardrobe-select[data-format="story"]').value === 'sans' &&

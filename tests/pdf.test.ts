@@ -17,6 +17,7 @@ function book(): CompiledBook {
       { number: 2, text: 'The end.', words: 2 },
     ],
     words: 122,
+    id: 'b1',
     endingNote: 'The End',
     cast: {
       people: [{ name: 'Elin', note: 'the keeper' }],
@@ -38,6 +39,7 @@ function longPageBook(words: number): CompiledBook {
     seed: 'A very long page.',
     pages: [{ number: 1, text, words }],
     words,
+    id: 'b1',
     endingNote: '',
     cast: {
       people: [{ name: 'Elin', note: 'the keeper' }],
@@ -52,10 +54,16 @@ function longPageBook(words: number): CompiledBook {
   };
 }
 
-/** Every emitted text-drawing op: { font, size, line }. */
+/**
+ * Every emitted text-drawing op: { font, size, line }.
+ *
+ * The whole content stream is wrapped in ONE `BT … ET` (PDF 32000-1 §9.4.2
+ * forbids nested text objects), so each line is matched on its own
+ * `/<font> <size> Tf … (<text>) Tj` op.
+ */
 function textOps(bytes: Uint8Array): Array<{ font: string; size: number; line: string }> {
   const text = new TextDecoder('latin1').decode(bytes);
-  return [...text.matchAll(/BT \/(F\d) ([\d.]+) Tf [\s\S]*?\(([^)]*)\) Tj ET/g)].map((m) => ({
+  return [...text.matchAll(/\/(F\d) ([\d.]+) Tf [\s\S]*?\(([^)]*)\) Tj/g)].map((m) => ({
     font: m[1] ?? 'F1',
     size: Number(m[2]),
     line: m[3] ?? '',
@@ -116,6 +124,7 @@ describe('PDF wrap guarantees', () => {
         },
       ],
       words: 400,
+      id: 'b1',
       endingNote: 'The end',
       cast: {
         people: [{ name: 'Elin', note: 'note '.repeat(80), details: 'details '.repeat(120) }],

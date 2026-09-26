@@ -8,9 +8,11 @@ import type {
   EndpointSettings,
   Library,
   NodeData,
+  PageVersion,
   SeedOptions,
   StoryBible,
   StoryNode,
+  TitleOption,
   TurnInput,
 } from './types';
 import { DEFAULT_TURN, EMOTION_NAMES, LIBRARY_SCHEMA_VERSION } from './types';
@@ -82,6 +84,7 @@ export function defaultLibrary(): Library {
     books: [],
     nodes: {},
     settings: defaultSettings(),
+    meta: { updatedAt: 0 },
   };
 }
 
@@ -93,6 +96,42 @@ function fail(reason: string): never {
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);
+}
+
+/**
+ * A finite number or a default. `typeof x === 'number'` alone admits Infinity
+ * and NaN (`JSON.parse('1e999')` is Infinity), which later blow up in
+ * `new Date(v).toISOString()` with a RangeError and take a whole export down.
+ */
+function finiteOr(x: unknown, fallback: number): number {
+  return typeof x === 'number' && Number.isFinite(x) ? x : fallback;
+}
+
+/**
+ * Coerce a cast group into well-formed entries. The elements used to be passed
+ * through untouched, so a `null` (or a bare string) in an imported file
+ * reached `castMarkdown`/`pdfBytes` and threw "Cannot read properties of null"
+ * long after the import had been accepted and saved.
+ */
+function coerceBibleEntries(raw: unknown): StoryBible['people'] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[])
+    .map((entry): StoryBible['people'][number] | null => {
+      if (typeof entry === 'string') {
+        const name = entry.trim();
+        return name.length > 0 ? { name, note: '' } : null;
+      }
+      if (!isRecord(entry)) return null;
+      const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+      if (name.length === 0) return null;
+      return {
+        name,
+        note: typeof entry.note === 'string' ? entry.note : '',
+        ...(typeof entry.details === 'string' ? { details: entry.details } : {}),
+        ...(typeof entry.at === 'number' && Number.isFinite(entry.at) ? { at: entry.at } : {}),
+      };
+    })
+    .filter((entry): entry is StoryBible['people'][number] => entry !== null);
 }
 
 function asString(x: unknown, what: string): string {
@@ -119,16 +158,33 @@ function normalizeNode(raw: unknown): StoryNode {
       asString(data.text, `node "${id}" seed text`);
       if (!isRecord(data.options)) fail(`node "${id}" seed options missing`);
       if (!Array.isArray(data.titles)) fail(`node "${id}" seed titles must be an array`);
+      // Validate the ELEMENTS too, not just the container: a `null` element
+      // made the library's search haystack (`t.title`) throw, which took the
+      // whole shelf down with no way back — the same failure the page branch
+      // below was fixed for.
+      data.titles = (data.titles as unknown[])
+        .map((option): TitleOption | null => {
+          if (!isRecord(option)) return null;
+          if (typeof option.title !== 'string') return null;
+          return {
+            title: option.title,
+            tagline: typeof option.tagline === 'string' ? option.tagline : '',
+          };
+        })
+        .filter((option): option is TitleOption => option !== null);
       if (data.brief === undefined) data.brief = '';
       else asString(data.brief, `node "${id}" seed brief`);
       break;
     case 'title':
       asString(data.title, `node "${id}" title`);
+      if (data.tagline !== undefined) asString(data.tagline, `node "${id}" title tagline`);
       break;
     case 'page': {
       if (!Array.isArray(data.versions) || data.versions.length === 0) {
         fail(`node "${id}" page has no versions`);
       }
+      data.versions = coerceVersions(data.versions);
+      if (data.versions.length === 0) fail(`node "${id}" page has no usable versions`);
       if (typeof data.chosenVersion !== 'number') fail(`node "${id}" page chosenVersion missing`);
       data.chosenVersion = Math.max(
         1,
@@ -140,10 +196,10 @@ function normalizeNode(raw: unknown): StoryNode {
       if (data.bible !== undefined) {
         if (!isRecord(data.bible)) delete data.bible;
         else {
-          if (!Array.isArray(data.bible.people)) data.bible.people = [];
-          if (!Array.isArray(data.bible.places)) data.bible.places = [];
-          if (!Array.isArray(data.bible.things)) data.bible.things = [];
-          if (!Array.isArray(data.bible.threads)) data.bible.threads = [];
+          data.bible.people = coerceBibleEntries(data.bible.people);
+          data.bible.places = coerceBibleEntries(data.bible.places);
+          data.bible.things = coerceBibleEntries(data.bible.things);
+          data.bible.threads = coerceBibleEntries(data.bible.threads);
           if (!Array.isArray(data.bible.relations)) {
             data.bible.relations = [];
           } else {
@@ -181,6 +237,12 @@ function normalizeNode(raw: unknown): StoryNode {
       if (!Array.isArray(data.versions) || data.versions.length === 0) {
         fail(`node "${id}" prologue has no versions`);
       }
+      // The same ELEMENT validation as a page: a prologue with a numeric or
+      // missing `text` used to normalize cleanly and then throw inside
+      // `countWords` in compileBook — killing the reader, the ending view and
+      // every export for that book.
+      data.versions = coerceVersions(data.versions);
+      if (data.versions.length === 0) fail(`node "${id}" prologue has no usable versions`);
       if (typeof data.chosenVersion !== 'number')
         fail(`node "${id}" prologue chosenVersion missing`);
       data.chosenVersion = Math.max(
@@ -195,6 +257,28 @@ function normalizeNode(raw: unknown): StoryNode {
       break;
   }
   return { id, kind: kind as StoryNode['kind'], parentId, createdAt: raw.createdAt, data };
+}
+
+/**
+ * Keep only the versions that are actually usable. A version whose `text` is a
+ * number (or missing) used to import cleanly and then throw in `countWords`,
+ * i.e. the shelf never painted again, with no way back.
+ */
+function coerceVersions(raw: unknown[]): PageVersion[] {
+  return raw
+    .map((version, index): PageVersion | null => {
+      if (!isRecord(version)) return null;
+      if (typeof version.text !== 'string') return null;
+      return {
+        v: typeof version.v === 'number' && Number.isFinite(version.v) ? version.v : index + 1,
+        text: version.text,
+        by: version.by === 'user' ? 'user' : 'ai',
+        at: finiteOr(version.at, 0),
+        ...(typeof version.model === 'string' ? { model: version.model } : {}),
+        ...(version.pinned === true ? { pinned: true } : {}),
+      };
+    })
+    .filter((version): version is PageVersion => version !== null);
 }
 
 /** Tolerate old files and sloppy shapes: fill every TurnInput field safely. */
@@ -281,8 +365,12 @@ function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
   const seedNodeId = asString(raw.seedNodeId, 'book.seedNodeId');
   const chosenTitleId = asString(raw.chosenTitleId, 'book.chosenTitleId');
   const frontierId = asString(raw.frontierId, 'book.frontierId');
-  if (!nodes[seedNodeId]) fail(`book "${id}" seed node missing`);
-  if (!nodes[chosenTitleId]) fail(`book "${id}" title node missing`);
+  // The pointers must not merely exist — they must point at the right KIND of
+  // node. A file whose chosenTitleId pointed at a page imported cleanly and
+  // then made `titleNodeOf` throw during render, so the shelf never painted
+  // again. Untitled-but-usable is strictly better than bricked.
+  if (nodes[seedNodeId]?.kind !== 'seed') fail(`book "${id}" seed node is not a seed`);
+  if (nodes[chosenTitleId]?.kind !== 'title') fail(`book "${id}" title node is not a title`);
   if (!nodes[frontierId]) fail(`book "${id}" frontier node missing`);
   const status = raw.status === 'finished' ? 'finished' : 'in-progress';
   return {
@@ -312,8 +400,8 @@ function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
           ),
         ]
       : [],
-    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
-    updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
+    createdAt: finiteOr(raw.createdAt, Date.now()),
+    updatedAt: finiteOr(raw.updatedAt, Date.now()),
   };
 }
 
@@ -362,11 +450,16 @@ function normalizeSettings(raw: unknown): Library['settings'] {
         ? Math.max(0.8, Math.min(1.4, raw.fontScale))
         : 1,
     seenOnboarding: raw.seenOnboarding === true,
+    // Keys must be real `YYYY-MM-DD` days: `computeStreak` parses every key as
+    // a date, and one junk key from an imported file threw a RangeError that
+    // took the whole shelf render down with it.
     activityDays: isRecord(raw.activityDays)
       ? Object.fromEntries(
           Object.entries(raw.activityDays).filter(
             (entry): entry is [string, number] =>
-              typeof entry[0] === 'string' && typeof entry[1] === 'number',
+              /^\d{4}-\d{2}-\d{2}$/.test(entry[0]) &&
+              typeof entry[1] === 'number' &&
+              Number.isFinite(entry[1]),
           ),
         )
       : {},
@@ -431,6 +524,13 @@ export function normalizeLibrary(raw: unknown): Library {
     books: kept,
     nodes,
     settings: normalizeSettings(raw.settings),
+    meta: {
+      updatedAt: isRecord(raw.meta)
+        ? typeof raw.meta.updatedAt === 'number' && Number.isFinite(raw.meta.updatedAt)
+          ? raw.meta.updatedAt
+          : 0
+        : 0,
+    },
   };
 }
 

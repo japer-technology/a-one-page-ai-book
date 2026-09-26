@@ -3,7 +3,7 @@
  * at its frontier. Export, duplicate, delete, import/export of the whole library.
  */
 import type { AppApi } from '../ctx';
-import { button, fmtDate, fmtNumber, h } from '../dom';
+import { button, fmtDate, h, plural } from '../dom';
 import { compileBook } from '../../core/compile';
 import { getNode, seedTextOf, sortBooks, statsOf, titleNodeOf, titleOf } from '../../core/tree';
 import { EMOTION_NAMES } from '../../core/types';
@@ -12,7 +12,7 @@ import {
   exportBookBundle,
   exportLibraryFile,
   exportLibraryMarkdown,
-  importLibraryFile,
+  readImportFile,
 } from '../../store/files';
 import { exportCompiled } from '../export';
 import { paintCover } from '../cover';
@@ -22,9 +22,47 @@ import { computeShelfStats } from '../../core/stats';
 // Session-scoped shelf state.
 let sortMode: 'recent' | 'mood' | 'length' | 'branches' = 'recent';
 let activeTag: string | null = null;
+/** The search box has no model state behind it, so it needs a draft to survive
+ *  a re-render (any background cast/summary update re-renders this view). */
+let searchDraft = '';
+
+/**
+ * The card menu is a `<details>` popover, so it must behave like one: dismiss
+ * on an outside click and on Escape. Without this it stayed open across half
+ * the shelf — and a cancelled Rename/Tag prompt left it hanging open too.
+ * Installed once; it queries the live DOM so re-renders need no re-binding.
+ */
+let menuDismissInstalled = false;
+function installMenuDismiss(): void {
+  if (menuDismissInstalled || typeof document === 'undefined') return;
+  menuDismissInstalled = true;
+  const closeAll = (except?: Node): void => {
+    for (const menu of Array.from(document.querySelectorAll<HTMLDetailsElement>('details.menu'))) {
+      if (menu.open && !(except && menu.contains(except))) menu.open = false;
+    }
+  };
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    // Only the ⋯ toggle keeps its menu open — its own default action flips it.
+    // Any other click (an item, a cancelled prompt, the page behind) closes it.
+    const onToggle = target.closest('.menu-btn');
+    closeAll(onToggle ?? undefined);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeAll();
+  });
+}
 
 export function renderLibrary(api: AppApi): HTMLElement {
+  installMenuDismiss();
   const all = sortBooks(api.lib);
+  const allTags = [...new Set(all.flatMap((book) => book.tags ?? []))].sort();
+  // A tag filter that no longer exists (the last tagged book was deleted or
+  // untagged) would hide the whole shelf — and the only "clear" control lived
+  // inside the tag row, which also disappears with it. Drop the stale filter
+  // instead of showing a first-run screen over an intact library.
+  if (activeTag && !allTags.includes(activeTag)) activeTag = null;
   const books = sortBy(all, sortMode, api).filter(
     (book) => !activeTag || (book.tags ?? []).includes(activeTag),
   );
@@ -46,49 +84,84 @@ export function renderLibrary(api: AppApi): HTMLElement {
     type: 'search',
     placeholder: 'Search titles, seeds & pages…',
     'aria-label': 'Search your books',
+    value: searchDraft,
   });
 
   const list = h('div', { class: 'book-list' });
   const empty =
     books.length === 0
-      ? h(
-          'div',
-          { class: 'empty-state' },
-          h('h1', { text: 'The One-Page AI Book' }),
-          h('p', {
-            class: 'lede',
-            text: 'You write one sentence — a seed. A local LLM writes the book with you, one page at a time. You direct every page turn. Every version is remembered forever.',
-          }),
-          api.lib.settings.seenOnboarding ? null : onboarding(api),
-          noModelBanner(api),
-          h(
+      ? activeTag
+        ? h(
             'div',
-            { class: 'row gap' },
-            button('＋ Start a book', () => api.navigate('seed'), 'primary'),
-            button('↥ Import library…', () => importLibrary(api)),
-          ),
-        )
+            { class: 'empty-state' },
+            h('h1', { text: `No books tagged “${activeTag}”` }),
+            h('p', { class: 'lede', text: 'Your other books are still on the shelf.' }),
+            button(
+              '✕ Clear the tag filter',
+              () => {
+                activeTag = null;
+                api.refresh();
+              },
+              'primary',
+            ),
+          )
+        : h(
+            'div',
+            { class: 'empty-state' },
+            h('h1', { text: 'The One-Page AI Book' }),
+            h('p', {
+              class: 'lede',
+              text: 'You write one sentence — a seed. A local LLM writes the book with you, one page at a time. You direct every page turn. Every version is remembered forever.',
+            }),
+            api.lib.settings.seenOnboarding ? null : onboarding(api),
+            noModelBanner(api),
+            h(
+              'div',
+              { class: 'row gap' },
+              button('＋ Start a book', () => api.navigate('seed'), 'primary'),
+              button('↥ Import library…', () => importLibrary(api)),
+            ),
+          )
       : null;
 
   // Fill the list once; the search box filters by visibility (no re-render → focus kept).
   for (const book of books) list.appendChild(bookCard(api, book));
 
-  search.addEventListener('input', () => {
-    const needle = search.value.trim().toLowerCase();
+  const noResults = h('p', {
+    class: 'empty-state-inline',
+    text: 'No books match that search.',
+  });
+
+  const applyFilter = (needleRaw: string): void => {
+    const needle = needleRaw.trim().toLowerCase();
+    let shown = 0;
     for (const card of Array.from(list.children)) {
       const bookId = (card as HTMLElement).dataset.bookId ?? '';
       const haystack = haystacks.get(bookId) ?? '';
       // Fuzzy: exact substring always wins; typo-tolerant subsequences need a score.
-      (card as HTMLElement).style.display =
-        needle === '' || haystack.includes(needle) || searchScore(needle, haystack) >= 8
-          ? ''
-          : 'none';
+      const visible =
+        needle === '' || haystack.includes(needle) || searchScore(needle, haystack) >= 8;
+      (card as HTMLElement).style.display = visible ? '' : 'none';
+      if (visible) shown++;
     }
+    // A search that matches nothing used to show a blank page with no
+    // explanation — indistinguishable from an empty shelf.
+    if (list.childElementCount > 0 && needle !== '' && shown === 0) {
+      if (!noResults.isConnected) list.after(noResults);
+    } else if (noResults.isConnected) {
+      noResults.remove();
+    }
+  };
+  search.addEventListener('input', () => {
+    searchDraft = search.value;
+    applyFilter(search.value);
   });
+  // The draft survives re-renders, so the freshly built list must be filtered
+  // to match it — otherwise the box remembers a query the cards ignore.
+  applyFilter(searchDraft);
 
-  const allTags = [...new Set(all.flatMap((book) => book.tags ?? []))].sort();
   const tagChips =
-    allTags.length > 0
+    allTags.length > 0 || activeTag
       ? h(
           'div',
           { class: 'tag-row' },
@@ -216,8 +289,11 @@ function bookCard(api: AppApi, book: Book): HTMLElement {
       menuItem('Export as .txt', () => void exportCompiled(api, compileBook(nodes, book), 'txt')),
       menuItem('Export as .md', () => void exportCompiled(api, compileBook(nodes, book), 'md')),
       menuItem('Save book file (.ptbook.json)', () => {
-        void exportBookBundle(book, nodes).then((saved) => {
-          if (saved) api.markExported();
+        void exportBookBundle(book, nodes).then((outcome) => {
+          if (outcome === 'saved') api.toast('Book file saved', 'success');
+          else if (outcome === 'download-attempted')
+            api.toast('Export started — check your Downloads folder.', 'info');
+          // A single-book file does not reset the whole-library backup nudge.
         });
       }),
       menuItem('➡️ Write a sequel', () => api.seedFromBook(book.id)),
@@ -262,7 +338,7 @@ function bookCard(api: AppApi, book: Book): HTMLElement {
       tagline ? h('p', { class: 'book-tagline', text: tagline }) : null,
       h('p', {
         class: 'book-stats',
-        text: `${stats.pages} pages · ${fmtNumber(stats.words)} words kept · ${stats.versions} versions · ${stats.branches} branches`,
+        text: `${plural(stats.pages, 'page')} · ${plural(stats.words, 'word')} kept · ${plural(stats.versions, 'version')} · ${plural(stats.branches, 'branch', 'branches')}`,
       }),
       h(
         'p',
@@ -316,19 +392,12 @@ function deleteBook(api: AppApi, book: Book): void {
 
 async function importLibrary(api: AppApi): Promise<void> {
   try {
-    const imported = await importLibraryFile();
-    if (!imported) return;
-    const count = imported.books.length;
-    if (
-      count === 0 ||
-      window.confirm(
-        `Import ${count} book(s) from this file? It will REPLACE the current library. Export your current library first if you want a backup.`,
-      )
-    ) {
-      api.update(() => imported);
-      api.toast(count > 0 ? `Imported ${count} book(s)` : 'Imported an empty library', 'success');
-      api.navigate('library');
-    }
+    // One import path for both formats: importing a .ptbook.json ADDS that book
+    // (the button's tooltip says so), while a .ptlibrary.json still offers to
+    // replace the shelf.
+    const payload = await readImportFile();
+    if (payload === null) return;
+    await api.importDropped(payload);
   } catch (err) {
     api.toast(err instanceof Error ? err.message : 'Import failed', 'error');
   }
@@ -336,8 +405,13 @@ async function importLibrary(api: AppApi): Promise<void> {
 
 async function exportMdLibrary(api: AppApi): Promise<void> {
   try {
-    if (await exportLibraryMarkdown(api.lib)) {
+    const outcome = await exportLibraryMarkdown(api.lib);
+    if (outcome === 'saved') {
+      api.markExported();
       api.toast('Library exported as .md files', 'success');
+    } else if (outcome === 'download-attempted') {
+      api.markExported();
+      api.toast('Library .md files — download started; check your Downloads folder.', 'info');
     }
   } catch (err) {
     api.toast(err instanceof Error ? err.message : 'Export failed', 'error');
@@ -346,9 +420,19 @@ async function exportMdLibrary(api: AppApi): Promise<void> {
 
 async function exportLibrary(api: AppApi): Promise<void> {
   try {
-    if (await exportLibraryFile(api.lib)) {
+    const outcome = await exportLibraryFile(api.lib);
+    if (outcome === 'saved') {
       api.markExported();
-      api.toast('Library exported', 'success');
+      api.toast(
+        'Library exported — book content only; your API key stays on this machine.',
+        'success',
+      );
+    } else if (outcome === 'download-attempted') {
+      api.markExported();
+      api.toast(
+        'Library exported — download started; check your Downloads folder. Your API key stays on this machine.',
+        'info',
+      );
     }
   } catch (err) {
     api.toast(err instanceof Error ? err.message : 'Export failed', 'error');
@@ -367,17 +451,17 @@ function shelfStatsStrip(api: AppApi): HTMLElement {
     h(
       'summary',
       { class: 'shelf-stats-summary' },
-      h('span', { class: 'shelf-stats-item', text: `🔥 ${stats.streak}-day streak` }),
+      h('span', { class: 'shelf-stats-item', text: `🔥 ${plural(stats.streak, 'day')} streak` }),
       h('span', {
         class: 'shelf-stats-item',
         text: `📚 ${stats.books} book${stats.books === 1 ? '' : 's'}`,
       }),
-      h('span', { class: 'shelf-stats-item', text: `📄 ${fmtNumber(stats.pages)} pages kept` }),
+      h('span', { class: 'shelf-stats-item', text: `📄 ${plural(stats.pages, 'page')} kept` }),
       h('span', {
         class: 'shelf-stats-item',
         text: `🏆 ${earned}/${stats.achievements.length} badges`,
       }),
-      h('span', { class: 'shelf-stats-item', text: `${fmtNumber(stats.wordsKept)} words kept` }),
+      h('span', { class: 'shelf-stats-item', text: `${plural(stats.wordsKept, 'word')} kept` }),
     ),
     h(
       'div',
@@ -399,7 +483,7 @@ function shelfStatsStrip(api: AppApi): HTMLElement {
       ),
       h('p', {
         class: 'field-hint',
-        text: `Longest streak: ${stats.longestStreak} days · ${stats.activeDays} active days · all badges are computed on this device.`,
+        text: `Longest streak: ${plural(stats.longestStreak, 'day')} · ${plural(stats.activeDays, 'active day')} · all badges are computed on this device.`,
       }),
     ),
   );
@@ -521,9 +605,12 @@ async function passQuill(api: AppApi, book: Book, nodes: Record<string, StoryNod
     books: lib.books.map((b) => (b.id === book.id ? withGuest : b)),
   }));
   try {
-    if (await exportBookBundle(withGuest, nodes)) {
+    const outcome = await exportBookBundle(withGuest, nodes);
+    if (outcome !== 'cancelled') {
       api.toast(
-        'The quill is passed — send the .ptbook.json file. Drop it back here to merge their pages as new branches.',
+        outcome === 'saved'
+          ? 'The quill is passed — send the .ptbook.json file. Drop it back here to merge their pages as new branches.'
+          : 'Quill file started — check your Downloads folder.',
         'success',
       );
     }

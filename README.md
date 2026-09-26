@@ -126,7 +126,7 @@ exported as JSON at any time, and the only place your words ever travel is the l
 ├── src/              application source (core / llm / store / ui / styles)
 ├── tests/            unit tests
 ├── docs/             PRODUCT.md (vision) · ARCHITECTURE.md (engineering) · AUTHORING.md (the author's guide)
-├── dist/             build output (gitignored; CI publishes the artifact)
+├── dist/             build output (committed, so the single file is ready to open; CI also publishes it)
 └── .github/          CI workflow + issue templates
 ```
 

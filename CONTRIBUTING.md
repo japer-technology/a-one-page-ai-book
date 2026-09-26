@@ -36,6 +36,22 @@ all devDependencies are tooling (esbuild, typescript, vitest, eslint, prettier).
   real built file in headless Chromium (requires `chromium` in PATH) against a mock LLM server: boot
   → scan → use → save → test connection. Run it before merging anything in `src/llm`,
   `src/ui/views/settings.ts`, or `src/main.ts`.
+
+  Focused browser checks live beside it in `scripts/e2e/`; each one exits non-zero on a failed
+  assertion, so they work as regression tests:
+
+  | script                | what it protects                                                                                                                                                  |
+  | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `single-slot.mjs`     | a book with only a first page against a ONE-generation-slot server (`PT_MOCK_SERIAL=1`): one generation + one upkeep call, no error toast, no busy-server failure |
+  | `upkeep-failure.mjs`  | a failed background upkeep is quiet in the UI but still retryable (`PT_MOCK_BAD_JSON=1`)                                                                          |
+  | `seed-ideas.mjs`      | the dice ask the model, walk a batch, and fall back honestly; the pre-writing conversation is cleared on request and when a book is born                          |
+  | `session-measure.mjs` | a long session: the pre-writing chain stays windowed, the request log is bounded (`PT_MOCK_LOG=<path>`)                                                           |
+  | `lan-scan.mjs`        | a LAN sweep states its size, finds a responder, and a CANCELLED sweep is never reported as "No LLM servers found"                                                 |
+
+  `bash scripts/e2e/dev-up.sh` starts the mock LLM plus a throwaway-profile Chromium on the built
+  file; `bash scripts/e2e/dev-down.sh` stops both. Rebuild (`pnpm build`) BEFORE `dev-up.sh`, or the
+  browser will load the previous bundle.
+
 - **Build** — the single-file build must succeed and pass its emit-time safety checks.
 
 ## Architecture rules (from [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md))

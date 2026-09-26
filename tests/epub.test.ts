@@ -17,6 +17,7 @@ function book(): CompiledBook {
       { number: 2, text: 'The end.', words: 2 },
     ],
     words: 6,
+    id: 'b1',
     endingNote: 'The End',
     cast: {
       people: [{ name: 'Elin', note: 'the keeper', details: 'wants the truth' }],

@@ -3,8 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#14100e" />
+    <!-- color-scheme is set per theme in CSS; theme-color is kept in sync by
+         applyAppearance() so a light/sepia reader does not get near-black
+         browser chrome. -->
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#14100e" id="theme-color" />
     <meta
       name="description"
       content="Page Turn — the one-page AI book. You write a seed; a local LLM writes one page at a time; you direct every page turn; every version is remembered forever."
@@ -19,7 +22,11 @@
     </style>
   </head>
   <body>
-    <div id="app" aria-live="polite"></div>
+    <!-- NOT a live region: renderShell() replaces this whole subtree on every
+         render, so aria-live here made assistive tech re-announce the app after
+         nearly every click and buried the toasts (which carry their own
+         role="status"). -->
+    <div id="app"></div>
     <noscript>Page Turn needs JavaScript. It runs entirely in your browser and never sends your story anywhere except to the local LLM endpoint you choose.</noscript>
     <script>
       {{__JS__}}

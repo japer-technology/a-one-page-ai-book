@@ -57,6 +57,10 @@ export function shiftDate(iso: string, delta: number): string {
   // Parse as UTC (the Z suffix): local-timezone parsing would shift the day
   // and break streaks for anyone not on UTC.
   const date = new Date(`${iso}T00:00:00Z`);
+  // Never throw on a malformed day. A RangeError here used to escape into the
+  // library render (which has no error boundary) and blank the whole shelf;
+  // an unusable day simply contributes nothing to the streak.
+  if (Number.isNaN(date.getTime())) return '';
   date.setUTCDate(date.getUTCDate() + delta);
   return date.toISOString().slice(0, 10);
 }

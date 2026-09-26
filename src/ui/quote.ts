@@ -6,12 +6,19 @@
  * system serif stack.
  */
 import type { CompiledBook } from '../core/compile';
+import { audit } from './audit';
 
 export interface QuoteCardInput {
   title: string;
   pageNumber: number;
   text: string;
   mood?: { icon: string; label: string; value: number };
+  /**
+   * What to call this page on the card. A prologue is NOT "Page 0" — it sits
+   * before page 1, and every other surface (reader, PDF, EPUB, MIDI) labels it
+   * "Prologue".
+   */
+  label?: string;
 }
 
 // Fixed print palette — deliberately independent of the app theme.
@@ -95,9 +102,10 @@ export function renderQuoteCard(input: QuoteCardInput): HTMLCanvasElement {
   // Mood line — deep gold (readable on cream).
   ctx.fillStyle = ACCENT;
   ctx.font = '600 26px Georgia, serif';
+  const pageLabel = input.label ?? `Page ${input.pageNumber}`;
   const moodLine = input.mood
-    ? `Page ${input.pageNumber} · ${input.mood.icon} ${input.mood.label} ${input.mood.value > 0 ? '+' : ''}${input.mood.value}`
-    : `Page ${input.pageNumber}`;
+    ? `${pageLabel} · ${input.mood.icon} ${input.mood.label} ${input.mood.value > 0 ? '+' : ''}${input.mood.value}`
+    : pageLabel;
   ctx.fillText(moodLine, W / 2, y + 20, W - 200);
 
   // Trim overlong pages to a card-friendly length.
@@ -112,9 +120,14 @@ export function renderQuoteCard(input: QuoteCardInput): HTMLCanvasElement {
   ctx.fillStyle = INK;
   ctx.font = '33px Georgia, serif';
   const lines = wrapToWidth(ctx, text, W - 260);
-  let by = y + 96;
-  for (const line of lines) {
-    if (by > H - 250) break;
+  const bodyTop = y + 96;
+  const bodyBottom = H - 250;
+  // Fit the text to the card BEFORE drawing. The loop used to `break` as soon
+  // as it ran out of room and simply stopped, so an ordinary 220-word page was
+  // silently cut off mid-sentence (measured: 94 of 220 words dropped).
+  const fitted = fitLines(lines, bodyTop, bodyBottom, 54);
+  let by = bodyTop;
+  for (const line of fitted) {
     if (line.length === 0) {
       by += 30;
       continue;
@@ -132,34 +145,60 @@ export function renderQuoteCard(input: QuoteCardInput): HTMLCanvasElement {
   return canvas;
 }
 
-export function downloadQuoteCard(input: QuoteCardInput, fileName: string): void {
-  const canvas = renderQuoteCard(input);
-  canvas.toBlob((blob) => {
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    try {
-      a.click();
-    } finally {
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    }
-  }, 'image/png');
+export function downloadQuoteCard(input: QuoteCardInput, fileName: string): boolean {
+  try {
+    const canvas = renderQuoteCard(input);
+    canvas.toBlob((blob) => {
+      // `toBlob` yields null on allocation failure; without this the button
+      // appeared to do nothing at all.
+      if (!blob) {
+        audit('quote card failed: canvas toBlob returned null');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      try {
+        a.click();
+      } finally {
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      }
+    }, 'image/png');
+    return true;
+  } catch (err) {
+    audit(`quote card failed: ${String(err)}`);
+    return false;
+  }
 }
 
-export function quoteCardFor(compiled: CompiledBook, pageNumber: number): void {
+/** Returns false when the card could not be rendered — callers toast. */
+export function quoteCardFor(compiled: CompiledBook, pageNumber: number): boolean {
   const page = compiled.pages.find((p) => p.number === pageNumber);
-  if (!page) return;
+  if (!page) return false;
   const slug = compiled.title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 40);
-  downloadQuoteCard(
-    { title: compiled.title, pageNumber: page.number, text: page.text, mood: page.mood },
-    `${slug || 'book'}-page-${page.number}-card.png`,
+  const label = page.kind === 'prologue' ? 'Prologue' : `Page ${page.number}`;
+  return downloadQuoteCard(
+    { title: compiled.title, pageNumber: page.number, text: page.text, mood: page.mood, label },
+    `${slug || 'book'}-${page.kind === 'prologue' ? 'prologue' : `page-${page.number}`}-card.png`,
   );
+}
+
+/**
+ * Trim wrapped lines to the space the card actually has, marking the cut with
+ * an ellipsis so a short card never reads as the whole page.
+ */
+function fitLines(lines: string[], top: number, bottom: number, lineHeight: number): string[] {
+  const maxLines = Math.max(1, Math.floor((bottom - top) / lineHeight));
+  if (lines.length <= maxLines) return lines;
+  const shown = lines.slice(0, maxLines);
+  const last = shown[maxLines - 1] ?? '';
+  shown[maxLines - 1] = `${last.replace(/\s+\S*$/, '')} …`;
+  return shown;
 }

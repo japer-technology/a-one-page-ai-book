@@ -422,8 +422,20 @@
     flex-wrap: wrap;
   }
 
+  /* The nav is a non-wrapping flex row: with a book open its content measured
+     540px in a 360px box, pushing the help button and model chip off-screen. */
   .nav {
     gap: 0.6rem;
+    flex-wrap: wrap;
+    row-gap: 0.35rem;
+    padding: 0.55rem 0.7rem;
+  }
+
+  .nav-links {
+    order: 3;
+    flex-basis: 100%;
+    overflow-x: auto;
+    padding-bottom: 0.1rem;
   }
 
   .model-chip {
@@ -812,7 +824,9 @@
 }
 
 .dial-minus {
-  color: #7fa8bf;
+  /* Was a hardcoded dark-theme blue: 1.92:1 in sepia, 2.25:1 in light — the
+     negative dial value was unreadable in two of the three themes. */
+  color: var(--cool);
 }
 
 .rules-area {
@@ -1105,6 +1119,12 @@
   color: var(--muted);
   border-radius: 999px;
   font-size: 0.72rem;
+  /* Touch targets: the rename/remove tools measured ~23x22 px. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  min-height: 1.6rem;
   padding: 0.05rem 0.4rem;
   cursor: pointer;
 }
@@ -1167,6 +1187,13 @@
   flex-direction: column;
   gap: 0.4rem;
   animation: fadein 0.2s ease-out;
+}
+
+/* `hidden` only works via the UA stylesheet's `[hidden] { display: none }`,
+   which any author `display` declaration beats. Without this the endings
+   gallery stayed visible even when "bring the story to a close" was unticked. */
+[hidden] {
+  display: none !important;
 }
 
 .templates-row {
@@ -1432,6 +1459,11 @@
   border: none;
   cursor: pointer;
   font-size: 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  min-height: 1.6rem;
   padding: 0 0.15rem;
   color: var(--muted);
 }
@@ -1947,7 +1979,7 @@
 .conflict-list {
   margin: 0.2rem 0;
   padding-left: 1.2rem;
-  color: #f0b3ab;
+  color: var(--danger);
   font-size: 0.9rem;
 }
 
@@ -2410,8 +2442,11 @@
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
-  width: 1.9rem;
-  height: 1.9rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
   cursor: pointer;
   font-size: 0.95rem;
   line-height: 1;

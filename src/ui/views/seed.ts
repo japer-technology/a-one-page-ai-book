@@ -9,10 +9,24 @@
 import type { AppApi } from '../ctx';
 import { button, field, h, spinner } from '../dom';
 import { emptySeedOptions } from '../../core/schema';
-import { briefMessages, chatMessages } from '../../core/prompt';
+import {
+  briefMessages,
+  chatMessages,
+  CHAT_EXCHANGES_SENT,
+  luckySeedMessages,
+  trimChatHistory,
+} from '../../core/prompt';
+import { parseStringList } from '../../core/parsers';
 import type { ChatMessage, SeedOptions } from '../../core/types';
 
-const LUCKY_SEEDS = [
+/**
+ * The fallback seeds. These used to BE the feature — "I'm feeling lucky" could
+ * only ever offer these twelve lines, because the one button whose entire point
+ * is surprise was the one place the model was never asked. The model now
+ * proposes the seeds; this list is what the button falls back to when there is
+ * no endpoint configured, or the model is unreachable or answers with junk.
+ */
+const FALLBACK_SEEDS = [
   'A lighthouse keeper finds a letter addressed to someone who died a hundred years ago.',
   'A girl inherits a hotel that only appears in the fog.',
   'An immortal librarian who is allergic to books.',
@@ -27,9 +41,44 @@ const LUCKY_SEEDS = [
   'A detective who can only solve crimes committed in dreams.',
 ];
 
-function luckySeed(): string {
-  const seed = LUCKY_SEEDS[Math.floor(Math.random() * LUCKY_SEEDS.length)];
-  return seed ?? LUCKY_SEEDS[0] ?? 'Something wonderful, and a little strange, begins.';
+function fallbackSeed(): string {
+  const seed = FALLBACK_SEEDS[Math.floor(Math.random() * FALLBACK_SEEDS.length)];
+  return seed ?? FALLBACK_SEEDS[0] ?? 'Something wonderful, and a little strange, begins.';
+}
+
+/**
+ * The dice. One model request buys a batch of seeds; the button then walks
+ * through the batch before asking again, so a second click is instant and does
+ * not spend another request. Each batch is told what has already been offered,
+ * so rolling repeatedly keeps producing genuinely new ideas.
+ */
+const lucky = {
+  busy: false,
+  pool: [] as string[],
+  cursor: 0,
+  /** Everything offered this session, so the model never repeats itself. */
+  offered: [] as string[],
+};
+
+/** A seed the model proposed must actually look like one. */
+function usableSeed(candidate: string): boolean {
+  const text = candidate.trim();
+  if (text.length < 12 || text.length > 240) return false;
+  // A model that ignored the instruction may answer with a title, a label or a
+  // numbering prefix; those would enter the seed box as-is.
+  if (/^(?:\d+[.)]|[-*•]|seed\b|title\b|idea\b)/i.test(text)) return false;
+  return text.split(/\s+/).length >= 3;
+}
+
+/** Put a seed in the box, and leave the caret there ready to edit it. */
+function offerSeed(text: string): void {
+  draft.seed = text;
+  const box = document.querySelector<HTMLTextAreaElement>('.seed-input');
+  if (box) {
+    box.value = text;
+    box.focus();
+    box.setSelectionRange(text.length, text.length);
+  }
 }
 
 // Session-scoped chat state: one pre-writing conversation at a time.
@@ -38,6 +87,39 @@ const chat = {
   busy: false,
   brief: '',
 };
+
+/**
+ * Throw the conversation away. Called when a book is BORN (from here or from
+ * "write a sequel") so the next new book starts a genuinely new conversation:
+ * the draft, the brief and the transcript belonged to the story just started,
+ * and a stale brief silently steering a different story is the worst failure
+ * this view has. Also reachable from the reader's own "new conversation" button.
+ */
+export function resetSeedSession(): void {
+  chat.messages = [];
+  chat.brief = '';
+  chat.busy = false;
+  chatOpen = false;
+  draft.seed = '';
+  draft.genre = '';
+  draft.perspective = '';
+  draft.tense = '';
+  draft.tone = '';
+  draft.audience = '';
+  draft.lengthHint = '';
+  // The dice pool goes too: those ideas were offered for the story being
+  // abandoned, and the "already offered" list must not leak across books.
+  lucky.pool = [];
+  lucky.cursor = 0;
+  lucky.offered = [];
+}
+
+/** Clear just the conversation (the reader asked for a fresh one). */
+function clearConversation(): void {
+  chat.messages = [];
+  chat.brief = '';
+  chat.busy = false;
+}
 
 /**
  * Session-scoped seed form state. The seed view re-renders on every chat
@@ -55,6 +137,8 @@ const draft = {
   lengthHint: '',
 };
 let chatOpen = false;
+/** How many recent exchanges the BRIEF is distilled from (a longer window). */
+const BRIEF_EXCHANGES_SENT = 20;
 
 export function renderSeed(api: AppApi): HTMLElement {
   const textarea = h('textarea', {
@@ -71,7 +155,10 @@ export function renderSeed(api: AppApi): HTMLElement {
   // Focus the seed box when the reader is working on the seed — but NEVER
   // when the chat is open: every chat send/distill re-renders the view, and
   // an eager focus() used to yank the caret out of the chat input mid-flow.
-  if (!chatOpen) textarea.focus();
+  // Deferred: the view is still detached here (`dispatchView` returns it and
+  // the shell mounts it afterwards), and focus() on a detached node does
+  // nothing — so the app's "primary control" never actually got the caret.
+  if (!chatOpen) setTimeout(() => textarea.focus(), 0);
 
   const genre = h('input', {
     class: 'input',
@@ -171,6 +258,54 @@ export function renderSeed(api: AppApi): HTMLElement {
     lengthHint: draft.lengthHint as SeedOptions['lengthHint'],
   });
 
+  const rollLuckySeed = async (api2: AppApi): Promise<void> => {
+    if (lucky.busy) return;
+    // A batch the model already gave us costs nothing: walk it first.
+    const next = lucky.pool[lucky.cursor];
+    if (next !== undefined) {
+      lucky.cursor++;
+      offerSeed(next);
+      api2.refresh();
+      return;
+    }
+    if (!api2.lib.settings.endpoint.model) {
+      // No endpoint yet: the built-in ideas still work, so the button is never
+      // a dead end on a fresh install.
+      const idea = fallbackSeed();
+      lucky.offered.push(idea);
+      offerSeed(idea);
+      return;
+    }
+    lucky.busy = true;
+    api2.refresh();
+    try {
+      const fast = api2.lib.settings.fastModel || api2.lib.settings.endpoint.model;
+      const raw = await api2.generateText(luckySeedMessages(5, collect(), lucky.offered), {
+        model: fast,
+      });
+      const ideas = parseStringList(raw).filter(usableSeed).slice(0, 5);
+      if (ideas.length === 0) throw new Error('The model returned no usable seed');
+      lucky.pool = ideas;
+      lucky.cursor = 1;
+      lucky.offered.push(...ideas);
+      offerSeed(ideas[0] ?? '');
+      api2.toast('Rolled by the model — click again for another', 'info');
+    } catch (err) {
+      // Honest fallback: say what happened, then still fill the box.
+      const idea = fallbackSeed();
+      lucky.offered.push(idea);
+      offerSeed(idea);
+      api2.toast(
+        `The model could not roll an idea (${api2.genError(err)}) — here is one of ours.`,
+        'info',
+      );
+    } finally {
+      lucky.busy = false;
+      api2.refresh();
+      document.querySelector<HTMLTextAreaElement>('.seed-input')?.focus();
+    }
+  };
+
   const begin = (options: SeedOptions) => {
     const brief = chat.brief.trim();
     const typed = draft.seed.trim();
@@ -185,18 +320,8 @@ export function renderSeed(api: AppApi): HTMLElement {
     if (typed.length === 0) {
       api.toast('Seeded from your brief — the brief still rides along into every page.', 'info');
     }
-    // The book is born: clear the session drafts so the NEXT new book starts
-    // fresh (a stale brief must never steer a different story).
-    draft.seed = '';
-    draft.genre = '';
-    draft.perspective = '';
-    draft.tense = '';
-    draft.tone = '';
-    draft.audience = '';
-    draft.lengthHint = '';
-    chat.messages = [];
-    chat.brief = '';
-    chatOpen = false;
+    // The book is born: clear the session so the NEXT new book starts fresh.
+    resetSeedSession();
     api.navigate('titles', { seed: seedNode.id });
   };
 
@@ -241,7 +366,9 @@ export function renderSeed(api: AppApi): HTMLElement {
     document.querySelector<HTMLInputElement>('.chat-input')?.focus();
     try {
       const fast = api.lib.settings.fastModel || api.lib.settings.endpoint.model;
-      const reply = await api.generateText(chatMessages([...chat.messages]), { model: fast });
+      const reply = await api.generateText(chatMessages(trimChatHistory(chat.messages)), {
+        model: fast,
+      });
       chat.messages.push({ role: 'assistant', content: reply.trim() });
     } catch (err) {
       chat.messages.push({
@@ -259,7 +386,12 @@ export function renderSeed(api: AppApi): HTMLElement {
     api.refresh();
     try {
       const fast = api.lib.settings.fastModel || api.lib.settings.endpoint.model;
-      const brief = await api.generateText(briefMessages([...chat.messages]), { model: fast });
+      // The brief is meant to cover the whole conversation, so it gets a much
+      // longer window than a chat turn — but still a window.
+      const brief = await api.generateText(
+        briefMessages(trimChatHistory(chat.messages, BRIEF_EXCHANGES_SENT)),
+        { model: fast },
+      );
       chat.brief = brief.trim();
       // The brief fills the seed: a book distilled from a chat alone must be
       // able to begin. Edit either field — they stay in sync only here.
@@ -321,10 +453,38 @@ export function renderSeed(api: AppApi): HTMLElement {
         disabled: chat.messages.length < 2 || chat.busy,
         title: 'Condense this conversation into a story brief the model will follow',
       }),
+      chat.messages.length > 0
+        ? button(
+            '↺ New conversation',
+            () => {
+              if (
+                chat.messages.length >= 2 &&
+                !window.confirm('Clear this conversation and start a fresh one?')
+              )
+                return;
+              clearConversation();
+              // Re-render: the toast is an overlay-only update, so without this
+              // the transcript the reader just discarded stayed on screen.
+              api.refresh();
+              api.toast('Fresh conversation — the old one is gone.', 'info');
+            },
+            'ghost',
+            { title: 'Start over: forget this conversation and the brief distilled from it' },
+          )
+        : null,
       chat.brief
         ? h('span', { class: 'field-hint', text: 'brief ready — it also fills the seed above' })
         : null,
     ),
+    // Say what the model is actually shown. A conversation is trimmed so each
+    // request does not grow forever, and a reader who cannot see that would
+    // reasonably wonder why the partner forgot the middle of the discussion.
+    chat.messages.length > CHAT_EXCHANGES_SENT * 2
+      ? h('p', {
+          class: 'field-hint',
+          text: `Long conversation: the partner is shown your first exchange and the last ${CHAT_EXCHANGES_SENT} — distill into a brief to keep all of it.`,
+        })
+      : null,
     briefArea,
   );
 
@@ -340,15 +500,34 @@ export function renderSeed(api: AppApi): HTMLElement {
         text: 'One line is enough. The AI does the heavy lifting — you take the wheel page by page.',
       }),
     ),
-    field('Your seed', textarea, 'A sentence, a vibe, a mashup, a question — anything.'),
+    field(
+      'Your seed',
+      textarea,
+      'A sentence, a vibe, a mashup, a question — anything. Or let the model roll one for you.',
+    ),
     h(
       'div',
       { class: 'row gap' },
-      button('🎲 I’m feeling lucky', () => {
-        draft.seed = luckySeed();
-        textarea.value = draft.seed;
-        textarea.focus();
-      }),
+      button(
+        lucky.busy ? '🎲 Asking the model for an idea…' : '🎲 I’m feeling lucky',
+        () => void rollLuckySeed(api),
+        'ghost',
+        {
+          disabled: lucky.busy,
+          title:
+            lucky.cursor < lucky.pool.length
+              ? 'Next of the ideas the model already gave you'
+              : api.lib.settings.endpoint.model
+                ? 'Ask the model for a fresh story seed (uses your starting notes)'
+                : 'No model selected — this rolls one of the built-in ideas',
+        },
+      ),
+      lucky.pool.length > 1
+        ? h('span', {
+            class: 'field-hint',
+            text: `${Math.max(0, lucky.pool.length - lucky.cursor)} more idea(s) from the model — click again`,
+          })
+        : null,
     ),
     chatSection,
     h(

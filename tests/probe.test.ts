@@ -53,15 +53,31 @@ describe('probeCandidate', () => {
     expect(result.detail).toContain('model list empty or unreadable');
   });
 
-  it('treats a resolved non-OK response as reachable, not CORS-blocked', async () => {
+  it('does not call a non-LLM server reachable just because it answered', async () => {
+    // A plain 404/500 on a catalog port means something is listening, but not
+    // an LLM: reporting "✓ reachable" with a Use button let the reader adopt an
+    // unrelated dev server and then wonder why every generation failed.
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => jsonResponse({}, 404)),
     );
     const result = await probeCandidate(candidate, 500);
-    expect(result.status).toBe('reachable');
+    expect(result.status).toBe('absent');
     expect(result.models).toEqual([]);
     expect(result.detail).toContain('HTTP 404');
+  });
+
+  it('treats a 401/403 as a credentials problem, not as a missing server', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({}, 401)),
+    );
+    const result = await probeCandidate(candidate, 500);
+    // Its own status, not "CORS-blocked": a key-protected endpoint is a
+    // supported configuration, and the CORS badge sent readers to configure
+    // server origins when the real fix was pasting their API key.
+    expect(result.status).toBe('unauthorized');
+    expect(result.detail).toContain('API key');
   });
 
   it('distinguishes cors-blocked (TypeError, then opaque) from absent (both fail)', async () => {
