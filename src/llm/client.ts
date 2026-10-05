@@ -159,6 +159,57 @@ async function readSSE(response: Response, onToken: (t: string) => void): Promis
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  /**
+   * The payload lines of the SSE event being assembled.
+   *
+   * The SSE spec lets ONE event carry several `data:` lines, joined with
+   * newlines before parsing. Each line was parsed in isolation here, so such
+   * an event could never parse: its tokens vanished, and an `{error:…}`
+   * delivered that way was swallowed — the stream then ran to [DONE] and the
+   * truncated page was returned as if it had completed.
+   */
+  let eventData: string[] = [];
+  /** Parse one event payload. true = [DONE], false = consumed, null = not parseable (yet). */
+  const asEvent = (payload: string): boolean | null => {
+    if (payload === '[DONE]') return true;
+    try {
+      const json = JSON.parse(payload) as {
+        error?: unknown;
+        choices?: Array<{ delta?: { content?: string } }>;
+        message?: { content?: string };
+      };
+      const error = errorFromPayload(json);
+      if (error) throw error;
+      const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
+      if (typeof delta === 'string' && delta.length > 0) onToken(delta);
+      return false;
+    } catch (err) {
+      rethrowServerError(err);
+      return null;
+    }
+  };
+  /** @returns true when the stream should stop ([DONE]). */
+  const onDataLine = (payload: string): boolean => {
+    if (payload.length === 0) return false;
+    eventData.push(payload);
+    // The event so far: one line in the common single-line dialect (so
+    // streaming is unaffected), several once a split payload becomes valid.
+    const whole = asEvent(eventData.join('\n'));
+    if (whole !== null) {
+      eventData = [];
+      return whole;
+    }
+    // Not a multi-line payload: a server that writes no blank separator
+    // between events — then the last line on its own is the event.
+    if (eventData.length > 1) {
+      const last = asEvent(payload);
+      if (last !== null) {
+        eventData = [];
+        return last;
+      }
+    }
+    return false;
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -166,23 +217,7 @@ async function readSSE(response: Response, onToken: (t: string) => void): Promis
       buffer += decoder.decode(value, { stream: true });
       const { rest, stop } = drainLines(buffer, (line) => {
         if (!line.startsWith('data:')) return false;
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') return true;
-        try {
-          const json = JSON.parse(payload) as {
-            error?: unknown;
-            choices?: Array<{ delta?: { content?: string } }>;
-            message?: { content?: string };
-          };
-          const error = errorFromPayload(json);
-          if (error) throw error;
-          const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
-          if (typeof delta === 'string' && delta.length > 0) onToken(delta);
-        } catch (err) {
-          rethrowServerError(err);
-          // Otherwise it is a partial line; it resumes on the next chunk.
-        }
-        return false;
+        return onDataLine(line.slice(5).trim());
       });
       buffer = rest;
       // Release the stream on an early stop so the socket is not held open.
@@ -191,22 +226,7 @@ async function readSSE(response: Response, onToken: (t: string) => void): Promis
     // A server may end without a trailing newline — salvage the last line.
     const leftover = buffer.trim();
     if (leftover.length > 0 && leftover.startsWith('data:')) {
-      const payload = leftover.slice(5).trim();
-      if (payload !== '[DONE]') {
-        try {
-          const json = JSON.parse(payload) as {
-            error?: unknown;
-            choices?: Array<{ delta?: { content?: string } }>;
-            message?: { content?: string };
-          };
-          const error = errorFromPayload(json);
-          if (error) throw error;
-          const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
-          if (typeof delta === 'string' && delta.length > 0) onToken(delta);
-        } catch (err) {
-          rethrowServerError(err);
-        }
-      }
+      onDataLine(leftover.slice(5).trim());
     }
   } finally {
     await releaseStream(reader);

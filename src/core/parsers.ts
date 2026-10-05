@@ -163,36 +163,45 @@ export function parseStringList(text: string): string[] {
  * back to line-based extraction so the title phase still gets its titles.
  */
 export function parseTitleOptions(text: string): Array<{ title: string; tagline: string }> {
-  let parsed: Array<{ title: string; tagline: string }> = [];
+  const toOption = (item: unknown): { title: string; tagline: string } | null => {
+    if (typeof item === 'string') return { title: item, tagline: '' };
+    if (item && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      const title =
+        typeof record.title === 'string'
+          ? record.title
+          : typeof record.name === 'string'
+            ? record.name
+            : '';
+      if (!title) return null;
+      return { title, tagline: typeof record.tagline === 'string' ? record.tagline : '' };
+    }
+    return null;
+  };
+
+  let json: unknown;
   try {
-    const raw = parseJSONLoose<unknown>(text);
-    const list = Array.isArray(raw)
-      ? raw
-      : raw && typeof raw === 'object'
-        ? (Object.values(raw).find((v) => Array.isArray(v)) ?? [])
-        : [];
-    parsed = (list as unknown[])
-      .map((item) => {
-        if (typeof item === 'string') return { title: item, tagline: '' };
-        if (item && typeof item === 'object') {
-          const record = item as Record<string, unknown>;
-          const title =
-            typeof record.title === 'string'
-              ? record.title
-              : typeof record.name === 'string'
-                ? record.name
-                : '';
-          if (!title) return null;
-          return { title, tagline: typeof record.tagline === 'string' ? record.tagline : '' };
-        }
-        return null;
-      })
-      .filter((x): x is { title: string; tagline: string } => x !== null);
+    json = parseJSONLoose<unknown>(text);
   } catch {
-    parsed = [];
+    // Not JSON at all: the model wrote a list, which the line salvage below
+    // is built for.
+    return parseTitleLines(text);
   }
-  if (parsed.length > 0) return parsed;
-  return parseTitleLines(text);
+
+  // An array, a `{titles: [...]}` wrapper, or the single `{title, tagline}`
+  // object a small model returns instead of a list of one.
+  const list: unknown[] | undefined = Array.isArray(json)
+    ? json
+    : json && typeof json === 'object'
+      ? (Object.values(json).find((value) => Array.isArray(value)) ??
+        (toOption(json) !== null ? [json] : undefined))
+      : undefined;
+  if (list === undefined) return parseTitleLines(text);
+
+  // JSON that parsed IS the answer, even when it holds nothing: re-reading the
+  // JSON text as a line list turned `{"titles": []}` into a title card reading
+  // `{"titles`, and a book can be named after it.
+  return list.map(toOption).filter((x): x is { title: string; tagline: string } => x !== null);
 }
 
 /**
@@ -276,11 +285,20 @@ export function parseBible(text: string, previous: StoryBible | null = null): St
   const entries = (key: 'people' | 'places' | 'things' | 'threads'): BibleEntry[] => {
     const value = object?.[key] ?? object?.cast?.[key as never];
     const list: BibleEntry[] = Array.isArray(value) ? coerceEntries(value) : [];
-    if (list.length === 0 && previous) {
+    if (list.length === 0) {
       // Keep the previous entries for this group — never regress to empty.
-      return base[key];
+      return previous ? base[key] : list;
     }
-    return list;
+    if (!previous) return list;
+    // The model rewrites the group, and the panel PROMISES the reader's
+    // curation survives ("you curate the cast … the model writes with these
+    // names"): an entry the reader added (or renamed by hand) used to vanish
+    // as soon as an update happened not to mention it. Match by
+    // case-insensitive name — the model's version wins for entries it
+    // returned, previous-only entries are kept after them.
+    const returned = new Set(list.map((entry) => entry.name.trim().toLowerCase()));
+    const kept = base[key].filter((entry) => !returned.has(entry.name.trim().toLowerCase()));
+    return [...list, ...kept];
   };
   const caps: Record<'people' | 'places' | 'things' | 'threads', number> = {
     people: 12,

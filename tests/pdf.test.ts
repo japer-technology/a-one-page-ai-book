@@ -108,6 +108,28 @@ describe('pdfBytes', () => {
     // title page + one PDF page per book page + the cast appendix
     expect(pageCount(bytes)).toBeGreaterThanOrEqual(3);
   });
+
+  it('never prints a blank page for a page that ends in a newline', () => {
+    // Model output almost always ends with a newline (it is stored verbatim),
+    // and on a page long enough to reach the bottom margin that trailing blank
+    // line was pushed onto a fresh sheet and then emitted as a real, entirely
+    // empty page.
+    const words = Array.from({ length: 1010 }, (_, i) => `w${i}`).join(' ');
+    const withNewline: CompiledBook = {
+      ...longPageBook(1010),
+      pages: [{ number: 1, text: `${words}\n`, words: 1010 }],
+    };
+    const without: CompiledBook = {
+      ...longPageBook(1010),
+      pages: [{ number: 1, text: words, words: 1010 }],
+    };
+    const blank = (bytes: Uint8Array): number => {
+      const text = new TextDecoder('latin1').decode(bytes);
+      return (text.match(/BT\n\nET/g) ?? []).length;
+    };
+    expect(pageCount(pdfBytes(withNewline))).toBe(pageCount(pdfBytes(without)));
+    expect(blank(pdfBytes(withNewline))).toBe(0);
+  });
 });
 
 describe('PDF wrap guarantees', () => {

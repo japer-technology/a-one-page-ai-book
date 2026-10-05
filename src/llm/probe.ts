@@ -42,6 +42,7 @@ export async function probeCandidate(
   // Pass 1: CORS fetch each model-list URL.
   let lastHttpStatus: number | null = null;
   let networkError = false;
+  let timedOut = false;
   for (const url of urls) {
     const t = timeoutSignal(timeoutMs);
     const started = performance.now();
@@ -70,8 +71,13 @@ export async function probeCandidate(
             : 'server responded; model list empty or unreadable',
       };
     } catch {
-      // TypeError = connection refused OR CORS rejection; abort = timeout.
-      networkError = true;
+      // TypeError = connection refused OR CORS rejection; our own timeout
+      // abort is neither. Setting one flag for both sent a CORS-capable
+      // server that was merely slow (still loading a model) down the "enable
+      // CORS" path — a wrong fix for a working setup — so tell them apart by
+      // the signal we raised.
+      if (t.signal.aborted) timedOut = true;
+      else networkError = true;
     } finally {
       t.cancel();
     }
@@ -95,6 +101,19 @@ export async function probeCandidate(
       detail: unauthorized
         ? `answered HTTP ${lastHttpStatus} — the server is there and wants an API key (add it in Settings, then Save)`
         : `something is listening on that port but it is not an LLM model list (HTTP ${lastHttpStatus})`,
+    };
+  }
+
+  // Slow, but not blocked: nothing answered within the probe deadline and
+  // nothing refused either. Saying "CORS-blocked / enable CORS" here was a
+  // wrong verdict — the same server answers once its model is loaded.
+  if (timedOut && !networkError) {
+    return {
+      candidate,
+      status: 'absent',
+      models: [],
+      latencyMs: null,
+      detail: `did not answer within ${timeoutMs} ms — the server may still be loading its model`,
     };
   }
 
@@ -128,11 +147,18 @@ export async function probeCandidate(
  * Probe all candidates with bounded parallelism. Sequential probing is slow
  * (dozens of seconds worst case); four workers keeps the scan snappy while
  * staying polite to local servers.
+ *
+ * `signal` stops the sweep at the next candidate boundary — this is the local
+ * half of the settings scan, and Cancel has to work from the first moment the
+ * button says "Scanning…", not only once the (much slower) subnet sweep has
+ * started. A probe already in flight is left to expire on its own short
+ * timeout rather than being torn down mid-request.
  */
 export async function discover(
   onProgress?: (result: ProbeResult, index: number, total: number) => void,
   timeoutMs = 1800,
   concurrency = 4,
+  signal?: AbortSignal,
 ): Promise<ProbeResult[]> {
   const results: ProbeResult[] = [];
   const queue = [...CANDIDATES];
@@ -141,9 +167,12 @@ export async function discover(
     { length: Math.max(1, Math.min(concurrency, queue.length)) },
     async () => {
       for (;;) {
+        if (signal?.aborted) return; // stop claiming new candidates
         const candidate = queue.shift();
         if (!candidate) return;
         const result = await probeCandidate(candidate, timeoutMs);
+        // A cancelled sweep reports nothing it did not finish claiming.
+        if (signal?.aborted) return;
         results.push(result);
         // Bump BEFORE reporting: the callback is handed "how many are done",
         // and reporting the pre-increment value made the first result report 0

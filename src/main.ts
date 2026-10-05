@@ -24,7 +24,6 @@ import {
   appendVersionTo,
   attachBible,
   attachSummary,
-  branchTip,
   childrenOf,
   finishBook,
   getNode,
@@ -43,6 +42,7 @@ import {
   setVersionPinned,
   cloneSubtree,
   prologueOf,
+  writableTip,
 } from './core/tree';
 import {
   defaultLibrary,
@@ -171,7 +171,11 @@ class App implements AppApi {
    * replace the reader's whole shelf with an empty one.
    */
   private storageSettled = true;
-  /** Has the reader changed anything yet? Decides who wins a late load. */
+  /**
+   * Has the reader changed anything yet? A late-arriving stored document
+   * supersedes those changes (they were made against a placeholder shelf), and
+   * this is what decides whether the reader is told so.
+   */
   private pristine = true;
   /**
    * Where Help was opened from. Recorded here rather than only in the `?` key
@@ -218,6 +222,15 @@ class App implements AppApi {
 
   navigate(view: ViewName, params: Record<string, string> = {}): void {
     audit(`navigate→${view}`);
+    // The story map and the About view are opened FOR a book that may not be the
+    // session's (`{ book: id }`), and the views they lead to — the ending, the
+    // turn console, a page — render only the session book. Without adopting it,
+    // "🏁 The frontier" on another book's map showed THIS book's ending, or
+    // "No book open." — silently, under the other book's title.
+    const target = params.book
+      ? this.state.lib.books.find((candidate) => candidate.id === params.book)
+      : undefined;
+    if (target) this.state.book = target;
     if (view === 'help' && this.state.view !== 'help') this.returnView = this.state.view;
     clearSpanToolbar();
     stopReplay();
@@ -249,6 +262,26 @@ class App implements AppApi {
       return;
     }
     const frontier = getNode(this.state.lib.nodes, book.frontierId);
+    // A prologue (or an ending) can be the stored frontier of a book that is
+    // still marked in-progress — `branchTip` follows the newest child, and The
+    // End screen attaches the prologue to the title after the pages. Neither is
+    // a node the writing view can render, so such a book used to bounce back to
+    // the Library on every attempt to continue it: repair the frontier here,
+    // once, and the reader is writing again.
+    if (frontier && (frontier.kind === 'prologue' || frontier.kind === 'ending')) {
+      const repaired =
+        writableTip(this.state.lib.nodes, book.chosenTitleId) ??
+        writableTip(this.state.lib.nodes, book.seedNodeId);
+      if (repaired) {
+        const target = repaired;
+        this.update((lib) => ({
+          ...lib,
+          books: replaceBook(lib, setFrontier(book, target.id)),
+        }));
+        this.navigate(target.kind === 'turn' ? 'turn' : 'page');
+        return;
+      }
+    }
     if (!frontier || frontier.kind === 'title') this.navigate('page');
     else if (frontier.kind === 'page') this.navigate('page');
     else if (frontier.kind === 'turn')
@@ -309,9 +342,11 @@ class App implements AppApi {
     // render against a stale frontier — the classic "generated but nothing
     // changed" bug.
     const open = this.state.book;
-    if (open) {
-      this.state.book = this.state.lib.books.find((b) => b.id === open.id) ?? open;
-    }
+    // A recipe that REPLACES the shelf (a library import, "wipe everything")
+    // takes the open book with it. Keeping the session's pointer to a book that
+    // no longer exists left the header offering "Story map / Read" for a
+    // deleted book, and following either link landed on an empty reader.
+    this.state.book = open ? (this.state.lib.books.find((b) => b.id === open.id) ?? null) : null;
     this.scheduleSave();
     this.render();
   }
@@ -1045,13 +1080,17 @@ class App implements AppApi {
    * ready for page 1. Nothing on any other branch is touched.
    */
   openBranch(book: Book, option: TitleOption): void {
+    // Adopt the book BEFORE re-frontiering and navigating: the story map's
+    // "Enter" doors work on a book that is not open, and every view they land on
+    // reads the session book — so the frontier moved while the reader was left
+    // on "No book open." (or inside whatever other book WAS open).
+    this.state.book = this.state.lib.books.find((b) => b.id === book.id) ?? book;
     const titleNode = this.ensureTitleNode(book.seedNodeId, option);
     audit(`openBranch book=${book.id} title=${titleNode.id}`);
-    let tip = branchTip(this.state.lib.nodes, titleNode.id);
-    if (tip.kind === 'ending') {
-      const parent = getNode(this.state.lib.nodes, tip.parentId ?? '');
-      if (parent) tip = parent;
-    }
+    // Re-enter at the newest node that can actually be written — never at an
+    // ending or at the prologue The End screen attached after the pages (see
+    // `writableTip`).
+    const tip = writableTip(this.state.lib.nodes, titleNode.id) ?? titleNode;
     this.update((lib) => ({
       ...lib,
       books: replaceBook(lib, {
@@ -1334,10 +1373,18 @@ class App implements AppApi {
       if (loaded.ok) {
         audit('persistNow adopted document written by another tab');
         this.state.lib = loaded.lib;
+        // Re-derive the session's open book, exactly as `update()` does: the
+        // adopted document is a different object graph, and a pointer to the
+        // discarded one left views rendering a book that is no longer in
+        // `lib.books` — and the next mutator wrote THAT object back
+        // (`replaceBook(lib, setFrontier(book, …))`), silently reverting every
+        // book-level change the other tab had just saved.
+        const open = this.state.book;
+        this.state.book = open ? (loaded.lib.books.find((b) => b.id === open.id) ?? null) : null;
         this.knownStoredRevision = loaded.lib.meta.updatedAt;
         this.render();
         this.toast(
-          'Another Page Turn tab saved newer changes — they were loaded and this tab is in sync.',
+          'Another Page Turn tab saved newer changes — they were loaded and this tab is in sync. The change that triggered this save was superseded.',
           'info',
         );
         return; // their document is already stored; nothing to write
@@ -1373,8 +1420,8 @@ class App implements AppApi {
   /**
    * Called when boot gave up waiting on the database. The app is usable
    * immediately, but stays write-locked until the real read lands: then the
-   * late library is adopted (if the reader has not written anything yet) and
-   * normal saving resumes.
+   * late library is adopted — it is the reader's shelf, and the placeholder is
+   * empty — and normal saving resumes.
    *
    * A late read that FAILED must keep the write lock. Taking `?.lib ?? null`
    * here threw away `LoadResult.ok`, so a failed read looked like "nothing was
@@ -1402,10 +1449,43 @@ class App implements AppApi {
           );
           return; // storageSettled stays false: saves are refused from here on
         }
-        if (this.pristine && late.lib.books.length > 0) {
+        if (late.lib.books.length > 0) {
+          // Their shelf wins, whether or not they have touched something in the
+          // meantime. Dropping the document when `pristine` was false and then
+          // re-baselining to its revision (below) made the compare-and-swap see
+          // "nothing moved", so the very next save wrote this EMPTY fallback
+          // library over every book — no error, no toast, nothing to undo on
+          // file://. The in-window change is superseded instead, and said so.
+          const superseded = !this.pristine;
           this.state.lib = late.lib;
+          this.state.book = null;
+          this.knownStoredRevision = late.lib.meta.updatedAt;
+          this.storageSettled = true;
           this.render();
+          if (superseded) {
+            this.toast(
+              'Your saved library was loaded — the change made while it was still loading was not kept.',
+              'info',
+            );
+          }
+          return;
         }
+        // No BOOKS are stored — but the record itself may still exist, and an
+        // empty-but-real document carries the reader's settings: endpoint,
+        // model, API key, theme, fonts, templates, reading positions. Writing
+        // the in-memory fallback (default settings) over it silently reset all
+        // of that — the same class of loss the books branch above refuses.
+        // Keep their settings; the shelf keeps whatever is in memory (a fresh
+        // profile has none, and a book created during the boot window stays).
+        this.state.lib = {
+          ...this.state.lib,
+          settings: late.lib.settings,
+          // …and the STORED revision, not the placeholder's 0. Writing a
+          // backwards revision made any other tab whose baseline was the real
+          // stamp see a "moved" document and adopt it — discarding the edit
+          // that triggered its save, with a toast blaming another tab.
+          meta: { ...this.state.lib.meta, updatedAt: late.lib.meta.updatedAt },
+        };
         // The baseline must be the revision of the document that is ACTUALLY
         // stored. Boot set it to the fallback document's stamp (0 on a fresh
         // profile), so the very next save saw a "moved" revision, adopted the
@@ -1414,6 +1494,9 @@ class App implements AppApi {
         this.knownStoredRevision = late.lib.meta.updatedAt;
         this.storageSettled = true;
         void this.persistNow();
+        // The adopted settings are the ones on screen from now on (theme,
+        // fonts, endpoint) — repaint so the reader sees them.
+        this.render();
       },
       () => {
         // The read rejected outright: we still know nothing about storage.
@@ -1428,6 +1511,11 @@ class App implements AppApi {
     this.applyAppearance();
     const content = dispatchView(this);
     renderShell(this, content, this.state.toasts);
+    // The shell was just rebuilt, which recreated the working light WITHOUT the
+    // inline style `renderActiveState` sets (and the stylesheet hides it by
+    // default) — so any re-render mid-request put the light out while the model
+    // was still writing, which is exactly when the reader looks for it.
+    this.renderActiveState();
   }
 }
 
@@ -1490,11 +1578,7 @@ async function boot(): Promise<void> {
   // whether it SUCCEEDED. A timed-out read means "slow", and a failed read
   // means "unreadable": neither is "empty", and neither may ever be saved back
   // over the real document.
-  let dbAnswered = false;
-  const dbLoad = loadLibrary().then((value) => {
-    dbAnswered = true;
-    return value;
-  });
+  const dbLoad = loadLibrary();
   const first = await withTimeout(dbLoad, 1500, null);
   let lib: Library | null = first?.lib ?? null;
   const opfs = await withTimeout(readOpfsLibrary(), 1500, null);
@@ -1528,10 +1612,15 @@ async function boot(): Promise<void> {
 
   const app = new App(lib, viewFromHash() ?? 'library');
   app.setBaselineRevision(lib.meta.updatedAt);
-  if (!dbAnswered) {
-    // Pass the whole LoadResult: a late FAILURE must keep saving disabled.
+  if (first === null) {
+    // The race timed out — we know nothing about storage yet. Pass the whole
+    // LoadResult: a late FAILURE must keep saving disabled, and a late success
+    // is adopted by holdPersistenceUntil. (Sampling an "answered" flag AFTER
+    // the OPFS await was the bug: a read that settled just past the grace
+    // period took neither this path nor the unreadable one, so the empty
+    // fallback library was painted and then saved over a real document.)
     app.holdPersistenceUntil(dbLoad);
-  } else if (first && !first.ok) {
+  } else if (!first.ok) {
     // The stored library exists but could not be read. Park a copy under a
     // SEPARATE key — which cannot damage the original.
     const recoveredFromOpfs = lib.books.length > 0;

@@ -88,6 +88,12 @@ export function renderLibrary(api: AppApi): HTMLElement {
   });
 
   const list = h('div', { class: 'book-list' });
+  // The note below is a CHILD of this wrapper, never a sibling of `list`: the
+  // view is built detached and mounted by the shell afterwards, so
+  // `list.after(note)` was a silent no-op on every re-render — a sort change
+  // with a non-matching query left an empty-looking shelf with the query still
+  // in the box, exactly what the note exists to explain.
+  const listWrap = h('div', { class: 'book-list-wrap' }, list);
   const empty =
     books.length === 0
       ? activeTag
@@ -147,7 +153,7 @@ export function renderLibrary(api: AppApi): HTMLElement {
     // A search that matches nothing used to show a blank page with no
     // explanation — indistinguishable from an empty shelf.
     if (list.childElementCount > 0 && needle !== '' && shown === 0) {
-      if (!noResults.isConnected) list.after(noResults);
+      if (noResults.parentElement !== listWrap) listWrap.appendChild(noResults);
     } else if (noResults.isConnected) {
       noResults.remove();
     }
@@ -239,7 +245,7 @@ export function renderLibrary(api: AppApi): HTMLElement {
     ),
   );
 
-  return h('div', { class: 'view view-library' }, empty, shelf, nudge, tagChips, toolbar, list);
+  return h('div', { class: 'view view-library' }, empty, shelf, nudge, tagChips, toolbar, listWrap);
 }
 
 function bookCard(api: AppApi, book: Book): HTMLElement {

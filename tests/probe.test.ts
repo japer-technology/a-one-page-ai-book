@@ -149,6 +149,47 @@ describe('discover', () => {
     expect(maxInFlight).toBeGreaterThan(1);
     expect(maxInFlight).toBeLessThanOrEqual(4);
   });
+
+  it('stops claiming candidates once the sweep is cancelled', async () => {
+    // The local half of the settings scan is cancellable from the first
+    // moment: the cancel button used to be a dead click until the (much
+    // slower) subnet sweep had started. Cancel lands between candidates — the
+    // probe already in flight is left to expire on its own short timeout.
+    const controller = new AbortController();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    let firstResultSeen = false;
+    const results = await discover(
+      () => {
+        if (firstResultSeen) return;
+        firstResultSeen = true;
+        controller.abort();
+      },
+      200,
+      1,
+      controller.signal,
+    );
+    expect(controller.signal.aborted).toBe(true);
+    expect(results.length).toBe(1);
+    expect(results.length).toBeLessThan(CANDIDATES.length);
+  });
+
+  it('probes nothing at all when the signal is already aborted', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    controller.abort();
+    const results = await discover(undefined, 200, 4, controller.signal);
+    expect(results).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('bestReachable', () => {

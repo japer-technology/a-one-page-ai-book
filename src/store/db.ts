@@ -23,6 +23,18 @@ export function dbSupported(): boolean {
 
 function openDB(): Promise<IDBDatabase> {
   if (!dbPromise) {
+    /**
+     * The promise `dbPromise` actually holds for this connection.
+     *
+     * The recovery handlers below have to compare against the promise that was
+     * CACHED, not the raw `attempt`: `dbPromise` holds `attempt.catch(…)`, so
+     * `dbPromise === attempt` is never true and the cache was never dropped —
+     * a browser-closed connection (eviction, "clear site data", another tab
+     * upgrading) stayed cached, and every later read and write threw
+     * InvalidStateError for the rest of the session. The reader kept writing
+     * into the void, with "Saving to local storage failed" on every save.
+     */
+    let cached: Promise<IDBDatabase> | null = null;
     const attempt = new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = () => {
@@ -40,22 +52,23 @@ function openDB(): Promise<IDBDatabase> {
         // upgrading): drop the cache so the next call reopens instead of
         // throwing InvalidStateError on every transaction.
         db.onclose = () => {
-          if (dbPromise === attempt) dbPromise = null;
+          if (cached !== null && dbPromise === cached) dbPromise = null;
         };
         db.onversionchange = () => {
           db.close();
-          if (dbPromise === attempt) dbPromise = null;
+          if (cached !== null && dbPromise === cached) dbPromise = null;
         };
         resolve(db);
       };
       request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
     });
-    // Never cache a rejection: one transient failure must not disable
-    // persistence until the page is reloaded.
-    dbPromise = attempt.catch((err: unknown) => {
-      dbPromise = null;
+    cached = attempt.catch((err: unknown) => {
+      // Never cache a rejection: one transient failure must not disable
+      // persistence until the page is reloaded.
+      if (dbPromise === cached) dbPromise = null;
       throw err;
     });
+    dbPromise = cached;
   }
   return dbPromise;
 }
@@ -153,8 +166,20 @@ export async function saveLibrary(lib: Library): Promise<void> {
  * safe even when we have decided not to touch the main record at all — and it
  * turns "your books are gone" into "your books are recoverable by hand".
  */
+/**
+ * Set when the reader wipes the library. A stash that commits AFTER the wipe
+ * (the boot-time stash is async and can land seconds later) re-parks a full
+ * copy of the story — invisible to the UI and to the wipe that promised to
+ * remove it.
+ */
+let wipedSinceLoad = false;
+
 export async function stashUnreadableDocument(raw: unknown): Promise<string | null> {
   if (!dbSupported() || raw === undefined) return null;
+  // The reader has since asked for everything to be gone: parking a recovery
+  // copy now would resurrect what the wipe removed (the wipe's store.clear()
+  // already runs, and this write would land after it).
+  if (wipedSinceLoad) return null;
   try {
     const db = await openDB();
     const tx = db.transaction(STORE, 'readwrite');
@@ -173,9 +198,19 @@ export async function stashUnreadableDocument(raw: unknown): Promise<string | nu
 
 export async function clearLibrary(): Promise<void> {
   if (!dbSupported()) return;
+  // Latch BEFORE the transaction: a boot-time stash (async — it can settle
+  // seconds after the read that spawned it) must not re-park a copy of the
+  // story after the reader has asked for it to be gone.
+  wipedSinceLoad = true;
   const db = await openDB();
   const tx = db.transaction(STORE, 'readwrite');
-  tx.objectStore(STORE).delete(KEY);
+  // The whole store, not just the main record: "Delete every book, every page,
+  // every decision?" has to mean it. Documents parked by
+  // `stashUnreadableDocument` under `library.unreadable.*` hold a COMPLETE copy
+  // of the story — every book, every page — and no UI can remove them. The
+  // OPFS half of the same button wipes everything the app owns for exactly
+  // this reason (`clearOpfsLibrary`).
+  tx.objectStore(STORE).clear();
   await new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error ?? new Error('IndexedDB clear failed'));

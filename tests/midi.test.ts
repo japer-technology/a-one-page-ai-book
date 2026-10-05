@@ -45,4 +45,36 @@ describe('midiBytes', () => {
     expect(hasNoteOn).toBe(true);
     expect(hasEOT).toBe(true);
   });
+
+  it('plays each note for as long as the score says it lasts', () => {
+    // The file used to write 400 ticks (0.42 s at 120 bpm) while the score —
+    // and the in-app player — declared 900 ms, so an exported score played
+    // 2.16× faster than the preview it was exported from.
+    const bytes = midiBytes(book());
+    const ticksPerQuarter = new DataView(
+      bytes.buffer,
+      bytes.byteOffset,
+      bytes.byteLength,
+    ).getUint16(12, false);
+    const tempoUs = 500000; // the tempo event the file writes
+    // Read the delta-time VLQ before the first note-off (0x80).
+    let i = 18;
+    let noteOffTicks = 0;
+    while (i < bytes.length) {
+      let value = 0;
+      let byte = 0;
+      do {
+        byte = bytes[i++] ?? 0;
+        value = (value << 7) | (byte & 0x7f);
+      } while ((byte & 0x80) !== 0);
+      const status = bytes[i] ?? 0;
+      if (status === 0x80) {
+        noteOffTicks = value;
+        break;
+      }
+      i += status === 0x90 ? 2 : 0;
+    }
+    const millis = (noteOffTicks * tempoUs) / ticksPerQuarter / 1000;
+    expect(Math.round(millis)).toBe(scoreNotes(book())[0]!.durationMs);
+  });
 });

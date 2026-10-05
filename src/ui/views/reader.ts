@@ -120,9 +120,17 @@ export function renderReader(api: AppApi): HTMLElement {
         }
         api.refresh();
       };
-      utterance.onerror = () => {
+      utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
         if (seq !== speakSeq) return;
         speaking = false;
+        // Silence with no explanation reads as "the narrator is broken by
+        // design". The no-API case already toasts; synthesis that EXISTS but
+        // fails (no voices installed, the engine refuses) deserves the same —
+        // otherwise the button just blinks back with nothing said.
+        api.toast(
+          `Read-aloud failed — speech synthesis reported “${event.error || 'error'}”. No voice may be installed on this device.`,
+          'info',
+        );
         api.refresh();
       };
       speaking = true;
@@ -423,6 +431,12 @@ function installReaderKeys(
       const delta = event.key === 'ArrowRight' ? 1 : -1;
       const next = Math.min(Math.max(state.pos + delta, 0), state.max);
       if (next === state.pos) return;
+      // Exactly what the on-screen arrows do: a page turn stops the narration
+      // (otherwise it keeps reading the page the reader just left, and then
+      // bedtime mode's onend advances from the NEW position — skipping one)
+      // and starts the next page at the top.
+      stopReaderSpeech();
+      window.scrollTo({ top: 0 });
       positions.set(state.book.id, next);
       state.api.setReadingPosition(state.book.id, next);
     }

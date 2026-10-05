@@ -53,7 +53,11 @@ export function renderTheEnd(api: AppApi): HTMLElement {
       h('h1', { class: 'title-hero', text: title }),
       h('p', {
         class: 'book-meta',
-        text: `${plural(compiled.pages.length, 'page')} · ${plural(compiled.words, 'word')} kept`,
+        // Real pages only: the prologue occupies a slot but is not a numbered
+        // page, and every other surface (the reader, About) counts it that
+        // way — The End was the one screen showing one more page than the
+        // reader did.
+        text: `${plural(stats.pages, 'page')} · ${plural(compiled.words, 'word')} kept`,
       }),
       h('p', {
         class: 'book-meta',

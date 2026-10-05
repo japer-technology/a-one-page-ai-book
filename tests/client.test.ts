@@ -352,3 +352,39 @@ describe('a busy single-slot server', () => {
     expect(isTransientLLMError(new Error('LLM server responded 503'))).toBe(true);
   });
 });
+
+describe('multi-line SSE events', () => {
+  it('joins data: lines of one event instead of dropping them', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse('text/event-stream', [
+          'data: {"choices":[{"delta":{"content":\n',
+          'data: "Hello"}}]}\n\ndata: [DONE]\n\n',
+        ]),
+      ),
+    );
+    const tokens: string[] = [];
+    const text = await chat(
+      { endpoint: openai, model: 'm', onToken: (t) => tokens.push(t) },
+      MESSAGES,
+    );
+    expect(text).toBe('Hello');
+    expect(tokens.join('')).toBe('Hello');
+  });
+
+  it('still throws when an error payload spans several data: lines', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse('text/event-stream', [
+          'data: {"error":\n',
+          'data: "CUDA out of memory"}\n\ndata: [DONE]\n\n',
+        ]),
+      ),
+    );
+    await expect(
+      chat({ endpoint: openai, model: 'm', onToken: () => {} }, MESSAGES),
+    ).rejects.toThrow(/CUDA out of memory/);
+  });
+});

@@ -27,6 +27,20 @@ export interface ScoreNote {
   label: string;
 }
 
+/**
+ * How long one note sounds, in milliseconds. The in-app player (`ui/sound.ts`)
+ * and the exported file both read it from here: they used to disagree by 2.16×,
+ * because the file wrote 400 ticks (0.42 s at 120 bpm) while the score declared
+ * 900 ms — so a score exported to .mid played more than twice as fast as the
+ * preview it was exported from.
+ */
+const NOTE_MS = 900;
+
+/** The tempo the file declares: 500 000 µs per quarter note = 120 bpm. */
+const TEMPO_US_PER_QUARTER = 500000;
+
+const TICKS_PER_QUARTER = 480;
+
 /** The mood map as a sequence of notes. */
 export function scoreNotes(compiled: CompiledBook): ScoreNote[] {
   const notes: ScoreNote[] = [];
@@ -37,7 +51,7 @@ export function scoreNotes(compiled: CompiledBook): ScoreNote[] {
     notes.push({
       note: Math.max(21, Math.min(108, base + (value > 0 ? 12 : value < 0 ? -12 : 0))),
       velocity: 60 + Math.min(67, Math.abs(value) * 22),
-      durationMs: 900,
+      durationMs: NOTE_MS,
       label: `${page.kind === 'prologue' ? 'Prologue' : `Page ${page.number}`}: ${page.mood.label} ${value > 0 ? '+' : ''}${value}`,
     });
   }
@@ -54,8 +68,10 @@ function vlq(value: number): number[] {
 
 export function midiBytes(compiled: CompiledBook): Uint8Array {
   const notes = scoreNotes(compiled);
-  const ticksPerQuarter = 480;
-  const noteTicks = 400; // ~0.83s per note at 120bpm
+  const ticksPerQuarter = TICKS_PER_QUARTER;
+  // The score's own note length, converted into ticks at the declared tempo —
+  // never a second, hand-maintained guess at what "one note" means.
+  const noteTicks = Math.round((NOTE_MS * ticksPerQuarter * 1000) / TEMPO_US_PER_QUARTER);
   const header = [
     0x4d,
     0x54,
@@ -77,7 +93,14 @@ export function midiBytes(compiled: CompiledBook): Uint8Array {
   const event = (delta: number, bytes: number[]) => {
     track.push(...vlq(delta), ...bytes);
   };
-  event(0, [0xff, 0x51, 0x03, 0x07, 0xa1, 0x20]); // tempo 500000 µs/qn = 120bpm
+  event(0, [
+    0xff,
+    0x51,
+    0x03,
+    (TEMPO_US_PER_QUARTER >> 16) & 0xff,
+    (TEMPO_US_PER_QUARTER >> 8) & 0xff,
+    TEMPO_US_PER_QUARTER & 0xff,
+  ]); // 500000 µs/qn = 120bpm
   for (const n of notes) {
     event(0, [0x90, n.note, n.velocity]);
     event(noteTicks, [0x80, n.note, 0]);

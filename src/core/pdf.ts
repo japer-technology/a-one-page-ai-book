@@ -437,7 +437,12 @@ function paginate(lines: TextLine[], streams: Uint8Array[], leading = LEADING): 
   let y = PAGE_H - MARGIN;
   let ops: string[] = [];
   const flush = () => {
-    streams.push(cp1252(`BT\n${ops.join('\n')}\nET`));
+    // A page with nothing drawn on it is never emitted. The trailing blank
+    // line of a long page is pushed onto a fresh page by the page-break checks
+    // below, and the closing flush used to turn that empty page into a real
+    // one: printed output gained a completely blank sheet after any page whose
+    // text ended in a newline — which is how local models end most pages.
+    if (ops.length > 0) streams.push(cp1252(`BT\n${ops.join('\n')}\nET`));
     ops = [];
     y = PAGE_H - MARGIN;
   };

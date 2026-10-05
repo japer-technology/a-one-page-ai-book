@@ -3,8 +3,6 @@
 :root {
   --paper: #f2e9d8;
   --paper-dim: #d8cdb8;
-  --ink: #1c1712;
-  --ink-soft: #4a4138;
 
   --bg: #14100e;
   --bg-raised: #1e1915;
@@ -67,21 +65,19 @@
 :root[data-theme='sepia'] {
   --paper: #3d3122;
   --paper-dim: #5a4a33;
-  --ink: #f0e6d2;
-  --ink-soft: #8a755a;
 
   --bg: #eadfc8;
   --bg-raised: #f2e9d8;
   --bg-card: #f4ecdc;
   --line: #d3c3a3;
 
-  --accent: #8a5a1e;
+  --accent: #774d1a;
   --accent-strong: #6f4714;
   --accent-ink: #f7ecd8;
 
-  --danger: #a33b2f;
-  --ok: #4c7a4c;
-  --warn: #8a6a1e;
+  --danger: #8e3329;
+  --ok: #3a5d3a;
+  --warn: #755a1a;
   --cool: #3f6b87;
   /* Was #8a755a — only 3.33:1 on this background, which put every label,
      hint, meta line and badge below AA in the sepia theme. */
@@ -98,8 +94,6 @@
 :root[data-theme='light'] {
   --paper: #26241f;
   --paper-dim: #57503f;
-  --ink: #ffffff;
-  --ink-soft: #6f685a;
 
   --bg: #f4f1e9;
   --bg-raised: #ffffff;
@@ -110,8 +104,8 @@
   --accent-strong: #5a420e;
   --accent-ink: #ffffff;
 
-  --danger: #a63a32;
-  --ok: #3a703a;
+  --danger: #9f3830;
+  --ok: #356735;
   --warn: #755a10;
   --cool: #35617c;
   --muted: #6f685a;

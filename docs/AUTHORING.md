@@ -695,9 +695,20 @@ Everything above, distilled into the habits of a great Page Turn director.
 
 ## 16. Troubleshooting & failure modes
 
-- **No model found.** Settings → 🔍 Scan for local LLMs. The scanner probes the standard local
+- **No model found.** Settings → 🔍 Scan for local LLMs. One press probes the standard local
   inference ports (LM Studio, Ollama, llama.cpp, KoboldCpp, text-generation-webui, GPT4All, vLLM,
-  Jan, AnythingLLM, Msty) and reports reachable / CORS-blocked / not found, with fixes.
+  Jan, AnythingLLM, Msty) on this machine, and — when the app has worked out which network you are
+  on — every address of that subnet too. Each result reads reachable / CORS-blocked / needs key /
+  not found, and the ports that answered nothing stay folded away so the working server is the first
+  thing you see.
+- **The server is on another computer and was not found.** Settings → step 1. The app names the
+  network it detected under the scan button; if it could not tell, pick the right subnet from the
+  chips (or type it) and press **🌐 Sweep this network** — that control exists precisely for a range
+  nothing has answered on yet, and it costs a slow sweep, so the one-button scan skips it.
+- **Only one model listed, and not the one you want.** Step 2 lists what the _server_ reports, best
+  first with a ★ on the app's own pick — after loading another model in LM Studio or running
+  `ollama pull`, press **↻ Reload models**. If the name is missing entirely, choose **Other — type a
+  name…** and write it exactly as the server knows it.
 - **CORS-blocked** means a server answered but refused this page's origin: enable CORS for localhost
   in the server, or run the app from a localhost URL (`pnpm dev`) instead of `file://`.
 - **Slow pages.** Local models can take minutes per page — the streaming panel shows every token,
@@ -767,8 +778,9 @@ conflict checker · content-rating hints at seed time.
 
 **Iron Author:** unlimited · three strikes · iron (no re-rolls).
 
-**Models:** scan 10 local servers · LAN subnet scan · manual URL (both OpenAI-compatible and
-Ollama-native dialects) · optional API key · fast model per phase · per-page model metadata.
+**Models:** one-button scan of this machine + the detected LAN subnet · best-model-first picker with
+reload and free-text fallback · manual URL (both OpenAI-compatible and Ollama-native dialects) ·
+optional API key · fast model per phase · per-page model metadata.
 
 **Exports:** EPUB · PDF (6×9) · .txt · .md · director's cut (.md) · MIDI score · quote card PNG ·
 .ptbook.json · .ptlibrary.json.

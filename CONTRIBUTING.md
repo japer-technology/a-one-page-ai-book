@@ -31,7 +31,14 @@ all devDependencies are tooling (esbuild, typescript, vitest, eslint, prettier).
 - **Typecheck** — TypeScript strict, `noUncheckedIndexedAccess` on. No `as any`.
 - **Lint** — ESLint with typescript-eslint recommended. No unused code.
 - **Format** — Prettier (config in `.prettierrc.json`). `pnpm fmt` before committing.
-- **Tests** — pure domain changes require or update unit tests in `tests/`. Run `pnpm test`.
+- **Tests** — pure domain changes require or update unit tests in `tests/`. Run `pnpm test`. Views
+  (`src/ui/**`) are testable in the same suite: a test file starting with
+  `// @vitest-environment happy-dom` can mount a REAL view via
+  `mountView(new StubApp(lib, book), renderFoo)` from `tests/helpers/view-harness.ts` and assert on
+  the rendered DOM plus the stub's recorded calls. `tests/views/*.test.ts` are the models. The stub
+  repaints on `update()`/`refresh()` exactly like the shell, so re-render bugs (a control a
+  re-render deletes, a stale panel, a form that stays open) are catchable — a view fix without such
+  a test is only half a fix.
 - **E2E (when touching discovery/settings/generation)** — `pnpm build && pnpm test:e2e` drives the
   real built file in headless Chromium (requires `chromium` in PATH) against a mock LLM server: boot
   → scan → use → save → test connection. Run it before merging anything in `src/llm`,
@@ -40,17 +47,22 @@ all devDependencies are tooling (esbuild, typescript, vitest, eslint, prettier).
   Focused browser checks live beside it in `scripts/e2e/`; each one exits non-zero on a failed
   assertion, so they work as regression tests:
 
-  | script                | what it protects                                                                                                                                                  |
-  | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `single-slot.mjs`     | a book with only a first page against a ONE-generation-slot server (`PT_MOCK_SERIAL=1`): one generation + one upkeep call, no error toast, no busy-server failure |
-  | `upkeep-failure.mjs`  | a failed background upkeep is quiet in the UI but still retryable (`PT_MOCK_BAD_JSON=1`)                                                                          |
-  | `seed-ideas.mjs`      | the dice ask the model, walk a batch, and fall back honestly; the pre-writing conversation is cleared on request and when a book is born                          |
-  | `session-measure.mjs` | a long session: the pre-writing chain stays windowed, the request log is bounded (`PT_MOCK_LOG=<path>`)                                                           |
-  | `lan-scan.mjs`        | a LAN sweep states its size, finds a responder, and a CANCELLED sweep is never reported as "No LLM servers found"                                                 |
+  | script                | what it protects                                                                                                                                                                   |
+  | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `single-slot.mjs`     | a book with only a first page against a ONE-generation-slot server (`PT_MOCK_SERIAL=1`): one generation + one upkeep call, no error toast, no busy-server failure                  |
+  | `upkeep-failure.mjs`  | a failed background upkeep is quiet in the UI but still retryable (`PT_MOCK_BAD_JSON=1`)                                                                                           |
+  | `seed-ideas.mjs`      | the dice ask the model, walk a batch, and fall back honestly; the pre-writing conversation is cleared on request and when a book is born                                           |
+  | `session-measure.mjs` | a long session: the pre-writing chain stays windowed, the request log is bounded (`PT_MOCK_LOG=<path>`)                                                                            |
+  | `lan-scan.mjs`        | a LAN sweep states its size, finds a responder, and a CANCELLED sweep is never reported as "No LLM servers found"                                                                  |
+  | `detect-subnet.mjs`   | a browser that reveals its own address (stubbed WebRTC) is believed at once: no probe is fired at any other range, and the one-button scan sweeps the revealed network             |
+  | `panel-state.mjs`     | an inline-edit draft stays with the selection it was typed for (a new selection never reopens it), and the story-memory panel keeps its expanded/collapsed state across re-renders |
 
-  `bash scripts/e2e/dev-up.sh` starts the mock LLM plus a throwaway-profile Chromium on the built
-  file; `bash scripts/e2e/dev-down.sh` stops both. Rebuild (`pnpm build`) BEFORE `dev-up.sh`, or the
-  browser will load the previous bundle.
+| `seed-cancel.mjs` | a request the reader stopped by navigating away is not reported as a model
+failure: no fake "didn't answer" chat turn, no fallback seed over the seed box, no failure toast |
+
+`bash scripts/e2e/dev-up.sh` starts the mock LLM plus a throwaway-profile Chromium on the built
+file; `bash scripts/e2e/dev-down.sh` stops both. Rebuild (`pnpm build`) BEFORE `dev-up.sh`, or the
+browser will load the previous bundle.
 
 - **Build** — the single-file build must succeed and pass its emit-time safety checks.
 
@@ -60,8 +72,9 @@ all devDependencies are tooling (esbuild, typescript, vitest, eslint, prettier).
 - Views are functions of the `AppApi` contract (`src/ui/ctx.ts`) and nothing else; all durable
   mutation goes through `api.update` or the tree mutators.
 - LLM output enters the DOM only as text nodes (via `dom.ts`) — never as HTML.
-- The single-file contract is load-bearing: `dist/` is never committed or hand-edited; if a change
-  would break the inliner's safety checks, the build must fail.
+- The single-file contract is load-bearing: `dist/` is generated by the build, committed so the
+  single file is ready to open, and never hand-edited; if a change would break the inliner's safety
+  checks, the build must fail.
 - New structured LLM output goes through `core/parsers.ts` (tolerant parsing) and gets a test.
 
 ## Where to add things

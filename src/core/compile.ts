@@ -61,6 +61,30 @@ export function joinParagraphs(paragraphs: string[]): string {
   return paragraphs.join('\n\n');
 }
 
+/**
+ * Where a model-written paragraph goes in a page's paragraph list: `rewrite`
+ * replaces the one at `index`, `insert` puts the new one AFTER it (the “＋”
+ * tool), `add` appends at the end (the “＋ Add a paragraph” rail).
+ */
+export function applyParagraphEdit(
+  paragraphs: string[],
+  index: number,
+  text: string,
+  mode: 'rewrite' | 'insert' | 'add',
+): string[] {
+  const next = [...paragraphs];
+  if (mode === 'insert') {
+    next.splice(index + 1, 0, text);
+  } else if (mode === 'add' || next[index] === undefined) {
+    // A rewrite whose paragraph is gone lands as an appended one rather than
+    // replacing whatever now sits at that index.
+    next.push(text);
+  } else {
+    next[index] = text;
+  }
+  return next;
+}
+
 export function slugify(title: string): string {
   const slug = title
     .toLowerCase()

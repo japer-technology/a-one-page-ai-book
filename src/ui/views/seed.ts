@@ -140,6 +140,16 @@ let chatOpen = false;
 /** How many recent exchanges the BRIEF is distilled from (a longer window). */
 const BRIEF_EXCHANGES_SENT = 20;
 
+/**
+ * A request the reader stopped (or that a newer one superseded) is not a
+ * model failure: navigation aborts the in-flight call, and reporting that as
+ * "the model didn't answer"/"could not roll an idea" filled the transcript and
+ * the toast stack with a failure that never happened.
+ */
+function isCancelled(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
 export function renderSeed(api: AppApi): HTMLElement {
   const textarea = h('textarea', {
     class: 'seed-input',
@@ -291,14 +301,16 @@ export function renderSeed(api: AppApi): HTMLElement {
       offerSeed(ideas[0] ?? '');
       api2.toast('Rolled by the model — click again for another', 'info');
     } catch (err) {
-      // Honest fallback: say what happened, then still fill the box.
-      const idea = fallbackSeed();
-      lucky.offered.push(idea);
-      offerSeed(idea);
-      api2.toast(
-        `The model could not roll an idea (${api2.genError(err)}) — here is one of ours.`,
-        'info',
-      );
+      if (!isCancelled(err)) {
+        // Honest fallback: say what happened, then still fill the box.
+        const idea = fallbackSeed();
+        lucky.offered.push(idea);
+        offerSeed(idea);
+        api2.toast(
+          `The model could not roll an idea (${api2.genError(err)}) — here is one of ours.`,
+          'info',
+        );
+      }
     } finally {
       lucky.busy = false;
       api2.refresh();
@@ -371,10 +383,15 @@ export function renderSeed(api: AppApi): HTMLElement {
       });
       chat.messages.push({ role: 'assistant', content: reply.trim() });
     } catch (err) {
-      chat.messages.push({
-        role: 'assistant',
-        content: `(The model didn't answer: ${api.genError(err)})`,
-      });
+      // A cancel is not an answer: pushing the notice into the transcript put
+      // a fake assistant turn — "(The model didn't answer: Generation
+      // cancelled.)" — into a conversation the reader had simply left.
+      if (!isCancelled(err)) {
+        chat.messages.push({
+          role: 'assistant',
+          content: `(The model didn't answer: ${api.genError(err)})`,
+        });
+      }
     }
     chat.busy = false;
     api.refresh();
@@ -403,7 +420,9 @@ export function renderSeed(api: AppApi): HTMLElement {
         'success',
       );
     } catch (err) {
-      api.toast(api.genError(err), 'error');
+      // A cancelled distill (the reader navigated in the meantime) is not a
+      // failure to report: the toast outlives the view it came from.
+      if (!isCancelled(err)) api.toast(api.genError(err), 'error');
     }
     chat.busy = false;
     api.refresh();

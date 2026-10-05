@@ -19,6 +19,11 @@ import path from 'node:path';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const preview = process.argv.includes('--preview');
+const portFlag = process.argv.indexOf('--port');
+const portOverride = portFlag !== -1 ? Number.parseInt(process.argv[portFlag + 1] ?? '', 10) : NaN;
+/** --port <n> wins over the default; the flag used to be silently ignored. */
+const requestedPort = (fallback) =>
+  Number.isInteger(portOverride) && portOverride > 0 ? portOverride : fallback;
 
 if (preview) {
   const dist = join(root, 'dist');
@@ -47,7 +52,7 @@ if (preview) {
       res.end('not found');
     }
   });
-  const port = 4174;
+  const port = requestedPort(4174);
   server.listen(port, '127.0.0.1', () => {
     console.log(`\n  Preview:  http://localhost:${port}/  (serving dist/)\n`);
   });
@@ -67,7 +72,11 @@ if (preview) {
     target: ['es2022', 'chrome105', 'firefox110', 'safari16'],
   });
 
-  const { port } = await ctx.serve({ servedir: devDir, port: 4173, host: '127.0.0.1' });
+  const { port } = await ctx.serve({
+    servedir: devDir,
+    port: requestedPort(4173),
+    host: '127.0.0.1',
+  });
   // Always advertise the localhost hostname: an Origin of http://localhost:4173
   // satisfies the default CORS allow-lists of Ollama and most local servers.
   console.log(

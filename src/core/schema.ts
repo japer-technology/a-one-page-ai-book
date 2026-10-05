@@ -67,6 +67,7 @@ export function defaultSettings() {
     autoSuggest: false,
     templates: [],
     fastModel: '',
+    lanSubnet: '',
     theme: 'dark' as const,
     readingFont: 'georgia' as const,
     documentFonts: defaultDocumentFonts(undefined),
@@ -157,6 +158,10 @@ function normalizeNode(raw: unknown): StoryNode {
     case 'seed':
       asString(data.text, `node "${id}" seed text`);
       if (!isRecord(data.options)) fail(`node "${id}" seed options missing`);
+      // The prompt builder calls string methods on these (`lengthHint
+      // .replaceAll(…)`), so an imported option that is a number used to make
+      // every title generation for the book throw, with no way back.
+      data.options = normalizeSeedOptions(data.options);
       if (!Array.isArray(data.titles)) fail(`node "${id}" seed titles must be an array`);
       // Validate the ELEMENTS too, not just the container: a `null` element
       // made the library's search haystack (`t.title`) throw, which took the
@@ -206,7 +211,13 @@ function normalizeNode(raw: unknown): StoryNode {
             data.bible.relations = (data.bible.relations as unknown[])
               .map((raw): StoryBible['relations'][number] | null => {
                 if (typeof raw === 'string') {
-                  const [from, kind, to] = raw.split(/\s*[—–-]\s*/);
+                  // Split on an em/en dash when one is present (the canonical
+                  // form). Only fall back to a bare hyphen — which is
+                  // legitimately part of names like "Anna-Maria" — when the
+                  // string contains no dash, and then require spaces around
+                  // it.
+                  const parts = /[—–]/.test(raw) ? raw.split(/\s*[—–]\s*/) : raw.split(/\s+-\s+/);
+                  const [from, kind, to] = parts;
                   if (from?.trim() && to?.trim() && kind?.trim()) {
                     return { from: from.trim(), to: to.trim(), kind: kind.trim() };
                   }
@@ -253,6 +264,11 @@ function normalizeNode(raw: unknown): StoryNode {
       break;
     }
     case 'ending':
+      // The same hardening as a page's `text`: every export calls string
+      // methods on the note (`endingNote.trim()`, `.split()`), so an imported
+      // number — or a missing note — used to make the whole book permanently
+      // unexportable, and quietly stopped the OPFS markdown mirror.
+      data.note = typeof data.note === 'string' ? data.note : '';
       if (data.portrait !== undefined && typeof data.portrait !== 'string') delete data.portrait;
       break;
   }
@@ -265,20 +281,27 @@ function normalizeNode(raw: unknown): StoryNode {
  * i.e. the shelf never painted again, with no way back.
  */
 function coerceVersions(raw: unknown[]): PageVersion[] {
-  return raw
-    .map((version, index): PageVersion | null => {
-      if (!isRecord(version)) return null;
-      if (typeof version.text !== 'string') return null;
-      return {
-        v: typeof version.v === 'number' && Number.isFinite(version.v) ? version.v : index + 1,
-        text: version.text,
-        by: version.by === 'user' ? 'user' : 'ai',
-        at: finiteOr(version.at, 0),
-        ...(typeof version.model === 'string' ? { model: version.model } : {}),
-        ...(version.pinned === true ? { pinned: true } : {}),
-      };
-    })
-    .filter((version): version is PageVersion => version !== null);
+  return (
+    raw
+      .map((version): Omit<PageVersion, 'v'> | null => {
+        if (!isRecord(version)) return null;
+        if (typeof version.text !== 'string') return null;
+        return {
+          text: version.text,
+          by: version.by === 'user' ? 'user' : 'ai',
+          at: finiteOr(version.at, 0),
+          ...(typeof version.model === 'string' ? { model: version.model } : {}),
+          ...(version.pinned === true ? { pinned: true } : {}),
+        };
+      })
+      .filter((version): version is Omit<PageVersion, 'v'> => version !== null)
+      // `v` is a LABEL and the key the pin UI matches on (`setVersionPinned`),
+      // while every consumer addresses versions by array position. An imported
+      // document with gaps or duplicates (e.g. the middle version's text was not
+      // a string) made a row pin nothing at all, with the toast naming the wrong
+      // version. Renumber to the position AFTER filtering so the two agree.
+      .map((version, index) => ({ ...version, v: index + 1 }))
+  );
 }
 
 /** Tolerate old files and sloppy shapes: fill every TurnInput field safely. */
@@ -396,7 +419,11 @@ function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
     guests: Array.isArray(raw.guests)
       ? [
           ...new Set(
-            raw.guests.filter((g): g is string => typeof g === 'string' && g.trim().length > 0),
+            raw.guests
+              .filter((g): g is string => typeof g === 'string' && g.trim().length > 0)
+              // Trim BEFORE deduping, like tags/rules: ' Mara ' and 'Mara' are
+              // the same co-writer and must not survive as two.
+              .map((g) => g.trim()),
           ),
         ]
       : [],
@@ -413,10 +440,14 @@ function normalizeSettings(raw: unknown): Library['settings'] {
   return {
     endpoint: {
       name: typeof endpoint.name === 'string' ? endpoint.name : base.endpoint.name,
-      baseUrl:
-        typeof endpoint.baseUrl === 'string' && endpoint.baseUrl.length > 0
-          ? endpoint.baseUrl.replace(/\/+$/, '')
-          : base.endpoint.baseUrl,
+      baseUrl: ((): string => {
+        // Strip FIRST, then fall back: '/' (or '///') passed the non-empty
+        // guard and was then stripped to '' — an empty URL that every
+        // generation would fetch as a relative path.
+        if (typeof endpoint.baseUrl !== 'string') return base.endpoint.baseUrl;
+        const stripped = endpoint.baseUrl.trim().replace(/\/+$/, '');
+        return stripped.length > 0 ? stripped : base.endpoint.baseUrl;
+      })(),
       vendor,
       model: typeof endpoint.model === 'string' ? endpoint.model : base.endpoint.model,
       temperature:
@@ -435,6 +466,18 @@ function normalizeSettings(raw: unknown): Library['settings'] {
     autoSummary: raw.autoSummary !== false,
     autoSuggest: raw.autoSuggest === true,
     fastModel: typeof raw.fastModel === 'string' ? raw.fastModel.trim() : '',
+    // Only a real three-octet base survives: the value is interpolated into
+    // scan URLs ("<base>.1–254"), so an imported file must not be able to
+    // point the sweep at an arbitrary string.
+    lanSubnet:
+      typeof raw.lanSubnet === 'string' &&
+      /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(raw.lanSubnet.trim()) &&
+      raw.lanSubnet
+        .trim()
+        .split('.')
+        .every((octet) => Number(octet) <= 255)
+        ? raw.lanSubnet.trim()
+        : '',
     theme:
       raw.theme === 'sepia' || raw.theme === 'light' || raw.theme === 'system' ? raw.theme : 'dark',
     readingFont:
@@ -510,7 +553,16 @@ export function normalizeLibrary(raw: unknown): Library {
       fail(err instanceof Error ? err.message : 'bad node');
     }
   }
-  const books = Array.isArray(raw.books) ? raw.books.map((b) => normalizeBook(b, nodes)) : [];
+  const books = Array.isArray(raw.books)
+    ? raw.books.map((b) => normalizeBook(b, nodes))
+    : raw.books === undefined || raw.books === null
+      ? []
+      : // A present-but-not-array `books` was silently read as "no books": the
+        // load reported ok:true, so boot never stashed or adopted the OPFS
+        // mirror, and the next autosave persisted `books: []` for good —
+        // every book pointer lost though their nodes still sit in storage.
+        // Fail like every other structural field, so recovery can run.
+        fail('"books" must be an array');
   // Drop books whose seed node is already owned by another book (guards shared-seed duplicates).
   const seenSeeds = new Set<string>();
   const kept: Book[] = [];
@@ -566,6 +618,30 @@ export function normalizeBookBundle(raw: unknown): {
 
 export function emptySeedOptions(): SeedOptions {
   return { genre: '', perspective: '', tense: '', tone: '', audience: '', lengthHint: '' };
+}
+
+/**
+ * The seed's options as the rest of the app expects them: every field a string
+ * from the allowed set, nothing else.
+ *
+ * `options` reaches the prompt builders verbatim, and one of them does
+ * `options.lengthHint.replaceAll('-', ' ')`. An imported library whose
+ * `lengthHint` was a number therefore threw on every title generation for that
+ * book — the titles screen showed an error the reader could never clear.
+ */
+export function normalizeSeedOptions(raw: unknown): SeedOptions {
+  const input = (isRecord(raw) ? raw : {}) as Record<string, unknown>;
+  const oneOf = <T extends string>(value: unknown, allowed: readonly T[]): T | '' =>
+    typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : '';
+  return {
+    // `genre` is free text: the seed form offers presets but accepts anything.
+    genre: typeof input.genre === 'string' ? input.genre : '',
+    perspective: oneOf(input.perspective, ['first', 'third', 'second'] as const),
+    tense: oneOf(input.tense, ['past', 'present'] as const),
+    tone: oneOf(input.tone, ['warm', 'dark', 'funny', 'literary', 'pulpy'] as const),
+    audience: oneOf(input.audience, ['kid-safe', 'teen', 'adult'] as const),
+    lengthHint: oneOf(input.lengthHint, ['short-story', 'novella', 'let-it-run'] as const),
+  };
 }
 
 /** Merge imported nodes into a library without clobbering existing ids. */

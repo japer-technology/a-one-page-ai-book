@@ -28,12 +28,59 @@ command -v chromium >/dev/null 2>&1 || {
 
 node scripts/e2e/mock-llm.mjs >/tmp/page-turn-mock.log 2>&1 &
 MOCK_PID=$!
-sleep 1
+
+# Wait for OUR fixtures to be ready, and fail fast if they died on startup:
+# a leftover mock holding :1234 makes this one exit with EADDRINUSE, and the
+# suite used to run anyway against whatever was (or was not) listening.
+mock_up=0
+for _ in $(seq 1 30); do
+  if ! kill -0 "$MOCK_PID" 2>/dev/null; then
+    echo "mock-llm exited on startup — is something already listening on :1234?" >&2
+    cat /tmp/page-turn-mock.log >&2
+    exit 1
+  fi
+  if (exec 3<>/dev/tcp/127.0.0.1/1234) 2>/dev/null; then mock_up=1; break; fi
+  sleep 0.5
+done
+[ "$mock_up" = 1 ] || {
+  echo "mock-llm never opened :1234" >&2
+  exit 1
+}
 
 chromium --headless --disable-gpu --no-sandbox --remote-debugging-port=9222 \
   --remote-allow-origins='*' "$APP_URL" >/tmp/page-turn-chrome.log 2>&1 &
 CHROME_PID=$!
-sleep 3
 
-node scripts/e2e/cdp-test.mjs
-exit $?
+cdp_up=0
+for _ in $(seq 1 40); do
+  if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+    echo "chromium exited on startup — another instance holding :9222 or the profile?" >&2
+    tail -5 /tmp/page-turn-chrome.log >&2
+    exit 1
+  fi
+  if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:9222/json/version; then cdp_up=1; break; fi
+  sleep 0.5
+done
+[ "$cdp_up" = 1 ] || {
+  echo "chromium CDP never came up on :9222" >&2
+  exit 1
+}
+# And it must be OUR app the debugger is showing: a stale browser holding the
+# port answers /json/version too, but serves a different page.
+curl -sf http://127.0.0.1:9222/json | grep -q 'page-turn.html' || {
+  echo "the CDP endpoint on :9222 is not showing page-turn.html — is a stale browser holding the port?" >&2
+  exit 1
+}
+
+# `detect-subnet` LAST, deliberately: it has to start a sweep of a range that
+# answers nothing (a browser that reveals its own address must be believed
+# without probing the network), and a sweep of a dead range is exactly what
+# leaves Chromium's network service working through dropped sockets for the next
+# few seconds — the app's own troubleshooting notes. Run before the others, it
+# made their gateway probes time out and their detection come back empty.
+status=0
+for script in llm-setup lan-scan cdp-test panel-state seed-cancel detect-subnet; do
+  printf '\n──── %s ────\n' "$script"
+  node "scripts/e2e/${script}.mjs" || status=1
+done
+exit $status

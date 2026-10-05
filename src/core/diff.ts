@@ -73,10 +73,18 @@ export function diffWords(before: string, after: string): DiffPart[] {
  * Line-level fallback for pages too large for the word-level table. It keeps
  * the reconstruction contract (`same` + `del` === before, `same` + `add` ===
  * after) that the word diff guarantees.
+ *
+ * Each token carries its own line terminator, so every chunk is an exact slice
+ * of the input and the contract holds by construction. The previous version
+ * split the terminators off and re-added them by hand, which put an extra
+ * `\n` after a deleted block (a phantom blank line in the compare view of any
+ * long page) and none at all after an appended final line (glued onto the line
+ * above it, and the concatenation no longer reproduced the text).
  */
 function diffByLine(before: string, after: string): DiffPart[] {
-  const a = before.split('\n');
-  const b = after.split('\n');
+  const lines = (text: string): string[] => text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const a = lines(before);
+  const b = lines(after);
   const parts: DiffPart[] = [];
   const push = (kind: DiffPart['kind'], text: string) => {
     const last = parts[parts.length - 1];
@@ -93,11 +101,11 @@ function diffByLine(before: string, after: string): DiffPart[] {
     endA--;
     endB--;
   }
-  const join = (lines: string[]): string => lines.join('\n');
-  if (start > 0) push('same', join(a.slice(0, start)) + (start < a.length ? '\n' : ''));
-  if (endA > start) push('del', join(a.slice(start, endA)) + (endA < a.length ? '\n' : ''));
-  if (endB > start) push('add', join(b.slice(start, endB)) + (endB < b.length ? '\n' : ''));
-  if (endA < a.length) push('same', '\n' + join(a.slice(endA)));
+  const join = (lines: string[]): string => lines.join('');
+  if (start > 0) push('same', join(a.slice(0, start)));
+  if (endA > start) push('del', join(a.slice(start, endA)));
+  if (endB > start) push('add', join(b.slice(start, endB)));
+  if (endA < a.length) push('same', join(a.slice(endA)));
   return parts;
 }
 

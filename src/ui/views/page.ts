@@ -7,7 +7,13 @@
  */
 import type { AppApi } from '../ctx';
 import { button, fmtDate, h, plural, pruneMap } from '../dom';
-import { compileBook, countWords, joinParagraphs, paragraphsOf } from '../../core/compile';
+import {
+  applyParagraphEdit,
+  compileBook,
+  countWords,
+  joinParagraphs,
+  paragraphsOf,
+} from '../../core/compile';
 import {
   branchTip,
   chapterCountUpTo,
@@ -115,7 +121,21 @@ export function renderPage(api: AppApi): HTMLElement {
   if (frontier.kind === 'title') return beginView(api, book);
 
   const page = frontier;
-  if (page.data.kind !== 'page') return h('div', { class: 'view' });
+  if (page.data.kind !== 'page') {
+    // Never an empty `<div>`: that was a blank, control-less screen with no way
+    // out of it (a prologue frontier landed here), and the book then bounced
+    // back to the Library on every later attempt to continue it.
+    setTimeout(() => api.navigate('library'), 0);
+    return h(
+      'div',
+      { class: 'view' },
+      h('p', {
+        class: 'banner banner-error',
+        text: `This book’s frontier is a ${frontier.kind} node, which is not written here. Open it from the Library.`,
+      }),
+      button('← Library', () => api.navigate('library')),
+    );
+  }
   const data = page.data;
   const chosen = data.versions[data.chosenVersion - 1];
   if (!chosen) return h('div', { class: 'view' }, h('p', { text: 'No version selected.' }));
@@ -435,7 +455,10 @@ function paragraphBlock(
   const key = `${page.id}:${index}`;
   const edit = paraEdit.get(key);
   const panel = paraPanel.get(key);
-  const genKey = `para:${key}`;
+  // Insert and rewrite share this panel key but must not share the busy state:
+  // an insert is a different request (and writes a different gen key).
+  const mode = panel?.mode ?? 'rewrite';
+  const genKey = paragraphGenKey(page.id, index, mode);
   const busy = genStates.get(genKey);
 
   if (edit) {
@@ -486,7 +509,16 @@ function paragraphBlock(
       renderGenPanel(
         api,
         genKey,
-        () => void aiParagraph(api, book, page, index, paras, panel?.instruction ?? ''),
+        () =>
+          void aiParagraph(
+            api,
+            book,
+            page,
+            index,
+            paras,
+            panel?.instruction ?? '',
+            panel?.mode ?? 'rewrite',
+          ),
       ),
     );
   }
@@ -581,7 +613,7 @@ function paragraphPanel(
       { class: 'row gap' },
       button(
         panel.mode === 'rewrite' ? 'Rewrite with AI' : 'Write with AI',
-        () => void aiParagraph(api, book, page, index, paras, panel.instruction),
+        () => void aiParagraph(api, book, page, index, paras, panel.instruction, panel.mode),
         'primary',
       ),
       button('⌨ Type it myself', () => {
@@ -646,7 +678,7 @@ function insertEditBlock(
 function addParagraphBlock(api: AppApi, book: Book, page: StoryNode, paras: string[]): HTMLElement {
   const key = `${page.id}:add`;
   const panel = paraPanel.get(key);
-  const genKey = `para:${key}`;
+  const genKey = paragraphGenKey(page.id, paras.length, 'add');
   const busy = genStates.get(genKey);
   const edit = paraEdit.get(`${page.id}:append`);
 
@@ -696,7 +728,8 @@ function addParagraphBlock(api: AppApi, book: Book, page: StoryNode, paras: stri
       renderGenPanel(
         api,
         genKey,
-        () => void aiParagraph(api, book, page, paras.length, paras, panel?.instruction ?? ''),
+        () =>
+          void aiParagraph(api, book, page, paras.length, paras, panel?.instruction ?? '', 'add'),
       ),
     );
   }
@@ -720,7 +753,8 @@ function addParagraphBlock(api: AppApi, book: Book, page: StoryNode, paras: stri
         { class: 'row gap' },
         button(
           '✍ Write with AI',
-          () => void aiParagraph(api, book, page, paras.length, paras, panel.instruction),
+          () =>
+            void aiParagraph(api, book, page, paras.length, paras, panel.instruction, panel.mode),
           'primary',
         ),
         button('⌨ Type it', () => {
@@ -781,6 +815,10 @@ function candidatesSection(api: AppApi, book: Book, page: StoryNode): HTMLElemen
 }
 
 function retryCandidate(api: AppApi, book: Book, page: StoryNode, key: string): void {
+  // Iron Author: a retried candidate appends a version like any other re-roll,
+  // so the budget must gate it too — the failed panel was a free extra roll
+  // after the three strikes were spent.
+  if (!allowReroll(api, book, page)) return;
   // Retry in THIS candidate's own slot, so the panel the reader clicked is the
   // one that comes back to life.
   const index = Number(key.split(':').pop());
@@ -795,10 +833,21 @@ async function runCandidates(api: AppApi, book: Book, page: StoryNode): Promise<
   if (!allowReroll(api, book, page)) return;
   if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
   candidatesBusy.add(page.id);
-  const attached = await generateCandidates(api, book, page, 2);
+  // Iron Author caps the batch at what is left: the single `allowReroll` above
+  // only asks whether ANY re-roll remains, so asking for two versions with one
+  // left used to land both and overshoot the budget.
+  const budget = rollsLeft(book, page);
+  const wanted = Number.isFinite(budget) ? Math.min(2, budget) : 2;
+  const attached = await generateCandidates(api, book, page, wanted);
   candidatesBusy.delete(page.id);
+  if (attached > 0) showVersions.add(page.id);
+  // Re-render AFTER the state changes above: `generateCandidates`' own last
+  // refresh ran while this page was still marked busy, so the rail it painted
+  // was the disabled "🎲 Writing alternatives…" one, and the version list it
+  // had just told the reader to use stayed collapsed — until some unrelated
+  // render happened to come along.
+  api.refresh();
   if (attached > 0) {
-    showVersions.add(page.id);
     api.toast(
       attached === 1
         ? 'One new version ready — flip through the version picker'
@@ -917,6 +966,21 @@ function commitUserVersion(
   api.toast(message, 'success');
 }
 
+/**
+ * The gen-state key for a paragraph tool's request. Insert and rewrite share
+ * the panel key (`page:index`) but are different requests against the same
+ * paragraph: they must not share busy/stream state.
+ */
+function paragraphGenKey(
+  pageId: string,
+  index: number,
+  mode: 'rewrite' | 'insert' | 'add',
+): string {
+  if (mode === 'insert') return `para:${pageId}:after${index}`;
+  if (mode === 'add') return `para:${pageId}:add`;
+  return `para:${pageId}:${index}`;
+}
+
 /** Rewrite/insert a paragraph with the model; stream into the block; save as a new version. */
 async function aiParagraph(
   api: AppApi,
@@ -925,17 +989,24 @@ async function aiParagraph(
   index: number,
   paras: string[],
   instruction: string,
+  mode: 'rewrite' | 'insert' | 'add',
 ): Promise<void> {
   if (page.data.kind !== 'page') return;
   if (!allowReroll(api, book, page)) return;
-  const isAdd = index >= paras.length;
-  const genKey = `para:${isAdd ? `${page.id}:add` : `${page.id}:${index}`}`;
+  // "insert" and "add" both make a NEW paragraph; only where it lands differs
+  // (after the anchor, or at the very end). Branching on `index >= paras.length`
+  // alone meant "Insert a paragraph after this one" was served by the REWRITE
+  // path — the model rewrote the paragraph the reader pointed at, so their
+  // prose changed instead of growing.
+  const insert = mode === 'insert';
+  const append = mode === 'add' || index >= paras.length;
+  const genKey = paragraphGenKey(page.id, index, insert ? 'insert' : append ? 'add' : 'rewrite');
   const token = api.beginGen();
   audit(`aiParagraph start key=${genKey}`);
   genStates.set(genKey, {
     token,
     status: 'busy',
-    label: isAdd ? 'Writing a new paragraph…' : `Rewriting paragraph ${index + 1}…`,
+    label: insert || append ? 'Writing a new paragraph…' : `Rewriting paragraph ${index + 1}…`,
     stream: '',
     error: '',
   });
@@ -944,9 +1015,10 @@ async function aiParagraph(
     const ctx = buildContext(api.nodes, book);
     const pageNumber = pageNumberAt(api.nodes, page.id);
     const pageText = joinParagraphs(paras);
-    const messages = isAdd
-      ? insertParagraphMessages(ctx, pageNumber, pageText, instruction, book.rules)
-      : paragraphMessages(ctx, pageNumber, pageText, paras[index] ?? '', instruction, book.rules);
+    const messages =
+      insert || append
+        ? insertParagraphMessages(ctx, pageNumber, pageText, instruction, book.rules)
+        : paragraphMessages(ctx, pageNumber, pageText, paras[index] ?? '', instruction, book.rules);
     const model = api.lib.settings.endpoint.model;
     const text = await api.generateText(messages, {
       model,
@@ -963,39 +1035,52 @@ async function aiParagraph(
     });
     if (api.staleGen(token)) {
       genStates.delete(genKey);
+      // Repaint as well: without this the dead "Rewriting paragraph N…" panel
+      // stayed on screen (its state was gone, so its Cancel was a no-op) until
+      // some unrelated render rebuilt the block. The catch path below has
+      // always refreshed for exactly this reason.
+      api.refresh();
       return;
     }
     const cleaned = text.trim();
     if (cleaned.length === 0) throw new Error('The model returned an empty paragraph');
-    // Re-read the CURRENT chosen text at commit time: the reader may have
-    // edited other paragraphs while this generation ran, and we must never
-    // revert their work by appending from the pre-edit snapshot.
+    // Re-read the CURRENT chosen text at commit time, from the LIVE node:
+    // `page` is the snapshot this panel was rendered from, and every mutation
+    // replaces node objects, so `page.data` never changes — reading it here
+    // made the guard below permanently false, and a paragraph the reader saved
+    // by hand while the model streamed was silently reverted in the new version
+    // (findable again only by walking back through old versions).
+    const live = getNode(api.nodes, page.id);
     const chosenNow =
-      page.data.kind === 'page'
-        ? (page.data.versions[page.data.chosenVersion - 1]?.text ?? '')
+      live && live.data.kind === 'page'
+        ? (live.data.versions[live.data.chosenVersion - 1]?.text ?? '')
         : '';
     const fresh = paragraphsOf(chosenNow);
-    // The model rewrote a paragraph that may no longer be there — the reader
-    // can save, reorder or delete it while the request streams, and this panel
-    // does not block those tools. Writing the rewrite into whatever now sits at
-    // `index` silently destroyed THEIR paragraph.
-    if (!isAdd && fresh[index] !== paras[index]) {
+    // The model wrote against the paragraph that was on screen — the reader can
+    // save, reorder or delete it while the request streams, and this panel does
+    // not block those tools. A rewrite would then land on a stranger (silently
+    // destroying THEIR paragraph); an insert would land in the wrong place.
+    if (!append && fresh[index] !== paras[index]) {
       clearGenState(genKey, token);
       paraPanel.delete(`${page.id}:${index}`);
       api.refresh();
       api.toast(
-        'That paragraph changed while the model was writing — nothing was overwritten. Ask again.',
+        insert
+          ? 'That paragraph changed while the model was writing — nothing was inserted. Ask again.'
+          : 'That paragraph changed while the model was writing — nothing was overwritten. Ask again.',
         'info',
       );
       return;
     }
-    const next = [...fresh];
-    if (isAdd) next.push(cleaned);
-    else if (next[index] !== undefined) next[index] = cleaned;
-    else next.push(cleaned);
+    const next = applyParagraphEdit(
+      fresh,
+      index,
+      cleaned,
+      insert ? 'insert' : append ? 'add' : 'rewrite',
+    );
     clearGenState(genKey, token);
-    paraPanel.delete(isAdd ? `${page.id}:add` : `${page.id}:${index}`);
-    if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
+    paraPanel.delete(append ? `${page.id}:add` : `${page.id}:${index}`);
+    if (live && live.data.kind === 'page') lastCommit.set(page.id, live.data.chosenVersion);
     api.appendVersion(page.id, joinParagraphs(next), 'ai', model);
     maybeUpdateBible(api, book, page.id);
     maybeUpdateSummary(api, book, page.id);
@@ -1252,6 +1337,10 @@ function installKeys(api: AppApi, book: Book, page: StoryNode): void {
         const targetVersion = Math.max(1, Math.min(page.data.versions.length, current + delta));
         if (targetVersion !== current) {
           event.preventDefault();
+          // Same cleanup the picker's buttons and the version rows do: an open
+          // paragraph editor must not survive a version flip, or its draft is
+          // merged into (and its text contradicts) the version now on screen.
+          clearCraftState(page.id);
           api.chooseVersion(page.id, targetVersion);
         }
         return;
@@ -1554,9 +1643,8 @@ function considerSelection(api: AppApi, book: Book, page: StoryNode, paras: stri
 let spanToolbarEl: HTMLElement | null = null;
 
 export function clearSpanToolbar(): void {
-  // Also drop the abandoned inline replacement: `mountSpanToolbar` reopens in
-  // edit mode whenever `spanEdit` holds this paragraph, so a stale draft came
-  // back pre-filled and "Replace" then overwrote a NEW selection with it.
+  // Also drop the abandoned inline replacement: it belongs to a selection the
+  // reader has left, and "Replace" must never splice it into another one.
   spanEdit.clear();
   spanTask.clear();
   removeSpanToolbar();
@@ -1582,7 +1670,15 @@ function mountSpanToolbar(
   const shown = text.length > 40 ? `${text.slice(0, 40)}…` : text;
   const genKey = `span:${page.id}:${index}`;
   const isBusy = genStates.has(genKey);
-  const editing = spanEdit.has(genKey);
+  // A draft belongs to the EXACT selection it was typed for. Keyed by paragraph
+  // alone, an abandoned draft reopened pre-filled on the reader's next drag in
+  // the same paragraph and "Replace" spliced it into a range it was never
+  // written for — silently overwriting the phrase they had just selected. A
+  // draft for a different range is no longer a draft.
+  const stored = spanEdit.get(genKey);
+  const editing = stored !== undefined && stored.start === start && stored.end === end;
+  if (stored !== undefined && !editing) spanEdit.delete(genKey);
+  const draft = editing ? stored : undefined;
   const box = h(
     'div',
     { class: 'span-toolbar', style: `left:${Math.round(x)}px; top:${Math.round(y - 46)}px;` },
@@ -1594,9 +1690,13 @@ function mountSpanToolbar(
           h('textarea', {
             class: 'para-edit',
             rows: 3,
-            value: spanEdit.get(genKey) ?? text,
+            value: draft?.text ?? text,
             oninput: (event: Event) => {
-              spanEdit.set(genKey, (event.target as HTMLTextAreaElement).value);
+              spanEdit.set(genKey, {
+                text: (event.target as HTMLTextAreaElement).value,
+                start,
+                end,
+              });
             },
           }),
           h(
@@ -1605,7 +1705,9 @@ function mountSpanToolbar(
             button(
               'Replace',
               () => {
-                const replacement = spanEdit.get(genKey) ?? text;
+                // Read the live draft: the textarea replaces the map entry on
+                // every keystroke, so the value captured at mount time is stale.
+                const replacement = spanEdit.get(genKey)?.text ?? text;
                 spanEdit.delete(genKey);
                 applySpanReplacement(api, book, page, index, start, end, replacement);
               },
@@ -1631,7 +1733,7 @@ function mountSpanToolbar(
             { disabled: isBusy },
           ),
           button('✎ Edit', () => {
-            spanEdit.set(genKey, text);
+            spanEdit.set(genKey, { text, start, end });
             // Rebuild the floating box IN PLACE — a full api.refresh() here
             // would detach the view, destroy the selection, and (on empty
             // ranges) make getRangeAt throw.
@@ -1642,10 +1744,27 @@ function mountSpanToolbar(
         ),
   );
   document.body.appendChild(box);
+  // Keep the toolbar on-screen. With the raw selection rect a selection near
+  // the right edge pushed Edit/✕ entirely outside a phone viewport, and one
+  // near the top clipped the whole box above the fold.
+  const placed = box.getBoundingClientRect();
+  if (placed.right > window.innerWidth - 8) {
+    box.style.left = `${Math.max(8, Math.round(window.innerWidth - placed.width - 8))}px`;
+  }
+  if (placed.top < 8) {
+    box.style.top = `${Math.round(y + 14)}px`;
+  }
   spanToolbarEl = box;
 }
 
-const spanEdit = new Map<string, string>();
+/** An inline edit draft, and the selection it was typed for. */
+interface SpanDraft {
+  text: string;
+  start: number;
+  end: number;
+}
+
+const spanEdit = new Map<string, SpanDraft>();
 
 function applySpanReplacement(
   api: AppApi,
@@ -1726,6 +1845,9 @@ async function aiSpanRewrite(
     });
     if (api.staleGen(token)) {
       clearGenState(genKey, token);
+      // Repaint too: the busy span panel is otherwise left on screen with no
+      // state behind it (its Cancel a no-op) until an unrelated render.
+      api.refresh();
       return;
     }
     const cleaned = rewritten.trim();
@@ -1737,9 +1859,13 @@ async function aiSpanRewrite(
     // span panel does not block the tools), and splicing request-time offsets
     // into different text corrupted an innocent sentence — or, after a delete,
     // the paragraph that took its place.
+    // From the LIVE node, like the paragraph rewrite above: `page` is the
+    // render-time snapshot, so comparing against it could never notice that the
+    // reader had edited (or removed) the paragraph while the model streamed.
+    const live = getNode(api.nodes, page.id);
     const chosenNow =
-      page.data.kind === 'page'
-        ? (page.data.versions[page.data.chosenVersion - 1]?.text ?? '')
+      live && live.data.kind === 'page'
+        ? (live.data.versions[live.data.chosenVersion - 1]?.text ?? '')
         : '';
     const fresh = paragraphsOf(chosenNow);
     if (fresh[index] !== paragraph) {
@@ -1758,7 +1884,7 @@ async function aiSpanRewrite(
       currentParagraph.slice(0, task.start) + cleaned + currentParagraph.slice(task.end);
     clearGenState(genKey, token);
     spanTask.delete(genKey);
-    if (page.data.kind === 'page') lastCommit.set(page.id, page.data.chosenVersion);
+    if (live && live.data.kind === 'page') lastCommit.set(page.id, live.data.chosenVersion);
     api.appendVersion(page.id, joinParagraphs(next), 'ai', model);
     maybeUpdateBible(api, book, page.id);
     maybeUpdateSummary(api, book, page.id);

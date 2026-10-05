@@ -15,6 +15,7 @@ import {
   makeBook,
   makeEndingNode,
   makePageNode,
+  makePrologueNode,
   makeSeedNode,
   makeTitleNode,
   makeTurnNode,
@@ -28,6 +29,7 @@ import {
   statsOf,
   summaryUpTo,
   titleOf,
+  writableTip,
 } from '../src/core/tree';
 import { emptySeedOptions } from '../src/core/schema';
 import { DEFAULT_TURN } from '../src/core/types';
@@ -332,5 +334,69 @@ describe('branchTip', () => {
     const freshTitle = makeTitleNode(seed.id, { title: 'Dormant', tagline: '' });
     const withFresh = { ...nodes, [freshTitle.id]: freshTitle };
     expect(branchTip(withFresh, freshTitle.id).id).toBe(freshTitle.id);
+  });
+});
+
+/**
+ * Re-entering a branch (the story map's "Enter", and boot's repair of a book
+ * whose stored frontier is unrenderable) must land on a node the writing view
+ * can actually render. `branchTip` follows the NEWEST child, and The End
+ * screen attaches an ending — and the prologue — at the end of the pages, so
+ * the tip of a finished branch is never writable.
+ */
+describe('writableTip', () => {
+  const turn = { ...DEFAULT_TURN, emotions: {} };
+  /** title → page1 → turn → page2, optionally + prologue and/or ending. */
+  const branch = (opts: { prologue?: boolean; ending?: boolean } = {}) => {
+    const seed = makeSeedNode('s', emptySeedOptions());
+    const title = makeTitleNode(seed.id, { title: 'The Dead Letter', tagline: '' });
+    const page1 = makePageNode(title.id, turn, 'm', 'one');
+    const t1 = makeTurnNode(page1.id, turn);
+    const page2 = makePageNode(t1.id, turn, 'm', 'two');
+    const extra: StoryNode[] = [];
+    if (opts.prologue) extra.push(makePrologueNode(title.id, turn, 'm', 'page zero'));
+    if (opts.ending) extra.push(makeEndingNode(page2.id, 'the end note'));
+    let nodes: Record<string, StoryNode> = {};
+    for (const node of [seed, title, page1, t1, page2, ...extra]) nodes = addNode(nodes, node);
+    return { seed, title, page1, t1, page2, nodes };
+  };
+
+  it('returns the newest writable node of an unfinished branch', () => {
+    const { nodes, title, page2 } = branch();
+    expect(writableTip(nodes, title.id)?.id).toBe(page2.id);
+  });
+
+  it('never returns an ending — a finished branch re-enters at its last page', () => {
+    // The regression: `branchTip(nodes, last.id)` re-descended into the ending
+    // again, so "Enter" on a finished title stored an ending as the frontier,
+    // flipped the book to in-progress and bounced the reader to the Library.
+    const { nodes, title, page2 } = branch({ ending: true });
+    const tip = writableTip(nodes, title.id);
+    expect(tip?.kind).toBe('page');
+    expect(tip?.id).toBe(page2.id);
+  });
+
+  it('never returns the prologue The End screen attached after the pages', () => {
+    const { nodes, title, page2 } = branch({ prologue: true });
+    const tip = writableTip(nodes, title.id);
+    expect(tip?.id).toBe(page2.id);
+  });
+
+  it('steps back to the pages when a prologue and an ending both exist', () => {
+    const { nodes, title, page2 } = branch({ prologue: true, ending: true });
+    const tip = writableTip(nodes, title.id);
+    expect(tip?.id).toBe(page2.id);
+  });
+
+  it('returns the title itself when nothing has been written yet', () => {
+    const seed = makeSeedNode('s', emptySeedOptions());
+    const title = makeTitleNode(seed.id, { title: 'Fresh', tagline: '' });
+    let nodes: Record<string, StoryNode> = {};
+    for (const node of [seed, title]) nodes = addNode(nodes, node);
+    expect(writableTip(nodes, title.id)?.id).toBe(title.id);
+  });
+
+  it('returns null for a root that is not in the tree', () => {
+    expect(writableTip({}, 'missing')).toBeNull();
   });
 });

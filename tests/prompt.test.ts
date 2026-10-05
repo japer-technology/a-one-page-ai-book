@@ -5,6 +5,7 @@ import {
   buildContext,
   castText,
   conflictMessages,
+  conflictVerdicts,
   buildContextTo,
   chatMessages,
   directionText,
@@ -439,5 +440,71 @@ describe('coherence & craft', () => {
     expect(messages[0]?.content).toBe(STRUCTURED_SYSTEM_PROMPT);
     expect(messages[1]?.content).toContain('PROPOSED DIRECTION');
     expect(messages[1]?.content).toContain('JSON array');
+  });
+});
+
+/**
+ * The checker's reply interpreter. `consistent` used to be a bare substring
+ * test — "…is inconsistent with that" is how contradictions are phrased, and
+ * those verdicts were dropped, so the checker said "no conflicts" exactly when
+ * the model had found one.
+ */
+describe('conflictVerdicts', () => {
+  it('keeps a contradiction phrased with “inconsistent”', () => {
+    expect(
+      conflictVerdicts([
+        'The gun was destroyed in chapter 2 — using it now is inconsistent with that.',
+      ]),
+    ).toEqual(['The gun was destroyed in chapter 2 — using it now is inconsistent with that.']);
+  });
+
+  it('keeps a negation phrased as “not consistent”', () => {
+    expect(
+      conflictVerdicts(['The keeper fears water — this is not consistent with that.']),
+    ).toHaveLength(1);
+  });
+
+  it('drops the empty-reply chatter', () => {
+    expect(conflictVerdicts(['No conflicts found.'])).toEqual([]);
+    expect(conflictVerdicts(['none found'])).toEqual([]);
+    expect(conflictVerdicts(['[]'])).toEqual([]);
+  });
+
+  it('drops a bare assertion of consistency but keeps real verdicts', () => {
+    expect(conflictVerdicts(['The direction is consistent with the story so far.'])).toEqual([]);
+    expect(conflictVerdicts(['It seems fully consistent with established facts.'])).toEqual([]);
+    expect(
+      conflictVerdicts([
+        'No conflicts found.',
+        'The lighthouse was destroyed on page 2 — this direction visits it.',
+      ]),
+    ).toEqual(['The lighthouse was destroyed on page 2 — this direction visits it.']);
+  });
+});
+
+describe('conflictVerdicts, hedged wording', () => {
+  it('drops hedged consistency assertions the same way as the fixed list', () => {
+    expect(conflictVerdicts(['The direction is largely consistent with the story.'])).toEqual([]);
+    expect(conflictVerdicts(['It seems mostly consistent with established facts.'])).toEqual([]);
+    expect(conflictVerdicts(['This basically consistent direction works.'])).toEqual([]);
+    expect(conflictVerdicts(['Mostly consistent.'])).toEqual([]);
+    expect(conflictVerdicts(['Consistent'])).toEqual([]);
+  });
+
+  it('still keeps a negation and a plain inconsistency', () => {
+    expect(
+      conflictVerdicts(['The keeper fears water — this is not consistent with that.']),
+    ).toHaveLength(1);
+    expect(
+      conflictVerdicts(['Using the gun now is inconsistent with its destruction.']),
+    ).toHaveLength(1);
+  });
+
+  it('keeps a consistency claim that names a contradiction', () => {
+    expect(
+      conflictVerdicts([
+        'The tone is consistent with the story, but the gun was destroyed in chapter 2.',
+      ]),
+    ).toHaveLength(1);
   });
 });

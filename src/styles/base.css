@@ -166,7 +166,12 @@ body {
 }
 
 .btn:disabled {
-  opacity: 0.45;
+  /* Blanket opacity .45 dropped disabled labels to 1.9–2.7:1 in the sepia
+     and light themes; explicit muted colours stay legible in all of them. */
+  opacity: 1;
+  color: var(--muted);
+  background: var(--bg-card);
+  border-color: var(--line);
   cursor: default;
 }
 
@@ -211,6 +216,13 @@ body {
   color: var(--paper);
   padding: 0.5rem 0.7rem;
   width: 100%;
+}
+
+.input::placeholder {
+  /* The UA default (rgb(117,117,117)) measured 3.5–4.1:1 on the input
+     background in every theme; the muted token clears AA in all of them. */
+  color: var(--muted);
+  opacity: 1;
 }
 
 .input:focus-visible {
@@ -419,7 +431,11 @@ input[type='checkbox'] {
 }
 
 .toast {
-  pointer-events: auto;
+  /* A toast carries no controls and no click handling, so the box itself must
+     stay transparent to the pointer like the overlay is: a toast sitting over
+     the sticky turn-submit bar (same screen region) was swallowing presses of
+     "Continue naturally" / "I'll write it myself" for as long as it showed. */
+  pointer-events: none;
   background: var(--bg-card);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -543,6 +559,14 @@ input[type='checkbox'] {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   overflow: hidden;
+}
+
+/* The container clips (overflow: hidden): pull the ring inside so a focused
+   segment is not sliced down to a sliver. */
+.seg:focus-visible,
+.cast > summary:focus-visible,
+.memory > summary:focus-visible {
+  outline-offset: -2px;
 }
 
 .seg {

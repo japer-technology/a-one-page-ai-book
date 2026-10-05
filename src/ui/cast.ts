@@ -74,14 +74,24 @@ export async function updateBible(
   busy.set(book.id, { status: 'busy', error: '' });
   api.refresh();
   try {
-    const pageNode = getNode(api.nodes, pageNodeId);
+    // The panel is also open on The End and on the turn console, where the
+    // frontier is an ending or a turn node — neither is a page. Bailing out
+    // silently there made "↻ Update from the story" a button that did nothing
+    // at all on every finished book. Walk up to the latest page instead, the
+    // way the memory panel does.
+    let node = getNode(api.nodes, pageNodeId);
+    if (node && node.kind !== 'page') {
+      node =
+        [...pathToRoot(api.nodes, pageNodeId)].reverse().find((n) => n.kind === 'page') ?? null;
+    }
+    const pageNode = node;
     if (!pageNode || pageNode.kind !== 'page') {
       busy.delete(book.id);
       api.refresh();
       return;
     }
-    const ctx = buildContextTo(api.nodes, book, pageNodeId);
-    const previous = bibleUpTo(api.nodes, pageNodeId)?.bible ?? null;
+    const ctx = buildContextTo(api.nodes, book, pageNode.id);
+    const previous = bibleUpTo(api.nodes, pageNode.id)?.bible ?? null;
     // `parallel: true` keeps any concurrent generation alive, and we
     // deliberately do NOT bump the staleness token: a cast save is harmless
     // and idempotent, so it must never invalidate in-flight page work.
@@ -94,13 +104,13 @@ export async function updateBible(
       quiet: !manual,
     });
     const parsed = parseBible(typeof raw === 'string' ? raw : JSON.stringify(raw), previous);
-    parsed.at = pageNumberAt(api.nodes, pageNodeId);
+    parsed.at = pageNumberAt(api.nodes, pageNode.id);
     parsed.updatedAt = Date.now();
-    api.saveBible(pageNodeId, parsed);
+    api.saveBible(pageNode.id, parsed);
     // The two-tier context memory reads node.data.summary — keep it in sync
     // with the cast extraction (one model call feeds both).
     if (api.lib.settings.autoSummary && parsed.summary.trim().length > 0) {
-      api.saveSummary(pageNodeId, parsed.summary.trim());
+      api.saveSummary(pageNode.id, parsed.summary.trim());
     }
     // This page IS the newest request: drop the trailing marker, or a later
     // update finishing would see it as a pending page and re-run this one.
@@ -229,7 +239,7 @@ export function renderCast(
     bible?.summary
       ? h(
           'div',
-          { class: 'cast-summary' },
+          { class: 'cast-so-far' },
           h('h4', { class: 'cast-group-title', text: '📖 The story so far' }),
           h('p', { class: 'cast-summary-text', text: bible.summary }),
         )
@@ -408,6 +418,12 @@ function entryForm(
       api.toast('Give it a name first', 'info');
       return;
     }
+    // Close the form BEFORE the mutation re-renders (saveBible re-renders
+    // synchronously): clearing the flags afterwards left the form on screen
+    // with the saved draft still in it, so a second Save — which looked like
+    // the only way to make the first one take — appended a duplicate entry.
+    ui.adding = null;
+    ui.editing = null;
     api.saveBible(
       targetNodeId,
       mutateBible(api, targetNodeId, (bible) => {
@@ -425,8 +441,6 @@ function entryForm(
         return { ...bible, [group]: list };
       }),
     );
-    ui.adding = null;
-    ui.editing = null;
     api.toast(index === null ? `Added “${name}”` : `Saved “${name}”`, 'success');
   };
 

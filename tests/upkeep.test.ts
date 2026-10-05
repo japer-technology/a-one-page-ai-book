@@ -268,6 +268,17 @@ describe('the pre-writing chat chain', () => {
     expect(trimChatHistory(short)).toEqual(short);
   });
 
+  it('never returns more than the window — even when the window is one exchange', () => {
+    // `slice(-0)` is `slice(0)`: the whole array. With a one-exchange window
+    // this returned the ENTIRE history (opening plus everything), growing the
+    // very request the trim exists to bound. The newest turns win when there
+    // is no room for both.
+    const history = Array.from({ length: 20 }, (_, i) => exchange(i + 1)).flat();
+    const sent = trimChatHistory(history, 1);
+    expect(sent.length).toBe(2);
+    expect(sent.at(-1)?.content).toBe('reply 20');
+  });
+
   it('frames the chat with the partner system prompt, not the prose one', () => {
     const framed = chatMessages(trimChatHistory([...exchange(1)]));
     expect(framed[0]?.role).toBe('system');

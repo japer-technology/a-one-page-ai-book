@@ -7,14 +7,7 @@
 import type { AppApi } from '../ctx';
 import { button, fmtDate, fmtNumber, h, plural } from '../dom';
 import { compileBook, countWords, moodOf } from '../../core/compile';
-import {
-  collectSubtree,
-  pageNumberAt,
-  pathToRoot,
-  spinePages,
-  statsOf,
-  titleNodeOf,
-} from '../../core/tree';
+import { collectSubtree, pageNumberAt, pathToRoot, statsOf, titleNodeOf } from '../../core/tree';
 import { lintText, lintVerdict } from '../../core/lint';
 import type { Book, StoryNode } from '../../core/types';
 
@@ -68,7 +61,6 @@ export function renderAbout(api: AppApi): HTMLElement {
 
   // Decision log: every turn on the chosen path.
   const path = pathToRoot(nodes, book.frontierId);
-  const fallbackPageNumber = spinePages(nodes, book.frontierId).length;
   const decisions = path
     .map((n, index) => ({ node: n, index }))
     .filter(({ node }) => node.kind === 'turn' && node.data.kind === 'turn')
@@ -78,6 +70,7 @@ export function renderAbout(api: AppApi): HTMLElement {
       const direction =
         input.direction || (input.ending ? 'bring the story to a close' : 'continue naturally');
       const mood = moodOf(input);
+      const produced = decisionPageNumber(path, index, nodes);
       return h(
         'li',
         { class: 'about-decision' },
@@ -86,7 +79,13 @@ export function renderAbout(api: AppApi): HTMLElement {
         // entry was one off (and the last named a page that does not exist).
         h('span', {
           class: 'about-decision-page',
-          text: `→ page ${decisionPageNumber(path, index, nodes, fallbackPageNumber)}`,
+          // A turn still waiting at the frontier has produced nothing yet, so
+          // it is marked as the page it is about to make.
+          text: produced
+            ? produced.upcoming
+              ? `→ page ${produced.page} (upcoming)`
+              : `→ page ${produced.page}`
+            : '',
         }),
         h('span', { class: 'about-decision-text', text: direction }),
         mood
@@ -240,16 +239,26 @@ function lintSection(compiled: ReturnType<typeof compileBook>): HTMLElement {
   );
 }
 
-/** The number of the page a turn produced: the next page node on the path. */
+/**
+ * The page a turn produced: the next page node on the path. A turn still
+ * waiting at the frontier has produced nothing yet, so it is reported as the
+ * page it is about to make — the old fallback (the count of pages already
+ * written) made the pending turn claim the page the PREVIOUS turn had made.
+ */
 function decisionPageNumber(
   path: StoryNode[],
   turnIndex: number,
   nodes: Record<string, StoryNode>,
-  fallback: number,
-): number {
+): { page: number; upcoming: boolean } | null {
   for (let i = turnIndex + 1; i < path.length; i++) {
     const node = path[i];
-    if (node && node.kind === 'page') return pageNumberAt(nodes, node.id);
+    if (node && node.kind === 'page') {
+      return { page: pageNumberAt(nodes, node.id), upcoming: false };
+    }
   }
-  return fallback;
+  const turn = path[turnIndex];
+  if (!turn) return null;
+  // A turn sits under the title (page 1) or under the page it followed: the
+  // page it is about to produce is the next one on its parent's path.
+  return { page: pageNumberAt(nodes, turn.parentId ?? '') + 1, upcoming: true };
 }

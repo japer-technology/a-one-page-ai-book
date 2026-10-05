@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyParagraphEdit,
   compileBook,
   countWords,
   joinParagraphs,
@@ -180,5 +181,42 @@ describe('prologue and commentary edition', () => {
     const cut = toDirectorCut(compiled);
     expect(cut).toContain("Director's Commentary");
     expect(cut).toContain('Directed:');
+  });
+});
+
+/**
+ * Where a model-written paragraph lands. "Insert a paragraph after this one"
+ * once ran through the rewrite path (it only distinguished `index >= length`),
+ * so the model rewrote the anchor paragraph instead of adding one.
+ */
+describe('applyParagraphEdit', () => {
+  const paras = ['one', 'two', 'three'];
+
+  it('rewrites the paragraph at the index', () => {
+    expect(applyParagraphEdit(paras, 1, 'TWO', 'rewrite')).toEqual(['one', 'TWO', 'three']);
+  });
+
+  it('inserts the new paragraph AFTER the anchor', () => {
+    expect(applyParagraphEdit(paras, 0, 'NEW', 'insert')).toEqual(['one', 'NEW', 'two', 'three']);
+    expect(applyParagraphEdit(paras, 2, 'NEW', 'insert')).toEqual(['one', 'two', 'three', 'NEW']);
+  });
+
+  it('appends for the “Add a paragraph” rail', () => {
+    expect(applyParagraphEdit(paras, paras.length, 'NEW', 'add')).toEqual([
+      'one',
+      'two',
+      'three',
+      'NEW',
+    ]);
+  });
+
+  it('appends a rewrite whose paragraph is gone rather than replacing a stranger', () => {
+    expect(applyParagraphEdit(paras, 9, 'NEW', 'rewrite')).toEqual(['one', 'two', 'three', 'NEW']);
+  });
+
+  it('never mutates the input', () => {
+    const input = ['one'];
+    applyParagraphEdit(input, 0, 'NEW', 'insert');
+    expect(input).toEqual(['one']);
   });
 });

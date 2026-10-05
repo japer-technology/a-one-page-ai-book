@@ -8,7 +8,7 @@
  * current memory and offers a manual refresh.
  */
 import type { AppApi } from './ctx';
-import { button, h, spinner } from './dom';
+import { button, h, pruneMap, spinner } from './dom';
 import { buildContextTo, summaryMessages } from '../core/prompt';
 import { getNode, pathToRoot, summaryUpTo } from '../core/tree';
 import type { Book } from '../core/types';
@@ -16,6 +16,13 @@ import type { Book } from '../core/types';
 const busy = new Map<string, { status: 'busy' | 'error'; error: string }>();
 /** The newest page awaiting a memory update per book (trailing-queue). */
 const pendingSummary = new Map<string, string>();
+/**
+ * Per-book panel state. The view is rebuilt from scratch on every render — by
+ * the shell, and by the panel's own refresh — so without this the reader's
+ * expand was forgotten on the click that expanded it, and the memory they were
+ * watching update snapped shut. The cast panel keeps the same record.
+ */
+const panelOpen = new Map<string, boolean>();
 
 export function summaryBusy(bookId: string): { status: 'busy' | 'error'; error: string } | null {
   return busy.get(bookId) ?? null;
@@ -113,13 +120,17 @@ export function renderStoryMemory(
   book: Book,
   opts: { pageNodeId?: string | null; open?: boolean } = {},
 ): HTMLElement {
+  pruneMap(panelOpen, 60);
   const upTo = opts.pageNodeId ?? book.frontierId;
   const latest = summaryUpTo(api.nodes, upTo);
   const state = busy.get(book.id);
+  // The reader's own expand is remembered; an explicit `open` request counts
+  // only for the first render of this book (as in the cast panel).
+  const open = panelOpen.has(book.id) ? panelOpen.get(book.id) === true : opts.open === true;
 
-  return h(
+  const details = h(
     'details',
-    { class: 'memory', open: opts.open ? true : undefined },
+    { class: 'memory', open: open ? true : undefined },
     h(
       'summary',
       { class: 'memory-summary' },
@@ -173,4 +184,9 @@ export function renderStoryMemory(
         : null,
     ),
   );
+  // Remember the reader's choice — the panel is re-created on every render.
+  details.addEventListener('toggle', () => {
+    panelOpen.set(book.id, details.open);
+  });
+  return details;
 }

@@ -265,6 +265,12 @@ export interface Settings {
   templates: TurnTemplate[];
   /** Optional fast model for cheap phases (titles, suggestions, cast, chat). */
   fastModel: string;
+  /**
+   * The three-octet subnet the reader last swept ("192.168.1"), remembered so
+   * network setup never makes anyone type the same address twice. Empty until
+   * the app has detected or been told one.
+   */
+  lanSubnet: string;
   /** Reading theme: dark, sepia, light — or system (follows the OS). */
   theme: 'dark' | 'sepia' | 'light' | 'system';
   /** Reading font stack for page prose. */

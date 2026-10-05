@@ -488,6 +488,46 @@ export function branchTip(nodes: Record<string, StoryNode>, rootId: string): Sto
   }
 }
 
+/**
+ * The newest node under `rootId` that the writing view can actually render.
+ *
+ * `branchTip` follows the NEWEST child, and both an ending and a prologue —
+ * the latter written from The End screen, which attaches it to the title after
+ * the pages — sit at the end of a finished branch, so the tip comes back as a
+ * node nothing can write. Falling through to it left the reader on a blank
+ * screen and the book unopenable.
+ */
+export function writableTip(nodes: Record<string, StoryNode>, rootId: string): StoryNode | null {
+  const root = getNode(nodes, rootId);
+  if (!root) return null;
+  /**
+   * The tip of `fromId`'s branch, stepped back to the nearest node the
+   * writing view can render. An ending (or the prologue The End screen
+   * attaches after the pages) sits at the end of a finished branch, and
+   * `branchTip` follows the newest child — so the tip itself is not writable,
+   * and neither is re-descending from the title's newest child (that lands on
+   * the same ending again, which is how "Enter" on a finished title ended up
+   * storing an ending as the frontier).
+   */
+  const renderableTipOf = (fromId: string): StoryNode | null => {
+    let node: StoryNode | null = branchTip(nodes, fromId);
+    while (node && node.kind !== 'page' && node.kind !== 'turn') {
+      node = getNode(nodes, node.parentId ?? '');
+    }
+    return node;
+  };
+  const own = renderableTipOf(rootId);
+  if (own) return own;
+  // Nothing on the branch is writable (a prologue hanging straight off the
+  // title): where writing last stopped is the newest page/turn child's tip.
+  const writable = childrenOf(nodes, root.id).filter(
+    (child) => child.kind === 'page' || child.kind === 'turn',
+  );
+  const last = writable[writable.length - 1];
+  if (last) return renderableTipOf(last.id) ?? last;
+  return root.kind === 'title' ? root : null;
+}
+
 /** Replace the book's standing rules (persist until removed). */
 export function setBookRules(book: Book, rules: string[]): Book {
   return { ...book, rules, updatedAt: Date.now() };

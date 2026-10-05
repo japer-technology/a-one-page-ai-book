@@ -19,13 +19,19 @@ files, and never talks to a cloud.
 
 ## What it does
 
-- **🔍 Finds your local LLM.** One click probes the well-known local inference ports (LM Studio,
-  Ollama, llama.cpp, KoboldCpp, text-generation-webui, GPT4All, vLLM, Jan, AnythingLLM, Msty) and
-  reports _reachable with models_, _CORS-blocked_, or _not found_ — with actionable guidance.
-- **🌐 Scans the local network.** Probes every address in your subnet (`192.168.1.1–254`) on the
-  standard LLM ports, identifies what answers (with model lists), and adopts a nearby machine's
-  server in one click. Auto-detects your subnet where the browser allows it; manual entry +
-  common-subnet chips otherwise.
+- **🔍 Setup is three steps, not a form.** **Find** a server → **choose a model** from the list it
+  reports → **Save & test**. One press scans the well-known local inference ports on this machine
+  (LM Studio, Ollama, llama.cpp, KoboldCpp, text-generation-webui, GPT4All, vLLM, Jan, AnythingLLM,
+  Msty) and, when it knows which network you are on, that whole subnet as well. Working servers come
+  first; the ports that answered nothing stay folded away.
+- **🌐 It works out your local network itself.** Chrome mDNS-obfuscates the machine's own address,
+  so instead of asking you for a subnet the app asks the network: it probes the gateway of each
+  plausible range and takes the first that answers (a router's page replies in milliseconds). The
+  subnet it found is remembered, offered as chips, and used for the sweep — so "the server is on the
+  other computer" is one button, not a networking quiz.
+- **🎯 The model picker is a list, and it leads with the right model.** The server's own models,
+  best writer first (a 7B instruct model beats the 3B, and an embedding model is never preselected),
+  with a **↻ Reload models** button and an "Other — type a name…" escape hatch.
 - **⌨️ Manual entry is first-class.** Any base URL and port (e.g. `http://192.168.1.50:1234`),
   either protocol (OpenAI-compatible or Ollama native), any model name, optional **API key** (sent
   as a bearer token only to that endpoint), a one-off "Probe this URL", and preset port hints.
@@ -80,21 +86,22 @@ pnpm preview        # serve the built single file at http://localhost:4174
 ```
 
 Then open `dist/page-turn.html` directly from disk — no server, no network, no build step needed at
-runtime. Open **Settings → Scan for local LLMs**, pick a model, and write your seed.
+runtime. Open **Settings**, press **🔍 Scan for local LLMs**, press **Use** on the server it finds,
+pick a model, press **✅ Save & test** — and write your seed.
 
 ### Scripts
 
-| Command          | What it does                                                              |
-| ---------------- | ------------------------------------------------------------------------- |
-| `pnpm dev`       | Dev server with watch rebuild (real ESM modules, sourcemaps)              |
-| `pnpm build`     | Bundle + inline → `dist/page-turn.html` (+ `index.html`)                  |
-| `pnpm preview`   | Static server for the built single file                                   |
-| `pnpm test`      | Unit tests (vitest) over the pure domain layer                            |
-| `pnpm test:e2e`  | Browser end-to-end check (needs `chromium`): scan → use → save → generate |
-| `pnpm typecheck` | `tsc --noEmit` in strict mode (`noUncheckedIndexedAccess`)                |
-| `pnpm lint`      | ESLint (typescript-eslint)                                                |
-| `pnpm fmt`       | Prettier                                                                  |
-| `pnpm check`     | typecheck + lint + format check + tests + build — what CI runs            |
+| Command          | What it does                                                                        |
+| ---------------- | ----------------------------------------------------------------------------------- |
+| `pnpm dev`       | Dev server with watch rebuild (real ESM modules, sourcemaps)                        |
+| `pnpm build`     | Bundle + inline → `dist/page-turn.html` (+ `index.html`)                            |
+| `pnpm preview`   | Static server for the built single file                                             |
+| `pnpm test`      | Unit tests (vitest) over the pure domain layer                                      |
+| `pnpm test:e2e`  | Browser end-to-end check (needs `chromium`): setup → scan → model → book → generate |
+| `pnpm typecheck` | `tsc --noEmit` in strict mode (`noUncheckedIndexedAccess`)                          |
+| `pnpm lint`      | ESLint (typescript-eslint)                                                          |
+| `pnpm fmt`       | Prettier                                                                            |
+| `pnpm check`     | typecheck + lint + format check + tests + build — what CI runs                      |
 
 ## How it works, briefly
 

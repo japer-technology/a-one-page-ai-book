@@ -7,6 +7,8 @@ cd "$(dirname "$0")/../.."
 PROFILE="${1:-/tmp/pt-profile}"
 rm -rf "$PROFILE"
 bash scripts/e2e/dev-down.sh >/dev/null
+# Record the profile for dev-down, so a non-default one still gets stopped.
+echo "$PROFILE" >/tmp/pt-profile.current
 nohup node scripts/e2e/mock-llm.mjs >/tmp/pt-mock.log 2>&1 &
 sleep 1
 nohup chromium --headless --disable-gpu --no-sandbox --remote-debugging-port=9222 \

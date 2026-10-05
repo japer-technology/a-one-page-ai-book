@@ -108,10 +108,21 @@ function titleCard(
   const selected = sel.index === index;
   const editing = selected && sel.edited.length > 0;
 
+  const select = (): void => {
+    sel.index = index;
+    sel.edited = '';
+    api.refresh();
+  };
+
   const card = h(
     'article',
     {
       class: `title-card${selected ? ' selected' : ''}`,
+      // Keyboard readers tab to each proposal and pick with Enter/Space;
+      // a card is a control, so give it the role (a real <button> could not
+      // contain the inline edit field).
+      role: 'button',
+      tabindex: '0',
       onclick: (event: MouseEvent) => {
         // The card's own controls live inside it. Without this guard a click on
         // the "Edit the title…" field bubbled up, reset `sel.edited` and
@@ -119,9 +130,14 @@ function titleCard(
         // snapped back, so a mouse user could never edit a title.
         const target = event.target;
         if (target instanceof Element && target.closest('input, button, textarea, select')) return;
-        sel.index = index;
-        sel.edited = '';
-        api.refresh();
+        select();
+      },
+      onkeydown: (event: KeyboardEvent) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const target = event.target;
+        if (target instanceof Element && target.closest('input, button, textarea, select')) return;
+        event.preventDefault();
+        select();
       },
     },
     h(

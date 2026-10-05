@@ -84,6 +84,20 @@ describe('parseTitleOptions', () => {
   it('returns an empty list for prose with no titles in it', () => {
     expect(parseTitleOptions('I cannot help with that request.')).toEqual([]);
   });
+
+  it('treats JSON that parsed as the answer, even when it holds no titles', () => {
+    // Re-reading the JSON text as a line list split `{"titles` at its colon and
+    // offered the reader a title card reading `{"titles` — which the book, its
+    // filename and its EPUB metadata would then be named after.
+    expect(parseTitleOptions('{"titles": []}')).toEqual([]);
+    expect(parseTitleOptions('```json\n{"titles": []}\n```')).toEqual([]);
+  });
+
+  it('accepts the single {title, tagline} object a small model returns', () => {
+    expect(
+      parseTitleOptions('{"title": "The Dead Letter", "tagline": "salt and secrets"}'),
+    ).toEqual([{ title: 'The Dead Letter', tagline: 'salt and secrets' }]);
+  });
 });
 
 describe('parseBible', () => {
@@ -145,5 +159,40 @@ describe('parseBible', () => {
     const bible = parseBible('{"people": [], "places": [], "things": []}', previous);
     expect(bible.people[0]?.name).toBe('Elin');
     expect(bible.places[0]?.name).toBe('the island');
+  });
+});
+
+describe('parseBible keeps the reader\u2019s curation', () => {
+  it('keeps a previous entry the model did not mention', () => {
+    const previous = {
+      people: [
+        { name: 'Elin Marr', note: 'the keeper' },
+        { name: 'QA Ghost', note: 'added by the reader' },
+      ],
+      places: [],
+      things: [],
+      threads: [],
+      relations: [],
+      summary: '',
+    } as never;
+    const next = parseBible('{"people":[{"name":"Elin Marr","note":"rewritten note"}]}', previous);
+    expect(next.people.map((p) => p.name)).toEqual(['Elin Marr', 'QA Ghost']);
+    expect(next.people[0]?.note).toBe('rewritten note');
+  });
+
+  it('matches names case-insensitively so a rename is not duplicated', () => {
+    const previous = {
+      people: [{ name: 'Elin Marr', note: '' }],
+      places: [],
+      things: [],
+      threads: [],
+      relations: [],
+      summary: '',
+    } as never;
+    const next = parseBible(
+      '{"people":[{"name":"elin marr","note":"lowercase from the model"}]}',
+      previous,
+    );
+    expect(next.people).toHaveLength(1);
   });
 });

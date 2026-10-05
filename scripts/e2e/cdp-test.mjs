@@ -2,7 +2,7 @@
 // Protocol — the full user journey, including the part that used to break:
 //
 //   settings → scan (both mock servers reachable) → Use LM Studio →
-//   Test connection (which persists the endpoint) → New book → seed →
+//   Save & test (which persists the endpoint) → New book → seed →
 //   titles (JSON) → use title →
 //   PAGE 1 STREAMS (SSE) → keep → turn → switch endpoint to Ollama → Save →
 //   continue → PAGE 2 STREAMS (NDJSON) → LAN scan finds the loopback server.
@@ -134,23 +134,39 @@ out.scanRows = await evaluate(
 await evaluate(
   "[...document.querySelectorAll('.scan-row')].find(r => r.textContent.includes('LM Studio')).querySelector('button').click(); 'used'",
 );
-out.modelAfterUse = await evaluate(
-  'document.querySelector(\'input[list="discovered-models"]\').value',
+// The model picker is a real list now, best writer first: the app must NOT
+// preselect the alphabetically-first model (which on a stock LM Studio install
+// is an embedding model, and here is the smaller 3B).
+out.modelAfterUse = await evaluate('document.querySelector("#endpoint-model").value');
+out.modelOptionsAfterUse = await evaluate(
+  '[...document.querySelectorAll("#endpoint-model option")].map(o => o.textContent)',
 );
-// Regression: Test connection must persist the form, so a user who tests
+out.bestModelChosen = out.modelAfterUse === 'mock-storyteller-7b';
+out.bestModelStarred = await evaluate(
+  'document.querySelector("#endpoint-model option[value=\'mock-storyteller-7b\']").textContent.startsWith("★")',
+);
+// Regression: Save & test must persist the endpoint, so a user who tests
 // without pressing Save still gets a working endpoint for titles/pages.
-await evaluate(
-  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Test connection')).click(); 'clicked'",
-);
+await evaluate("document.querySelector('#endpoint-save-test').click(); 'clicked'");
 out.connectedToast = await waitForOr(
   "[...document.querySelectorAll('.toast')].some(t => t.textContent.includes('Connected'))",
   30000,
   'Connected toast',
 );
+out.inlineStatus = await evaluate("document.querySelector('#endpoint-status').textContent");
 out.savedAfterTest = await evaluate('window.__PAGE_TURN__.model()');
 
 // Appearance must survive navigation and must not wipe an unsaved endpoint.
-await changeValue('input[list="discovered-models"]', 'unsaved-model', 'input');
+// Typing a model name the server did not list is the "Other…" path of the
+// picker, so drive the real UI: choose Other, then type.
+await evaluate(`(() => {
+  const select = document.querySelector('#endpoint-model');
+  select.value = '\u0000custom';
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  return 'other';
+})()`);
+await waitFor("!!document.querySelector('#endpoint-model-custom')", 5000, 'custom model box');
+await changeValue('#endpoint-model-custom', 'unsaved-model', 'input');
 const formats = ['story', 'letter', 'diary', 'newspaper', 'mapnote', 'recipe'];
 const fonts = ['georgia', 'palatino', 'charter', 'serif', 'sans'];
 const readingFonts = {};
@@ -197,9 +213,9 @@ await changeValue('.wardrobe-select[data-format="story"]', 'sans');
 await changeValue('.wardrobe-select[data-format="letter"]', 'charter');
 await changeValue('.font-scale', '1.2');
 out.appearanceKeepsEndpointDraft = await evaluate(
-  `document.querySelector('input[list="discovered-models"]').value === 'unsaved-model' && window.__PAGE_TURN__.model().model === 'mock-poet-3b'`,
+  `document.querySelector('#endpoint-model-custom').value === 'unsaved-model' && window.__PAGE_TURN__.model().model === 'mock-storyteller-7b'`,
 );
-await changeValue('input[list="discovered-models"]', 'mock-poet-3b', 'input');
+await changeValue('#endpoint-model-custom', 'mock-storyteller-7b', 'input');
 
 // ---- 2. New book: seed → titles → page 1 streams SSE -----------------------
 await evaluate(
@@ -321,12 +337,8 @@ await waitFor("!!document.querySelector('.view-settings')", 10000, 'settings aga
 await evaluate(
   "[...document.querySelectorAll('.scan-row')].find(r => r.textContent.includes('Ollama')).querySelector('button').click(); 'used-ollama'",
 );
-out.modelAfterOllamaUse = await evaluate(
-  'document.querySelector(\'input[list="discovered-models"]\').value',
-);
-await evaluate(
-  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Save')).click(); 'saved-ollama'",
-);
+out.modelAfterOllamaUse = await evaluate('document.querySelector("#endpoint-model").value');
+await evaluate("document.querySelector('#endpoint-save').click(); 'saved-ollama'");
 await evaluate(
   "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Library')).click(); 'library'",
 );
@@ -519,10 +531,17 @@ await evaluate(
   "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Settings')).click(); 'settings-again'",
 );
 await waitFor("!!document.getElementById('lan-subnet')", 10000, 'lan subnet input');
-await evaluate("document.getElementById('lan-subnet').value = '127.0.0'; 'typed'");
-await evaluate(
-  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Scan local network')).click(); 'clicked'",
-);
+await evaluate(`(() => {
+  const field = document.getElementById('lan-subnet');
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  setter.call(field, '127.0.0');
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  return 'typed';
+})()`);
+// 127.0.0 is not the machine's own network, so the one-button scan will not
+// sweep it — the explicit control is the path for a range the app has no
+// evidence for, and it is exactly what a reader would use here.
+await evaluate("document.getElementById('lan-sweep-anyway').click(); 'clicked'");
 out.lanHitAppeared = await waitForOr(
   "[...document.querySelectorAll('.lan-row')].some(r => r.textContent.includes('127.0.0.1') && r.textContent.includes('reachable'))",
   60000,
@@ -534,9 +553,7 @@ out.lanRows = await evaluate(
 await evaluate(
   "[...document.querySelectorAll('.lan-row')].find(r => r.textContent.includes('127.0.0.1')).querySelector('button').click(); 'used-lan'",
 );
-out.modelAfterLanUse = await evaluate(
-  'document.querySelector(\'input[list="discovered-models"]\').value',
-);
+out.modelAfterLanUse = await evaluate('document.querySelector("#endpoint-model").value');
 
 // Reload from durable storage, not just the in-memory settings draft.
 await sleep(1000);
@@ -581,7 +598,12 @@ console.log(JSON.stringify(out, null, 2));
 
 const ok =
   out.connectedToast === true &&
-  out.savedAfterTest?.model === 'mock-poet-3b' &&
+  // The picker must choose the best writer on the server (7B instruct), not
+  // the alphabetically-first entry (the 3B), and the endpoint saved by
+  // "Save & test" must be the same model that was tested.
+  out.bestModelChosen === true &&
+  out.bestModelStarred === true &&
+  out.savedAfterTest?.model === 'mock-storyteller-7b' &&
   out.titleCards === true &&
   out.firstTurnAppeared === true &&
   out.workingLight === true &&
@@ -630,6 +652,6 @@ const ok =
   out.reloadedPageFontApplied === true &&
   out.endingFontApplied === true &&
   out.lanHitAppeared === true &&
-  out.modelAfterLanUse === 'mock-poet-3b';
+  out.modelAfterLanUse === 'mock-storyteller-7b';
 ws.close();
 process.exit(ok ? 0 : 1);

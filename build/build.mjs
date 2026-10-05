@@ -32,9 +32,18 @@ function gitShortHash() {
 
 const start = performance.now();
 
+// SOURCE_DATE_EPOCH makes repeat builds byte-identical (reproducible builds,
+// artifact pinning); without it the timestamp records when this build ran.
+const builtAt = process.env.SOURCE_DATE_EPOCH
+  ? new Date(Number(process.env.SOURCE_DATE_EPOCH) * 1000).toISOString()
+  : new Date().toISOString();
+
 await rm(OUT, { recursive: true, force: true });
-await rm(DIST, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
+// dist/ is NOT wiped up front: a failed build used to delete the committed
+// artifacts before esbuild or one of the guards could fail, so the shipped
+// single file vanished from the tree until the next successful build. Both
+// outputs are written (overwritten) only after everything has succeeded.
 await mkdir(DIST, { recursive: true });
 
 const shared = {
@@ -53,14 +62,14 @@ await build({
   entryPoints: [path.join(root, 'src/main.ts'), path.join(root, 'src/app.css')],
   outdir: OUT,
   format: 'iife',
-  define: { __BUILD_TIME__: JSON.stringify(new Date().toISOString()) },
+  define: { __BUILD_TIME__: JSON.stringify(builtAt) },
 });
 
 let css = await readFile(path.join(OUT, 'app.css'), 'utf8');
 let js = await readFile(path.join(OUT, 'main.js'), 'utf8');
 
 // Build metadata, visible in-app and from the devtools console.
-js += `\nwindow.__BUILD__={name:${JSON.stringify(PKG.name)},version:${JSON.stringify(PKG.version)},builtAt:${JSON.stringify(new Date().toISOString())},commit:${JSON.stringify(gitShortHash())}};\n`;
+js += `\nwindow.__BUILD__={name:${JSON.stringify(PKG.name)},version:${JSON.stringify(PKG.version)},builtAt:${JSON.stringify(builtAt)},commit:${JSON.stringify(gitShortHash())}};\n`;
 
 let html = await readFile(path.join(root, 'build/template.html'), 'utf8');
 if (!html.includes('{{__CSS__}}') || !html.includes('{{__JS__}}')) {

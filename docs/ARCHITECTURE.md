@@ -146,19 +146,43 @@ Discovery (`llm/probe.ts`) works within a browser's hard CORS reality:
 3. Only after pure `TypeError`s does a **`no-cors` fetch** distinguish "nothing is listening" from
    "a server answered but refused this page's origin" — reported as `cors-blocked` with actionable
    fixes (enable CORS for localhost origins, or run from a localhost URL).
-4. `reachable` endpoints contribute their model lists to the settings picker. **Manual entry is
-   first-class**: any base URL (host + port + optional path prefix, `/v1` optional), either
-   protocol, any model name, an optional **API key** (sent as `Authorization: Bearer …` only to that
-   endpoint), a one-off **"Probe this URL"** for LAN addresses the catalog doesn't know
-   (`http://192.168.1.50:1234`), and preset port hints from the catalog.
+4. `reachable` endpoints contribute their model lists to the **model picker** — a real list of the
+   chosen server's models, ranked best-writer-first by `rankModels`/`pickBestModel` in
+   `llm/endpoints.ts` (parameter size, instruction tuning, and hard exclusions for embedding, rerank
+   and safety models), which is what stops an alphabetical `models[0]` from preselecting
+   `text-embedding-…` on a stock LM Studio install. **Manual entry is first-class**: any base URL
+   (host + port + optional path prefix, `/v1` optional), either protocol, any model name, an
+   optional **API key** (sent as `Authorization: Bearer …` only to that endpoint), a one-off
+   **"Probe this URL"** for LAN addresses the catalog doesn't know (`http://192.168.1.50:1234`), and
+   a "Other — type a name…" escape hatch in the picker.
 5. **LAN scanning** (`llm/lan.ts`): browsers can't enumerate a network (no raw sockets/ARP/ICMP), so
    "scanning" means probing the grid {subnet base} × {`.1`–`.254`} × {catalog ports} with a
    `no-cors` GET (any HTTP answer = a responder), then identifying responders with the standard CORS
-   model-list probe. Per host the scan stops at the first responder; 16 parallel workers and a 600
-   ms per-probe timeout keep a full /24 to seconds, with live progress and cancel. The subnet
-   auto-detects via WebRTC ICE where the browser allows it (Chrome mDNS-obfuscates, so manual
-   entry + common-subnet chips are the reliable path), and identified servers feed the same "Use"
-   flow as localhost discoveries (vendor guessed by port: 11434 → Ollama).
+   model-list probe — retried once, since a presence probe that already succeeded means the
+   identification request was lost, not that the server is absent. Every port of a host is raced
+   together and the first responder wins, so an empty address costs one timeout instead of one per
+   port (a full /24 is ~13 s rather than ~105 s), with live progress and cancel. A cancelled sweep
+   stops claiming hosts and lets the in-flight batch expire on its own timeout rather than aborting
+   ~130 sockets in one tick, which is what used to leave Chromium unable to reach even `127.0.0.1`
+   for the next minute.
+6. **Finding the local network happens without an API for it.** Chrome mDNS-obfuscates WebRTC host
+   candidates, so `detectLocalIps` usually yields nothing; the subnet is then _asked for_, by
+   probing candidate gateways (`<base>.1:80`) one subnet at a time and taking the first that answers
+   — a router's admin page replies in single-digit milliseconds, an address on a subnet we are not
+   connected to never replies at all (`rankSubnets`). Probing them concurrently, or sweeping a range
+   nothing answered on, is worse than useless: a connect attempt to a foreign range is silently
+   dropped and held by the kernel for its full SYN-retry window (~2 min), which saturates Chromium's
+   network service. **When an address IS known** (Firefox and Safari reveal one; a page served from
+   a LAN machine knows its own host), the question is already answered: that subnet is recorded as
+   ours and **nothing is probed at all** — 28 dropped connects and ~20 s of waiting to confirm an
+   answer in hand, through exactly the sockets that leave the network service unable to serve the
+   reader's next request. An address on a network the app knows by name outranks a virtual adapter's
+   range (Docker, a VM), and several addresses are all kept. Hence the rule the settings view
+   follows: **the one-button scan sweeps a subnet when it is known to be ours** — something answered
+   there, or the page holds an address on it (or the reader explicitly asks) — the local sweep
+   always runs first, and an all-absent local sweep is re-probed once before "no LLM found" is
+   reported, though not when an address already answered the network question. The verified subnet
+   is remembered in `settings.lanSubnet` as a prefill, never as a decision — evidence outranks it.
 
 Generation (`llm/client.ts`) speaks two dialects behind one interface — **OpenAI-compatible**
 (`POST /v1/chat/completions`) and **Ollama native** (`POST /api/chat`, with automatic `/v1` fallback
@@ -290,10 +314,10 @@ Two hard-won rules keep this layer from biting itself:
 - **Optional end-to-end harness** (`pnpm test:e2e`, requires `chromium` in PATH): TWO mock servers
   (OpenAI-compatible SSE on :1234, Ollama-native NDJSON on :11434) plus the real built file in
   headless Chromium, driven over CDP — the full user journey: boot → `#/settings` → Scan → Use →
-  Save → Test connection → New book → seed → titles → **page 1 streams via SSE** → keep → turn →
-  switch endpoint to Ollama → **page 2 streams via NDJSON** → LAN scan finds the loopback server.
-  This is the check that catches browser-only regressions (CORS, streaming dialects, the
-  stale-frontier bug, boot hangs).
+  Save & test → New book → seed → titles → **page 1 streams via SSE** → keep → turn → switch
+  endpoint to Ollama → **page 2 streams via NDJSON** → LAN scan finds the loopback server. This is
+  the check that catches browser-only regressions (CORS, streaming dialects, the stale-frontier bug,
+  boot hangs).
 - **TypeScript strict** with `noUncheckedIndexedAccess` and `verbatimModuleSyntax`; **ESLint**
   (typescript-eslint recommended) + **Prettier**; **CI** runs `pnpm check` (typecheck → lint →
   format → test → build) on every push and PR, and publishes the built single file as an artifact.

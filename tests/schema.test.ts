@@ -307,6 +307,24 @@ describe('schema v4 fields', () => {
     expect(fresh.settings.seenOnboarding).toBe(false);
   });
 
+  it('keeps only a real three-octet subnet from the remembered network', () => {
+    // The value is interpolated into sweep URLs ("<base>.1–254"), so an
+    // imported file must not be able to point the scan at an arbitrary string.
+    const kept = normalizeLibrary({
+      books: [],
+      nodes: {},
+      settings: { lanSubnet: ' 192.168.1 ' },
+    });
+    expect(kept.settings.lanSubnet).toBe('192.168.1');
+    for (const junk of ['', 'hello', '192.168.1.42/24', '999.1.1', '192.168.1.999']) {
+      expect(
+        normalizeLibrary({ books: [], nodes: {}, settings: { lanSubnet: junk } }).settings
+          .lanSubnet,
+      ).toBe('');
+    }
+    expect(normalizeLibrary({ books: [], nodes: {} }).settings.lanSubnet).toBe('');
+  });
+
   it('round-trips pinned versions', () => {
     const raw = goodLibrary();
     const pageId = raw.books[0]!.frontierId;
@@ -522,5 +540,118 @@ describe('schema v8 round-5 fields', () => {
     expect(lib.settings.documentFonts.diary).toBe('sans');
     const fresh = normalizeLibrary({ books: [], nodes: {} });
     expect(fresh.settings.documentFonts.newspaper).toBe('auto');
+  });
+});
+
+/**
+ * Fields an imported document may not have got right are coerced on the way
+ * in, because the exporters and prompt builders call string methods on them:
+ * an unreadable number in one of these used to make a whole book permanently
+ * unexportable, or its title phase permanently broken, with no way back.
+ */
+describe('imported strings the exporters depend on', () => {
+  const withEnding = (data: unknown) => ({
+    books: [],
+    nodes: { e: { id: 'e', kind: 'ending', parentId: null, createdAt: 3, data } },
+  });
+
+  it('coerces an ending note that is not a string', () => {
+    const lib = normalizeLibrary(withEnding({ kind: 'ending', note: 42 }));
+    const ending = lib.nodes.e?.data;
+    expect(ending && ending.kind === 'ending' ? ending.note : null).toBe('');
+  });
+
+  it('gives a missing ending note the empty string too', () => {
+    const lib = normalizeLibrary(withEnding({ kind: 'ending' }));
+    const ending = lib.nodes.e?.data;
+    expect(ending && ending.kind === 'ending' ? ending.note : 'missing').toBe('');
+  });
+
+  it('normalizes seed options the title prompt can call methods on', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {
+        s: {
+          id: 's',
+          kind: 'seed',
+          parentId: null,
+          createdAt: 1,
+          data: {
+            kind: 'seed',
+            text: 'A lighthouse keeper finds a letter.',
+            titles: [],
+            brief: '',
+            // `lengthHint` is the one the title prompt runs `.replaceAll` on.
+            options: {
+              genre: 'gothic',
+              perspective: 'fourth',
+              tense: 3,
+              tone: null,
+              audience: 'teen',
+              lengthHint: 5,
+            },
+          },
+        },
+      },
+    });
+    const seed = lib.nodes.s?.data;
+    expect(seed && seed.kind === 'seed' ? seed.options : null).toEqual({
+      genre: 'gothic',
+      perspective: '',
+      tense: '',
+      tone: '',
+      audience: 'teen',
+      lengthHint: '',
+    });
+  });
+});
+
+describe('normalization fixes that protect imports', () => {
+  const firstPage = (raw: ReturnType<typeof goodLibrary>): StoryNode =>
+    Object.values(raw.nodes).find((n) => n.kind === 'page') as StoryNode;
+
+  it('renumbers versions to their positions so pinning cannot silently no-op', () => {
+    const raw = goodLibrary();
+    const page = firstPage(raw);
+    (page.data as unknown as { versions: unknown[] }).versions = [
+      { v: 1, text: 'a', by: 'ai', at: 1 },
+      { v: 2, text: 42, by: 'ai', at: 2 },
+      { v: 3, text: 'c', by: 'ai', at: 3 },
+    ];
+    const lib = normalizeLibrary(raw);
+    const data = lib.nodes[page.id]?.data;
+    const versions = data?.kind === 'page' ? data.versions.map((v) => v.v) : [];
+    expect(versions).toEqual([1, 2]);
+  });
+
+  it('splits legacy string relations on a dash, never on hyphens inside names', () => {
+    const raw = goodLibrary();
+    const page = firstPage(raw);
+    (page.data as unknown as { bible: unknown }).bible = {
+      relations: ['Anna-Maria — big-sister — Joss'],
+    };
+    const lib = normalizeLibrary(raw);
+    const data = lib.nodes[page.id]?.data;
+    const relations = data?.kind === 'page' ? data.bible?.relations : undefined;
+    expect(relations?.[0]).toEqual({ from: 'Anna-Maria', to: 'Joss', kind: 'big-sister' });
+  });
+
+  it('trims guests before deduping', () => {
+    const raw = goodLibrary();
+    raw.books[0]!.guests = ['Mara', ' Mara ', 'Mara'];
+    expect(normalizeLibrary(raw).books[0]?.guests).toEqual(['Mara']);
+  });
+
+  it('falls back to the default for a slash-only base URL', () => {
+    const raw = goodLibrary();
+    raw.settings.endpoint.baseUrl = '/';
+    expect(normalizeLibrary(raw).settings.endpoint.baseUrl).toContain('127.0.0.1');
+  });
+
+  it('fails a present-but-not-array books field instead of reading it as an empty shelf', () => {
+    const raw = goodLibrary();
+    expect(() => normalizeLibrary({ ...raw, books: 'nope' } as never)).toThrow(
+      /"books" must be an array/,
+    );
   });
 });

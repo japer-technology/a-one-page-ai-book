@@ -11,6 +11,7 @@ import { button, field, h, pruneMap, spinner } from '../dom';
 import {
   buildContext,
   conflictMessages,
+  conflictVerdicts,
   endingsMessages,
   EMOTION_META,
   pageMessages,
@@ -112,6 +113,12 @@ export function renderTurn(api: AppApi): HTMLElement {
   pruneMap(suggestIndex, 200);
   pruneMap(endings, 200);
   pruneMap(conflicts, 200);
+  // A ghost holds a whole model-written page, so it gets the same treatment as
+  // its siblings — these maps used to accumulate for the life of the tab.
+  pruneMap(ghosts, 200);
+  pruneMap(ghostRequests, 200);
+  pruneMap(conflictErrors, 200);
+  if (autoSuggested.size > 300) autoSuggested.clear();
   if (turnFocused.size > 300) turnFocused.clear();
   const fromId = api.params.from ?? frontierParent(api);
   const from = fromId ? getNode(api.nodes, fromId) : null;
@@ -151,6 +158,17 @@ export function renderTurn(api: AppApi): HTMLElement {
       // re-renders on typing, so it must be switched on live or it stays
       // unreachable for the whole visit to the turn console.
       checkButton.disabled = input.direction.trim().length === 0;
+      // A verdict about the old direction is stale the moment the text changes
+      // (the suggestion chips and nudges below delete both maps for exactly
+      // this reason). Typing deliberately does not re-render, so the on-screen
+      // verdict has to go now as well — but ONLY the verdict: the check row is
+      // this area's last child, and clearing the whole area deleted the
+      // "Check this direction" button itself (nothing rebuilds it until an
+      // unrelated render).
+      conflicts.delete(stateKey);
+      conflictErrors.delete(stateKey);
+      const area = document.querySelector('.conflict-area');
+      if (area) for (const node of [...area.children].slice(0, -1)) node.remove();
     },
   });
   // The direction is the primary control: put the caret there the first time
@@ -575,6 +593,13 @@ export function renderTurn(api: AppApi): HTMLElement {
         onclick: () => {
           input.direction = `${ending.title}: ${ending.premise}`;
           directionBox.value = input.direction;
+          conflicts.delete(stateKey);
+          // Same trap the nudges were fixed for: the button's disabled state is
+          // computed at render time, so filling the box from a chip left
+          // "Check this direction" dead right underneath the text it had just
+          // written.
+          checkButton.disabled = false;
+          api.refresh();
         },
       }),
     ),
@@ -601,6 +626,10 @@ export function renderTurn(api: AppApi): HTMLElement {
                 ...structuredClone(found.input),
                 direction: input.direction || found.input.direction,
               });
+              // Applying a template can change the direction: a verdict about
+              // the old one must not linger under the new text.
+              conflicts.delete(stateKey);
+              conflictErrors.delete(stateKey);
               api.refresh();
             }
           }),
@@ -966,15 +995,19 @@ async function checkConflicts(
   conflicts.delete(stateKey);
   conflictErrors.delete(stateKey);
   api.refresh();
+  const checked = input.direction;
   try {
     const context = buildContext(api.nodes, book);
     const raw = await api.generateJSON<unknown>(conflictMessages(context, input.direction), {
       model: api.lib.settings.fastModel || api.lib.settings.endpoint.model,
     });
-    const list = parseStringList(typeof raw === 'string' ? raw : JSON.stringify(raw)).filter(
-      (item) => !/no conflicts|none found|\[\]|consistent/i.test(item),
+    const list = conflictVerdicts(
+      parseStringList(typeof raw === 'string' ? raw : JSON.stringify(raw)),
     );
-    conflicts.set(stateKey, list);
+    // The reader can keep typing (or apply a template) while the check runs: a
+    // verdict about the direction that was SENT must not appear under whatever
+    // is in the box now.
+    if (input.direction === checked) conflicts.set(stateKey, list);
   } catch (err) {
     // Keep this OUT of `conflicts`: the render maps a non-empty list to the red
     // "this direction conflicts with the story" banner, which turned an
@@ -1014,7 +1047,12 @@ function ghostPanel(
         'div',
         { class: 'row gap' },
         button('✕ Let it dissolve', () => {
+          // Dismiss AND abort: dropping only the local state left the request
+          // running, and its completion — which checks the staleness token, not
+          // this map — then saved the finished ghost and brought the panel
+          // back. This is what the busy panel's own Cancel already does.
           genStates.delete(key);
+          api.abortGeneration();
           api.refresh();
         }),
       ),

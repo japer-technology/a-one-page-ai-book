@@ -123,6 +123,16 @@ const BAD_JSON_RE = /not valid JSON|Unexpected token|Unexpected end of JSON|is n
 const STATUS_RE = /LLM server responded (\d{3})/;
 
 /**
+ * Local-model LOAD failures. They arrive as an ordinary HTTP 500, but the
+ * condition cannot change between attempts — loading a model into memory fails
+ * the same way every time. The mid-stream taxonomy already treats this wording
+ * as fatal; the pre-stream classifier did not, so a doomed request climbed the
+ * whole gateway ladder.
+ */
+const OUT_OF_RESOURCES_RE =
+  /out of memory|requires more (?:system )?memory|insufficient memory|not enough memory|context (?:length|size|window) (?:is )?(?:too|exceed)|exceeds? the context|context overflow|too large for (?:the|this) (?:context|model|memory|gpu)|failed to allocate|CUDA error/i;
+
+/**
  * An abort or a timeout is never retryable: the signal is dead, so a retry
  * would fail instantly with a misleading "cancelled" error, and a generation
  * that burned its whole ceiling will burn it again.
@@ -152,6 +162,13 @@ export function classifyLLMFailure(err: unknown): LLMFailureKind {
   if (BAD_JSON_RE.test(message)) return 'bad-json';
   if (EMPTY_RE.test(message)) return 'empty';
   const status = Number(STATUS_RE.exec(message)?.[1] ?? 0);
+  // A 5xx is not automatically "the server hiccuped, try again": the common
+  // local-model LOAD failures arrive as HTTP 500 with memory wording, and the
+  // condition cannot change between attempts — loading the model fails the
+  // same way every time. The mid-stream taxonomy already treats this wording
+  // as fatal; here it was taking the full gateway ladder (4 attempts, ~11 s of
+  // "the local server hiccuped" announcements) before showing the real error.
+  if (OUT_OF_RESOURCES_RE.test(message)) return 'fatal';
   if (status >= 500 && status <= 599) return 'gateway';
   // Everything else — 401/403, 404 (wrong model or URL), a malformed body, a
   // server-reported generation error (OOM, context overflow) — is the answer.

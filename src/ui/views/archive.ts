@@ -17,6 +17,7 @@ import {
   seedTextOf,
   spinePages,
   titleNodeOf,
+  writableTip,
 } from '../../core/tree';
 import type { Book, StoryNode, TurnInput } from '../../core/types';
 import type { EmotionName } from '../../core/types';
@@ -77,8 +78,13 @@ export function renderArchive(api: AppApi): HTMLElement {
             (n) => n.kind === 'title' && n.data.kind === 'title' && n.data.title === option.title,
           );
           const tip = titleNode ? branchTip(nodes, titleNode.id) : null;
-          const pages = tip ? spinePages(nodes, tip.id).length : 0;
           const here = tip !== null && book.frontierId === tip.id;
+          // Count from the newest node the WRITING view can render: `branchTip`
+          // returns the prologue The End screen attaches to the title after the
+          // pages, and a prologue's own path holds no pages — a fully written
+          // branch then read "not started yet" (see `writableTip`).
+          const lastWritable = titleNode ? writableTip(nodes, titleNode.id) : null;
+          const pages = lastWritable ? spinePages(nodes, lastWritable.id).length : 0;
           const chosen = option.title === title;
           return h(
             'div',
@@ -165,8 +171,13 @@ export function renderArchive(api: AppApi): HTMLElement {
           api.navigate('turn', { from: frontier.parentId ?? book.chosenTitleId });
         } else if (frontier?.kind === 'title') {
           api.navigate('page');
-        } else if (frontier) {
+        } else if (frontier?.kind === 'page') {
           api.openPageAt(book, frontier.id);
+        } else if (frontier) {
+          // A prologue (and, from an imported bundle, a seed) is not a node
+          // `openPageAt` can show — its guard returns silently, so the button
+          // was a dead click. `openBook` repairs such a frontier (main.ts).
+          api.openBook(book.id);
         } else {
           api.toast('This book has no frontier any more.', 'error');
         }
@@ -319,7 +330,7 @@ function timelineEntry(
   );
 }
 
-/** Pages that branch off this page through turn nodes, other than the chosen continuation. */
+/** Pages that branch off this page: the roads not taken from where it sits. */
 function branchPagesOf(
   api: AppApi,
   page: StoryNode,
@@ -333,13 +344,32 @@ function branchPagesOf(
       if (child.id !== chosenNextPageId) out.push(child);
     }
   }
-  // …but page 1 grows directly under the title (it has no turn node), so its
-  // forks are siblings of the page itself.
+  // …but the FIRST page of a branch forks at the title that starts it: every
+  // title is a doorway, and entering it again appends another turn under the
+  // title (title → turn → page), i.e. another first page. Page 1 showed no
+  // roads at all unless they had been written straight under the title.
   const parent = getNode(api.nodes, page.parentId ?? '');
-  if (parent && parent.kind === 'title') {
-    for (const child of childrenOf(api.nodes, parent.id)) {
-      if (child.kind !== 'page' || child.id === page.id) continue;
-      if (child.id !== chosenNextPageId) out.push(child);
+  const branchRoot =
+    parent?.kind === 'title'
+      ? parent
+      : parent?.kind === 'turn'
+        ? getNode(api.nodes, parent.parentId ?? '')
+        : null;
+  if (branchRoot && branchRoot.kind === 'title' && pageNumberAt(api.nodes, page.id) === 1) {
+    for (const child of childrenOf(api.nodes, branchRoot.id)) {
+      if (child.id === page.parentId) continue; // this page's own branch
+      // A branch under a title is a turn; its first page is the road itself.
+      const first =
+        child.kind === 'page'
+          ? child
+          : child.kind === 'turn'
+            ? childrenOf(api.nodes, child.id)
+                .filter((node) => node.kind === 'page')
+                .sort((a, b) => a.createdAt - b.createdAt)[0]
+            : null;
+      if (!first) continue;
+      if (first.id === page.id || first.id === chosenNextPageId) continue;
+      out.push(first);
     }
   }
   return out.sort((a, b) => a.createdAt - b.createdAt);

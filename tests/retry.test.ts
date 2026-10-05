@@ -481,3 +481,29 @@ describe('a flaky local server recovers end to end through chat()', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('model load failures are not retried', () => {
+  it('treats an out-of-memory 500 as fatal', () => {
+    expect(
+      classifyLLMFailure(
+        new Error(
+          'LLM server responded 500: model requires more system memory (11 GiB) than is available',
+        ),
+      ),
+    ).toBe('fatal');
+    expect(
+      classifyLLMFailure(new Error('LLM server responded 500: CUDA error: out of memory')),
+    ).toBe('fatal');
+    expect(
+      classifyLLMFailure(
+        new Error('LLM server responded 500: the input exceeds the context length'),
+      ),
+    ).toBe('fatal');
+  });
+
+  it('still retries an ordinary 500', () => {
+    expect(classifyLLMFailure(new Error('LLM server responded 500: internal error'))).toBe(
+      'gateway',
+    );
+  });
+});

@@ -701,7 +701,13 @@ export function trimChatHistory(
   const max = Math.max(2, keepExchanges * 2);
   if (history.length <= max) return [...history];
   const opening = history.slice(0, 2);
-  return [...opening, ...history.slice(-(max - opening.length))];
+  // `slice(-0)` is `slice(0)` — the WHOLE array, not an empty tail — so a
+  // one-exchange window returned MORE messages than it was given, growing the
+  // very request this function exists to bound. When there is no room for both
+  // the opening exchange and a tail, the newest turns win: they are what the
+  // next reply has to build on.
+  const tail = max - opening.length;
+  return tail > 0 ? [...opening, ...history.slice(-tail)] : history.slice(-max);
 }
 
 /** Messages for the pre-writing chat: system + rolling history. */
@@ -743,6 +749,34 @@ export function rewriteSpanMessages(
       content: `BOOK: "${ctx.title}"\nSEED: ${ctx.seed}${brief ? `\n\n${brief}` : ''}${cast ? `\n\n${cast}` : ''}${summary ? `\n\n${summary}` : ''}\n\nPAGE ${pageNumber}, the paragraph it lives in:\n${paragraphText}\n\nTHE EXACT SPAN TO REWRITE:\n${spanText}\n\nINSTRUCTION: ${instruction || 'Rewrite this span — same meaning and events, sharper prose, seamless with the sentence around it.'}${standing ? `\n\n${standing}` : ''}\n\nOutput ONLY the rewritten span (not the whole paragraph).`,
     },
   ];
+}
+
+/**
+ * The conflict checker's verdicts, with non-verdict chatter dropped.
+ *
+ * `consistent` must never be a bare substring test: "…is inconsistent with…"
+ * is exactly how a contradiction is phrased, and the substring match kept
+ * dropping those verdicts — so the checker reported "no conflicts" precisely
+ * when the model had found one. Only an explicit assertion of consistency
+ * ("is/seems/looks/appears/remains … consistent") is not a conflict; a negated
+ * one ("is not consistent", "is inconsistent") is.
+ */
+export function conflictVerdicts(items: string[]): string[] {
+  const NO_CONFLICTS = /no conflicts|none found|^\s*\[\s*\]\s*$/i;
+  // "…is largely/mostly/generally consistent…" is still an assertion of
+  // consistency — the verb may be followed by any short hedge, not a fixed
+  // list. The negative lookahead keeps the two ways a CONFLICT is phrased
+  // ("is not consistent", "is inconsistent") out of this match, and the bare
+  // "Consistent." verdict line is caught on its own.
+  const ASSERTS_CONSISTENCY =
+    /^\s*(?:\w+[\s,]+){0,2}?consistent\b|\b(?:is|seems|looks|appears|remains)\s+(?:(?!not\b|n't\b)\w+[\s,]+){0,2}?\bconsistent\b|\b(?:not|n't)\s+inconsistent\b/i;
+  // But a sentence that asserts consistency AND names a contradiction
+  // ("…is consistent with the story, but the gun was destroyed") IS a conflict.
+  const CONTRADICTION = /\b(?:conflict|contradict|inconsistent|however|but)\b/i;
+  return items.filter((item) => {
+    if (NO_CONFLICTS.test(item)) return false;
+    return !(ASSERTS_CONSISTENCY.test(item) && !CONTRADICTION.test(item));
+  });
 }
 
 /** Messages for the conflict checker: does the direction contradict the story? */
