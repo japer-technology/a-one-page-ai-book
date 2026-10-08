@@ -177,12 +177,17 @@ function normalizeNode(raw: unknown): StoryNode {
           };
         })
         .filter((option): option is TitleOption => option !== null);
-      if (data.brief === undefined) data.brief = '';
+      // JSON `null` is the idiomatic "absent" — treat it like undefined rather
+      // than rejecting the whole library over one cosmetic field.
+      if (data.brief === undefined || data.brief === null) data.brief = '';
       else asString(data.brief, `node "${id}" seed brief`);
       break;
     case 'title':
       asString(data.title, `node "${id}" title`);
-      if (data.tagline !== undefined) asString(data.tagline, `node "${id}" title tagline`);
+      // JSON `null` is the idiomatic "absent" — treat it like undefined rather
+      // than rejecting the whole library over one cosmetic field.
+      if (data.tagline === undefined || data.tagline === null) data.tagline = '';
+      else asString(data.tagline, `node "${id}" title tagline`);
       break;
     case 'page': {
       if (!Array.isArray(data.versions) || data.versions.length === 0) {
@@ -395,12 +400,30 @@ function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
   if (nodes[seedNodeId]?.kind !== 'seed') fail(`book "${id}" seed node is not a seed`);
   if (nodes[chosenTitleId]?.kind !== 'title') fail(`book "${id}" title node is not a title`);
   if (!nodes[frontierId]) fail(`book "${id}" frontier node missing`);
+  // Owning your nodes matters too: a frontier that merely EXISTS can point
+  // into ANOTHER book's subtree (hand-merged files, duplicated seeds), and the
+  // book then compiled, exported and even wrote inside that other story. The
+  // title must belong to this book's seed; a foreign frontier is repaired to
+  // the title so the book stays usable without leaking another book's pages.
+  const rootedAtSeed = (nodeId: string): boolean => {
+    const seen = new Set<string>();
+    let cursor: StoryNode | undefined = nodes[nodeId];
+    while (cursor && !seen.has(cursor.id)) {
+      if (cursor.id === seedNodeId) return true;
+      if (cursor.parentId === null) return false;
+      seen.add(cursor.id);
+      cursor = nodes[cursor.parentId];
+    }
+    return false;
+  };
+  if (!rootedAtSeed(chosenTitleId)) fail(`book "${id}" title node is not part of this book`);
+  const frontier = rootedAtSeed(frontierId) ? frontierId : chosenTitleId;
   const status = raw.status === 'finished' ? 'finished' : 'in-progress';
   return {
     id,
     seedNodeId,
     chosenTitleId,
-    frontierId,
+    frontierId: frontier,
     status,
     model: typeof raw.model === 'string' ? raw.model : '',
     rules: Array.isArray(raw.rules)
@@ -430,6 +453,12 @@ function normalizeBook(raw: unknown, nodes: Record<string, StoryNode>): Book {
     createdAt: finiteOr(raw.createdAt, Date.now()),
     updatedAt: finiteOr(raw.updatedAt, Date.now()),
   };
+}
+
+/** A real calendar day, not just a well-shaped string ("2026-02-30" rolls over). */
+function isRealDay(day: string): boolean {
+  const date = new Date(`${day}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === day;
 }
 
 function normalizeSettings(raw: unknown): Library['settings'] {
@@ -495,12 +524,15 @@ function normalizeSettings(raw: unknown): Library['settings'] {
     seenOnboarding: raw.seenOnboarding === true,
     // Keys must be real `YYYY-MM-DD` days: `computeStreak` parses every key as
     // a date, and one junk key from an imported file threw a RangeError that
-    // took the whole shelf render down with it.
+    // took the whole shelf render down with it. Shape is not enough —
+    // "2026-02-30" is well-shaped but not a day (it parses by rolling over to
+    // March), and it used to be counted as a one-day streak.
     activityDays: isRecord(raw.activityDays)
       ? Object.fromEntries(
           Object.entries(raw.activityDays).filter(
             (entry): entry is [string, number] =>
               /^\d{4}-\d{2}-\d{2}$/.test(entry[0]) &&
+              isRealDay(entry[0]) &&
               typeof entry[1] === 'number' &&
               Number.isFinite(entry[1]),
           ),

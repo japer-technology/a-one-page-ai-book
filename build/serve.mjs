@@ -42,12 +42,24 @@ if (preview) {
       const file = join(dist, p);
       if (!file.startsWith(dist)) throw new Error('forbidden');
       const info = await stat(file);
+      // A directory is not a file: writing its size and piping a read stream
+      // produced an async EISDIR on a stream with no 'error' listener, and
+      // the unhandled 'error' event killed the whole preview server.
+      if (info.isDirectory()) throw new Error('directory');
       res.writeHead(200, {
         'content-type': mime[extname(file)] ?? 'application/octet-stream',
         'content-length': info.size,
       });
-      createReadStream(file).pipe(res);
+      const stream = createReadStream(file);
+      // Mid-stream failures (file removed, I/O error) must not crash the
+      // process once the headers are out.
+      stream.on('error', () => res.destroy());
+      stream.pipe(res);
     } catch {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('not found');
     }

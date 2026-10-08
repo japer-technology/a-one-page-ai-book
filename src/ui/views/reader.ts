@@ -183,8 +183,8 @@ export function renderReader(api: AppApi): HTMLElement {
                 class: 'menu-item',
                 type: 'button',
                 text: '🖼️ Quote card',
-                onclick: () => {
-                  if (!quoteCardFor(compiled, pageNumber)) {
+                onclick: async () => {
+                  if (!(await quoteCardFor(compiled, pageNumber))) {
                     api.toast('Could not render that quote card on this device.', 'error');
                   }
                 },

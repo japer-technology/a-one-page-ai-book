@@ -34,12 +34,22 @@ export class ZipWriter {
   }
 
   finish(): Uint8Array {
+    // No Zip64 support: entry counts are 16-bit fields and every size/offset
+    // is a 32-bit field. Without these guards the EOCD silently wraps
+    // (70000 entries reported as 4464) and an archive over 4 GiB is
+    // unrecoverable — refuse to emit either.
+    if (this.entries.length > 0xffff) {
+      throw new Error(`ZIP: ${this.entries.length} entries exceed the 65535-entry limit`);
+    }
     const encoder = new TextEncoder();
     const parts: Uint8Array[] = [];
     const central: Uint8Array[] = [];
     let offset = 0;
 
     for (const entry of this.entries) {
+      if (entry.data.length > 0xffffffff) {
+        throw new Error(`ZIP: entry "${entry.name}" exceeds the 4 GiB limit`);
+      }
       const nameBytes = encoder.encode(entry.name);
       const crc = crc32(entry.data);
       const header = new Uint8Array(30);
@@ -69,6 +79,10 @@ export class ZipWriter {
       rec.setUint32(42, offset, true);
       central.push(record, nameBytes);
       offset += header.length + nameBytes.length + entry.data.length;
+    }
+
+    if (offset > 0xffffffff) {
+      throw new Error('ZIP: archive exceeds the 4 GiB limit (no Zip64 support)');
     }
 
     const centralSize = central.reduce((sum, part) => sum + part.length, 0);

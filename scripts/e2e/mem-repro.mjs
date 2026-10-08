@@ -85,9 +85,13 @@ await evaluate(
   "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('New book')).click(); 'seed'",
 );
 await waitFor("!!document.querySelector('.seed-input')", 10000, 'seed view');
-await evaluate(
-  "document.querySelector('.seed-input').value = 'A lighthouse keeper finds a letter.'; 'typed'",
-);
+await evaluate(`(() => {
+  const input = document.querySelector('.seed-input');
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+  setter.call(input, 'A lighthouse keeper finds a letter.');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  return 'typed';
+})()`);
 await evaluate(
   "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Begin')).click(); 'begun'",
 );
@@ -95,6 +99,11 @@ await waitFor("document.querySelectorAll('.title-card').length >= 5", 30000, 'ti
 await evaluate("document.querySelector('.title-card').click(); 'picked'");
 await evaluate(
   "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Use this title')).click(); 'used-title'",
+);
+// The title leads to the turn console; page 1 is written from there.
+await waitFor("!!document.querySelector('.turn-panel')", 10000, 'turn console');
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Generate next page')).click(); 'gen'",
 );
 await waitFor(
   "[...document.querySelectorAll('.view-page .page-num')].some(n => n.textContent.includes('Page 1')) && !!document.querySelector('.view-page .page-text')",
@@ -160,7 +169,7 @@ await heap('reader-opened-with-speech');
 for (let round = 1; round <= 4; round++) {
   for (let i = 0; i < 13; i++) {
     await evaluate(
-      "[...document.querySelectorAll('button')].find(b => b.title === 'Next page')?.click(); 'next'",
+      "[...document.querySelectorAll('button')].find(b => String(b.title).startsWith('Next page'))?.click(); 'next'",
     );
     await sleep(60);
   }
@@ -168,11 +177,14 @@ for (let round = 1; round <= 4; round++) {
 }
 
 // ---- 7. Ambience on/off churn -------------------------------------------------
+// The ambience control lives in the reader’s “⋯” menu: open it, toggle, repeat.
 for (let i = 0; i < 4; i++) {
-  await clickButton('🔊 ambience: on');
-  await sleep(300);
-  await clickButton('🔊 ambience: off');
-  await sleep(300);
+  await evaluate("document.querySelector('.view-reader .menu-btn')?.click(); 'menu'");
+  await sleep(250);
+  await evaluate(
+    "(() => { const b = [...document.querySelectorAll('.view-reader .menu-item')].find(x => x.textContent.includes('Ambience:')); if (!b) return 'missing'; b.click(); return 'toggled'; })()",
+  );
+  await sleep(350);
 }
 await heap('ambience-churn-done');
 

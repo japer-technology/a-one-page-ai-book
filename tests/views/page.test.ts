@@ -24,7 +24,7 @@ import {
 import { defaultLibrary, emptySeedOptions } from '../../src/core/schema';
 import { DEFAULT_TURN } from '../../src/core/types';
 import type { Book, Library, StoryNode } from '../../src/core/types';
-import { all, click, mountView, settle, StubApp } from '../helpers/view-harness';
+import { all, click, findButton, mountView, settle, StubApp } from '../helpers/view-harness';
 
 const PAGE_TEXT = 'Para one.\n\nPara two.';
 
@@ -100,5 +100,48 @@ describe('the paragraph crafting tools', () => {
     const commit = app.calls.find((call) => call[0] === 'appendVersion');
     expect(commit?.[1]).toBe(pageId);
     expect(commit?.[2]).toBe('Rewritten first.\n\nPara two.');
+  });
+});
+
+describe('a failed rewrite', () => {
+  it('stays with its page and never hides other pages', async () => {
+    const seed = makeSeedNode('s', emptySeedOptions());
+    const title = makeTitleNode(seed.id, { title: 'The Dead Letter', tagline: '' });
+    const turn1 = makeTurnNode(title.id, DEFAULT_TURN);
+    const page1 = makePageNode(turn1.id, DEFAULT_TURN, 'm', 'PAGE ONE TEXT.');
+    const turn2 = makeTurnNode(page1.id, DEFAULT_TURN);
+    const page2 = makePageNode(turn2.id, DEFAULT_TURN, 'm', 'PAGE TWO TEXT.');
+    const book = setFrontier(makeBook(seed.id, title.id, 'm'), page2.id);
+    const app = new StubApp(libOf([seed, title, turn1, page1, turn2, page2], [book]), book, 'page');
+    const root = mountView(app, renderPage);
+
+    app.generateText = async () => {
+      throw new Error('LLM returned an empty page');
+    };
+    click(findButton(root, 'Regenerate'));
+    await settle();
+    await settle();
+    // Page 2's own panel shows the failure…
+    expect(root.textContent).toContain('LLM returned an empty page');
+    expect(findButton(root, 'Retry')).toBeTruthy();
+
+    // …but walking to page 1 must reveal page 1: text and crafting tools.
+    // The old book-scoped key hid EVERY page behind the stale error panel.
+    app.openPageAt(app.book as Book, page1.id);
+    await settle();
+    expect(root.textContent).toContain('PAGE ONE TEXT.');
+    expect(root.textContent).not.toContain('LLM returned an empty page');
+
+    // Returning to page 2 brings its panel back, and its Retry rewrites
+    // PAGE 2 — it used to rewrite whichever page was on screen.
+    app.openPageAt(app.book as Book, page2.id);
+    await settle();
+    expect(root.textContent).toContain('LLM returned an empty page');
+    app.generateText = async () => 'REWRITTEN TWO.';
+    click(findButton(root, 'Retry'));
+    await settle();
+    await settle();
+    const commit = app.calls.find((call) => call[0] === 'appendVersion');
+    expect(commit?.[1]).toBe(page2.id);
   });
 });

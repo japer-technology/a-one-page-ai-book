@@ -134,15 +134,68 @@ function balancedSlices(text: string): string[] {
   return out;
 }
 
+/**
+ * Refusals and apologies a small model writes instead of the ask ("I cannot
+ * provide titles — …", "I'm sorry, but I can't help with that"). They are
+ * never content: every salvage path must drop them, or a refusal becomes a
+ * pickable title, a seed idea, or a "conflict".
+ */
+function looksLikeRefusal(line: string): boolean {
+  const text = line.trim();
+  return (
+    // An apology that CONTINUES into a refusal ("I'm sorry, but I can't…",
+    // "I'm sorry, I cannot provide…"). A bare "I'm sorry" must NOT match —
+    // "I'm Sorry — two words nobody wanted" is a proposable title.
+    /^i(?:['’]m| am)\s+sorry\b[^.!?\n]{0,60}?(?:\bbut\b|\bi (?:can(?:not|['’]?t)|won['’]?t|am (?:not )?(?:able|going)|must decline)\b|\bunable\b|\bcannot\b)/i.test(
+      text,
+    ) ||
+    // "Sorry, but I can't…" / "Sorry, I cannot…" — refusal continuations only;
+    // "Sorry, Wrong Number" is a title.
+    /^sorry\b\s*[,!:—–-]\s*(?:but\s+)?i(?:['’]m| am)?\s*(?:can(?:not|['’]?t)|won['’]?t|unable|am (?:not )?(?:able|going)|must decline)\b/i.test(
+      text,
+    ) ||
+    /^i apologi[sz]e\b/i.test(text) ||
+    /^as an? (?:ai|assistant|language model)\b/i.test(text) ||
+    /^i (?:can(?:['’]?t|not)|won['’]?t|will not|must decline|am (?:not )?(?:able|going) to|['’]m (?:not )?(?:able|going) to)\s+(?:help|assist|provide|write|continue|generate|create|comply|offer|answer|respond|do)\b/i.test(
+      text,
+    )
+  );
+}
+
+/** The best string an item carries: strings as-is, records by their first known field. */
+const STRING_KEYS = [
+  'text',
+  'conflict',
+  'suggestion',
+  'title',
+  'name',
+  'premise',
+  'value',
+] as const;
+
+function itemText(item: unknown): string {
+  if (typeof item === 'string') return item;
+  if (item && typeof item === 'object') {
+    const record = item as Record<string, unknown>;
+    for (const key of STRING_KEYS) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim().length > 0) return value;
+    }
+  }
+  return '';
+}
+
 /** Parse a list of strings from loosely-formatted output (JSON array, {titles:[...]}, or newline list). */
 export function parseStringList(text: string): string[] {
+  const usable = (list: string[]): string[] =>
+    list.filter((item) => item.length > 0 && !looksLikeRefusal(item));
   try {
     const parsed = parseJSONLoose<unknown>(text);
-    if (Array.isArray(parsed)) return parsed.map((x) => String(x)).filter((x) => x.length > 0);
+    if (Array.isArray(parsed)) return usable(parsed.map(itemText));
     if (parsed && typeof parsed === 'object') {
       for (const value of Object.values(parsed)) {
         if (Array.isArray(value)) {
-          const list = value.map((x) => String(x)).filter((x) => x.length > 0);
+          const list = usable(value.map(itemText));
           if (list.length > 0) return list;
         }
       }
@@ -150,10 +203,12 @@ export function parseStringList(text: string): string[] {
   } catch {
     // fall back to line splitting below
   }
-  return text
-    .split('\n')
-    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
-    .filter((line) => line.length > 0);
+  return usable(
+    text
+      .split('\n')
+      .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
+      .filter((line) => line.length > 0),
+  );
 }
 
 /**
@@ -218,6 +273,7 @@ function parseTitleLines(text: string): Array<{ title: string; tagline: string }
       .replaceAll('**', '')
       .trim();
     if (line.length === 0 || line.length > 90) continue; // prose, not a title
+    if (looksLikeRefusal(line)) continue; // a refusal is not a title
     if (/^(here(?:'s| are)?|sure!?|certainly|of course|i propose|the following)\b/i.test(line))
       continue;
     if (line.endsWith(':')) continue;
@@ -275,41 +331,82 @@ export function parseBible(text: string, previous: StoryBible | null = null): St
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     object = raw as Record<string, unknown>;
   } else if (raw && typeof raw === 'object' && Array.isArray(raw)) {
-    // Some models answer with a bare array of objects carrying a "kind" field.
-    object = { people: raw };
+    // Some models answer with a bare array of objects carrying a "kind" field
+    // (people/places/things/threads). Dispatch each entry by that field — the
+    // old code dumped everything into people, so every prompt presented
+    // places and things as characters.
+    const groups: Record<'people' | 'places' | 'things' | 'threads', unknown[]> = {
+      people: [],
+      places: [],
+      things: [],
+      threads: [],
+    };
+    for (const item of raw) {
+      const kind =
+        item &&
+        typeof item === 'object' &&
+        typeof (item as Record<string, unknown>).kind === 'string'
+          ? String((item as Record<string, unknown>).kind).toLowerCase()
+          : '';
+      const target = /place|location|setting/.test(kind)
+        ? 'places'
+        : /thing|object|item|prop/.test(kind)
+          ? 'things'
+          : /thread|question|mystery|open/.test(kind)
+            ? 'threads'
+            : 'people';
+      groups[target].push(item);
+    }
+    object = groups;
   }
   if (!object) {
     if (previous) return { ...base, at: previous.at, updatedAt: Date.now() };
     throw new Error('The model did not return a cast object — try again.');
   }
-  const entries = (key: 'people' | 'places' | 'things' | 'threads'): BibleEntry[] => {
-    const value = object?.[key] ?? object?.cast?.[key as never];
-    const list: BibleEntry[] = Array.isArray(value) ? coerceEntries(value) : [];
-    if (list.length === 0) {
-      // Keep the previous entries for this group — never regress to empty.
-      return previous ? base[key] : list;
-    }
-    if (!previous) return list;
-    // The model rewrites the group, and the panel PROMISES the reader's
-    // curation survives ("you curate the cast … the model writes with these
-    // names"): an entry the reader added (or renamed by hand) used to vanish
-    // as soon as an update happened not to mention it. Match by
-    // case-insensitive name — the model's version wins for entries it
-    // returned, previous-only entries are kept after them.
-    const returned = new Set(list.map((entry) => entry.name.trim().toLowerCase()));
-    const kept = base[key].filter((entry) => !returned.has(entry.name.trim().toLowerCase()));
-    return [...list, ...kept];
-  };
   const caps: Record<'people' | 'places' | 'things' | 'threads', number> = {
     people: 12,
     places: 8,
     things: 10,
     threads: 12,
   };
-  const people = entries('people').slice(0, caps.people);
-  const places = entries('places').slice(0, caps.places);
-  const things = entries('things').slice(0, caps.things);
-  const threads = entries('threads').slice(0, caps.threads);
+  const entries = (key: 'people' | 'places' | 'things' | 'threads'): BibleEntry[] => {
+    const cap = caps[key];
+    const value = object?.[key] ?? object?.cast?.[key as never];
+    const list: BibleEntry[] = Array.isArray(value) ? coerceEntries(value) : [];
+    if (list.length === 0) {
+      // Keep the previous entries for this group — never regress to empty.
+      return previous ? base[key].slice(0, cap) : list;
+    }
+    if (!previous) return list.slice(0, cap);
+    // The model rewrites the group, and the panel PROMISES the reader's
+    // curation survives ("you curate the cast … the model writes with these
+    // names"): an entry the reader added (or renamed by hand) used to vanish
+    // as soon as an update happened not to mention it — and because the cap
+    // sliced the MERGED list, a full model list also silently evicted the
+    // reader's entries from its tail.
+    //
+    // Two invariants, and their interaction: the reader's curation must
+    // survive, AND the model's UPDATES must still apply when a group sits at
+    // its cap — and a long story's cast sits at cap permanently. (Slicing the
+    // whole model list to the remaining room froze every note forever: at cap
+    // room is 0, so even refreshes of known names were dropped.) Split the
+    // model's entries: known names are updates and never consume room; only
+    // brand-new names compete for the room the cap has left; entries the model
+    // stopped mentioning are carried over untouched.
+    const lower = (entry: BibleEntry): string => entry.name.trim().toLowerCase();
+    const known = new Set(base[key].map(lower));
+    const updates = list.filter((entry) => known.has(lower(entry)));
+    const additions = list.filter((entry) => !known.has(lower(entry)));
+    const room = Math.max(0, cap - base[key].length);
+    const admitted = additions.slice(0, room);
+    const covered = new Set([...updates, ...admitted].map(lower));
+    const carry = base[key].filter((entry) => !covered.has(lower(entry)));
+    return [...updates, ...admitted, ...carry].slice(0, cap);
+  };
+  const people = entries('people');
+  const places = entries('places');
+  const things = entries('things');
+  const threads = entries('threads');
   const relations = parseRelations(object.relations, base.relations);
   const summary =
     typeof object.summary === 'string' && object.summary.trim().length > 0

@@ -53,14 +53,19 @@ function httpError(status: number, body: string): Error {
       `LLM server rejected the request (HTTP ${status}${short ? `: ${short}` : ''}). If this endpoint requires an API key, add it in Settings.`,
     );
   }
-  if (isServerBusyStatus(status, body)) {
-    return new Error(
-      `LLM server is busy (HTTP ${status}${short ? `: ${short}` : ''}) — its one generation slot is already in use. Wait for the current request to finish, or raise the concurrency limit in the server's settings.`,
-    );
-  }
+  // The warming test must run FIRST: a bare 503 is "busy", but Ollama's 503
+  // with "model … is not loaded"/"is loading" is a readiness problem, and the
+  // busy branch used to claim every 429/503 before the body was consulted —
+  // telling the reader to raise a concurrency limit while the model was still
+  // loading, and picking the wrong retry ladder.
   if (isServerWarmingStatus(status, body)) {
     return new Error(
       `The local LLM server is still loading the model (HTTP ${status}${short ? `: ${short}` : ''}) — it answers as soon as the weights are in memory.`,
+    );
+  }
+  if (isServerBusyStatus(status, body)) {
+    return new Error(
+      `LLM server is busy (HTTP ${status}${short ? `: ${short}` : ''}) — its one generation slot is already in use. Wait for the current request to finish, or raise the concurrency limit in the server's settings.`,
     );
   }
   return new Error(`LLM server responded ${status}${short ? `: ${short}` : ''}`);

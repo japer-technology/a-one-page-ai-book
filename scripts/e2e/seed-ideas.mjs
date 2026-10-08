@@ -76,9 +76,7 @@ await waitFor(
 await ev(
   "[...document.querySelectorAll('.scan-row')].find(r=>r.textContent.includes('reachable')).querySelector('button').click();'u'",
 );
-await ev(
-  "[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Test connection')).click();'t'",
-);
+await ev("document.querySelector('#endpoint-save-test').click();'t'");
 await waitFor(
   "[...document.querySelectorAll('.toast')].some(t=>t.textContent.includes('Connected'))",
   30000,

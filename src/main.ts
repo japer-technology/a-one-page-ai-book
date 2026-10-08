@@ -1357,7 +1357,21 @@ class App implements AppApi {
   }
 
   private async saveLocked(lib: Library): Promise<void> {
-    const stored = await peekStoredLibrary();
+    let peek = await peekStoredLibrary();
+    if (!peek.ok) {
+      // One retry: a transient read failure (a connection that just closed)
+      // usually reopens cleanly, exactly like loadLibrary's reopen path.
+      peek = await peekStoredLibrary();
+    }
+    // A read that keeps failing must NOT be treated as “nothing stored”: that
+    // skipped the guard below and let a stale tab overwrite another tab's
+    // newer document. Refuse this write instead — the caller notifies, and
+    // nothing is silently lost.
+    if (!peek.ok) {
+      audit('persistNow skipped: the stored document could not be read to verify revisions');
+      throw new Error('Could not verify the stored library before saving');
+    }
+    const stored = peek.stored;
     // Compare-and-swap: a plain "is the stored stamp newer than mine" check
     // fails precisely for the stale tab — its own mutation bumps ITS stamp
     // while its content is older. The only reliable signal is that the stored
@@ -1370,25 +1384,29 @@ class App implements AppApi {
       // Another tab committed since we last saw the document. Adopt theirs:
       // overwriting it used to be silent, permanent loss of their pages.
       const loaded = await loadLibrary();
-      if (loaded.ok) {
-        audit('persistNow adopted document written by another tab');
-        this.state.lib = loaded.lib;
-        // Re-derive the session's open book, exactly as `update()` does: the
-        // adopted document is a different object graph, and a pointer to the
-        // discarded one left views rendering a book that is no longer in
-        // `lib.books` — and the next mutator wrote THAT object back
-        // (`replaceBook(lib, setFrontier(book, …))`), silently reverting every
-        // book-level change the other tab had just saved.
-        const open = this.state.book;
-        this.state.book = open ? (loaded.lib.books.find((b) => b.id === open.id) ?? null) : null;
-        this.knownStoredRevision = loaded.lib.meta.updatedAt;
-        this.render();
-        this.toast(
-          'Another Page Turn tab saved newer changes — they were loaded and this tab is in sync. The change that triggered this save was superseded.',
-          'info',
-        );
-        return; // their document is already stored; nothing to write
+      if (!loaded.ok) {
+        // The revision moved but the newer document cannot be read: writing
+        // ours now would destroy it unseen. Refuse, like an unreadable peek.
+        audit('persistNow skipped: the stored document changed but could not be re-read');
+        throw new Error('The stored library changed but could not be read for adoption');
       }
+      audit('persistNow adopted document written by another tab');
+      this.state.lib = loaded.lib;
+      // Re-derive the session's open book, exactly as `update()` does: the
+      // adopted document is a different object graph, and a pointer to the
+      // discarded one left views rendering a book that is no longer in
+      // `lib.books` — and the next mutator wrote THAT object back
+      // (`replaceBook(lib, setFrontier(book, …))`), silently reverting every
+      // book-level change the other tab had just saved.
+      const open = this.state.book;
+      this.state.book = open ? (loaded.lib.books.find((b) => b.id === open.id) ?? null) : null;
+      this.knownStoredRevision = loaded.lib.meta.updatedAt;
+      this.render();
+      this.toast(
+        'Another Page Turn tab saved newer changes — they were loaded and this tab is in sync. The change that triggered this save was superseded.',
+        'info',
+      );
+      return; // their document is already stored; nothing to write
     }
     await saveLibrary(lib);
     this.knownStoredRevision = lib.meta.updatedAt;

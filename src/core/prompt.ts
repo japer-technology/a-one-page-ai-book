@@ -551,9 +551,21 @@ export function bibleMessages(ctx: StoryContext, previous: StoryBible | null): C
   for (let i = ctx.pages.length - 1; i >= 0; i--) {
     const page = ctx.pages[i];
     if (page === undefined) continue;
-    if (words + page.trim().split(/\s+/).length > BIBLE_WORD_BUDGET) break;
+    const pageWords = page.trim().split(/\s+/).length;
+    if (words + pageWords > BIBLE_WORD_BUDGET) {
+      // The newest page must survive even when it alone exceeds the memory
+      // budget: walking newest → oldest, a single oversized page used to
+      // `break` on the first iteration and leave nothing but the seed — the
+      // page this update exists to fold in was the one input it dropped.
+      // Keep its tail, exactly as buildContextTo does for the verbatim window.
+      if (pages.length === 0) {
+        const tail = tailWords(page, BIBLE_WORD_BUDGET);
+        if (tail.length > 0) pages.unshift(tail);
+      }
+      break;
+    }
     pages.unshift(page);
-    words += page.trim().split(/\s+/).length;
+    words += pageWords;
   }
   const history = pages.length > 0 ? pages.join('\n\n') : ctx.seed;
   const previousBlock = previous
@@ -596,7 +608,18 @@ export function summaryMessages(ctx: StoryContext, previous: string | null): Cha
     const page = ctx.pages[i];
     if (page === undefined) continue;
     const pageWords = countWords(page);
-    if (words + pageWords > SUMMARY_WORD_BUDGET) break;
+    if (words + pageWords > SUMMARY_WORD_BUDGET) {
+      // The newest page must survive even when it alone exceeds the memory
+      // budget: walking newest → oldest, a single oversized page used to
+      // `break` on the first iteration and leave nothing but the seed — the
+      // page this update exists to fold in was the one input it dropped.
+      // Keep its tail, exactly as buildContextTo does for the verbatim window.
+      if (pages.length === 0) {
+        const tail = tailWords(page, SUMMARY_WORD_BUDGET);
+        if (tail.length > 0) pages.unshift(tail);
+      }
+      break;
+    }
     pages.unshift(page);
     words += pageWords;
   }
@@ -769,13 +792,20 @@ export function conflictVerdicts(items: string[]): string[] {
   // ("is not consistent", "is inconsistent") out of this match, and the bare
   // "Consistent." verdict line is caught on its own.
   const ASSERTS_CONSISTENCY =
-    /^\s*(?:\w+[\s,]+){0,2}?consistent\b|\b(?:is|seems|looks|appears|remains)\s+(?:(?!not\b|n't\b)\w+[\s,]+){0,2}?\bconsistent\b|\b(?:not|n't)\s+inconsistent\b/i;
+    /^\s*(?:\w+[\s,]+){0,2}?consistent\b|\b(?:is|seems|looks|appears|remains|(?:would|will|can|could|should|must)\s+be)\s+(?:(?!not\b|n't\b)\w+[\s,]+){0,2}?\bconsistent\b|(?:(?<![A-Za-z])not|n['’]t)\s+inconsistent\b/i;
   // But a sentence that asserts consistency AND names a contradiction
   // ("…is consistent with the story, but the gun was destroyed") IS a conflict.
+  // "not inconsistent" asserts consistency, not a contradiction — the negated
+  // form is blanked before the guard so its own "inconsistent" cannot trip it.
+  // The contraction branch requires its apostrophe: a bare "nt" (accou-nt,
+  // poi-nt, fro-nt) followed by "inconsistent" is a REAL conflict and must not
+  // be blanked.
   const CONTRADICTION = /\b(?:conflict|contradict|inconsistent|however|but)\b/i;
+  const NEGATED_INCONSISTENT = /(?:(?<![A-Za-z])not|n['’]t)\s+inconsistent\b/gi;
   return items.filter((item) => {
     if (NO_CONFLICTS.test(item)) return false;
-    return !(ASSERTS_CONSISTENCY.test(item) && !CONTRADICTION.test(item));
+    const withoutNegated = item.replace(NEGATED_INCONSISTENT, ' ');
+    return !(ASSERTS_CONSISTENCY.test(item) && !CONTRADICTION.test(withoutNegated));
   });
 }
 

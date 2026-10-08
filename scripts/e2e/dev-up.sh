@@ -2,11 +2,17 @@
 # Dev-only helper: start the mock LLM and a fresh headless chromium on the built app.
 #   bash scripts/e2e/dev-up.sh [profile-dir]
 # Set PT_MOCK_SERIAL=1 to emulate a single-slot local server (LM Studio default).
+# Set PT_MOCK_BAD_JSON=1 / PT_MOCK_LOG=<path> for the upkeep / session probes.
 set -u
 cd "$(dirname "$0")/../.."
-PROFILE="${1:-/tmp/pt-profile}"
-rm -rf "$PROFILE"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/_profile.sh"
+
+PROFILE="${1:-$(pt_default_profile pt-profile)}"
+# Stop the previous run FIRST (it may hold the profile), then clear the profile:
+# "fresh" has to mean fresh or first-run behavior is never tested.
 bash scripts/e2e/dev-down.sh >/dev/null
+rm -rf "$PROFILE"
 # Record the profile for dev-down, so a non-default one still gets stopped.
 echo "$PROFILE" >/tmp/pt-profile.current
 nohup node scripts/e2e/mock-llm.mjs >/tmp/pt-mock.log 2>&1 &

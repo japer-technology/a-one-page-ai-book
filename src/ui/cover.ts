@@ -82,8 +82,13 @@ export function paintCover(canvas: HTMLCanvasElement, compiled: CompiledBook): v
     }
   }
   if (current) lines.push(current);
+  // Three lines fit between the title start and the footer on the shipped
+  // cover canvas; the old four-line limit let a long title's last line run
+  // into the footer text.
+  const shown = lines.slice(0, 3);
+  if (lines.length > 3) shown[2] = `${(shown[2] ?? '').replace(/\s+\S*$/, '')} …`;
   let y = H * 0.62;
-  for (const line of lines.slice(0, 4)) {
+  for (const line of shown) {
     ctx.fillText(line, cx, y, W * 0.84);
     y += W / 7.5;
   }

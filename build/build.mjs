@@ -34,8 +34,22 @@ const start = performance.now();
 
 // SOURCE_DATE_EPOCH makes repeat builds byte-identical (reproducible builds,
 // artifact pinning); without it the timestamp records when this build ran.
-const builtAt = process.env.SOURCE_DATE_EPOCH
-  ? new Date(Number(process.env.SOURCE_DATE_EPOCH) * 1000).toISOString()
+// A value `toISOString()` cannot represent — non-numeric, fractional, or
+// outside the Date range (±8.64e12 seconds) — used to kill the build with a
+// raw RangeError that never named the variable; fail with its contract.
+const MAX_EPOCH_SECONDS = 8.64e12;
+const sourceEpoch = process.env.SOURCE_DATE_EPOCH?.trim();
+const sourceSeconds = sourceEpoch ? Number(sourceEpoch) : NaN;
+if (
+  sourceEpoch &&
+  (!Number.isInteger(sourceSeconds) || Math.abs(sourceSeconds) > MAX_EPOCH_SECONDS)
+) {
+  throw new Error(
+    `SOURCE_DATE_EPOCH must be integer seconds since the epoch (got "${sourceEpoch}")`,
+  );
+}
+const builtAt = sourceEpoch
+  ? new Date(sourceSeconds * 1000).toISOString()
   : new Date().toISOString();
 
 await rm(OUT, { recursive: true, force: true });

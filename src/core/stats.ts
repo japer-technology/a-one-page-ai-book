@@ -31,7 +31,12 @@ export interface ShelfStats {
 
 /** Consecutive-day streak ending at (or just before) today. */
 export function computeStreak(days: string[], today: string): { streak: number; longest: number } {
-  const set = new Set(days);
+  // Only real calendar days count. The schema gate keeps the SHAPE
+  // (YYYY-MM-DD), but impossible days like "2026-02-30" still parse (JS rolls
+  // them over) and each one used to reset the longest-run walk to a spurious
+  // run of 1 — reporting a "longest streak" of 1 for a calendar with no real
+  // day, and a longest BELOW the current streak next to it.
+  const set = new Set(days.filter((day) => shiftDate(day, 0) === day));
   let streak = 0;
   let cursor = today;
   // If today is missing, start counting from yesterday (streak not yet broken).

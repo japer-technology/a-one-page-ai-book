@@ -33,7 +33,10 @@ function bookMd(lib: Library, bookId: string): MdEntry {
     '',
     `- Seed: ${seed}`,
     `- Status: ${book.status === 'finished' ? 'finished' : 'in progress'}`,
-    `- Pages kept: ${compiled.pages.length} · Words kept: ${compiled.words}`,
+    // Count pages the way the shelf and index.md do (statsOf): the compiled
+    // list includes the page-zero prologue, which made the same export say
+    // "4 pages" in the book file and "3 pages" in index.md for one book.
+    `- Pages kept: ${stats.pages} · Words kept: ${stats.words}`,
     `- Versions: ${stats.versions} · Branches: ${stats.branches}`,
     `- Model: ${book.model || 'unknown'}`,
     `- Started: ${new Date(book.createdAt).toISOString().slice(0, 10)} · Updated: ${new Date(book.updatedAt).toISOString().slice(0, 10)}`,

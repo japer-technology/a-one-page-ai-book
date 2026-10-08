@@ -219,4 +219,52 @@ describe('store/db wipe', () => {
     await db.clearLibrary();
     expect([...store.data.keys()]).toEqual([]);
   });
+
+  it('a stash that was queued before a wipe never lands after it', async () => {
+    // A failed boot read spawns a stash; the reader then confirms “Delete
+    // every book, every page, every decision?”. The stash's put used to land
+    // after the wipe's clear(), re-parking a full copy of the deleted story.
+    const db = await freshDb();
+    await db.loadLibrary();
+    // Close the connection so the next openDB is genuinely async — the race
+    // lives in that window.
+    fake.opened[0]!.closed = true;
+    fake.opened[0]!.onclose?.();
+    const stashing = db.stashUnreadableDocument({ words: 'the words themselves' });
+    await db.clearLibrary();
+    expect(await stashing).toBeNull();
+    const store = fake.opened[0]!.stores.get('library')!;
+    expect([...store.data.keys()]).toEqual([]);
+  });
+
+  it('reports a failed peek instead of “nothing stored”', async () => {
+    // Collapsing the two states let a stale tab skip the cross-tab guard and
+    // overwrite another tab's newer document.
+    const db = await freshDb();
+    await db.saveLibrary(defaultLibrary());
+    const first = await db.peekStoredLibrary();
+    expect(first.ok).toBe(true);
+    expect(first.stored).not.toBeNull();
+
+    fake.opened[0]!.closed = true;
+    fake.opened[0]!.onclose?.();
+    const broken = {
+      open: () => {
+        const req = {
+          result: undefined,
+          error: new Error('quota'),
+          onupgradeneeded: null as (() => void) | null,
+          onsuccess: null as (() => void) | null,
+          onerror: null as (() => void) | null,
+          onblocked: null as (() => void) | null,
+        };
+        queueMicrotask(() => req.onerror?.());
+        return req;
+      },
+    };
+    vi.stubGlobal('indexedDB', broken);
+    const failed = await db.peekStoredLibrary();
+    expect(failed.ok).toBe(false);
+    expect(failed.stored).toBeNull();
+  });
 });

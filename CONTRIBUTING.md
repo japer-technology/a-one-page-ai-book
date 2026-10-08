@@ -56,9 +56,8 @@ all devDependencies are tooling (esbuild, typescript, vitest, eslint, prettier).
   | `lan-scan.mjs`        | a LAN sweep states its size, finds a responder, and a CANCELLED sweep is never reported as "No LLM servers found"                                                                  |
   | `detect-subnet.mjs`   | a browser that reveals its own address (stubbed WebRTC) is believed at once: no probe is fired at any other range, and the one-button scan sweeps the revealed network             |
   | `panel-state.mjs`     | an inline-edit draft stays with the selection it was typed for (a new selection never reopens it), and the story-memory panel keeps its expanded/collapsed state across re-renders |
-
-| `seed-cancel.mjs` | a request the reader stopped by navigating away is not reported as a model
-failure: no fake "didn't answer" chat turn, no fallback seed over the seed box, no failure toast |
+  | `mem-repro.sh`        | a long session (12 pages, replay, reader flips, ambience churn) stays heap-flat — JS heap printed per step, run with `bash scripts/e2e/mem-repro.sh`                               |
+  | `seed-cancel.mjs`     | a request the reader stopped by navigating away is not reported as a model failure: no fake "didn't answer" chat turn, no fallback seed over the seed box, no failure toast        |
 
 `bash scripts/e2e/dev-up.sh` starts the mock LLM plus a throwaway-profile Chromium on the built
 file; `bash scripts/e2e/dev-down.sh` stops both. Rebuild (`pnpm build`) BEFORE `dev-up.sh`, or the

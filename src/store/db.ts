@@ -126,25 +126,36 @@ export async function loadLibrary(): Promise<LoadResult> {
   }
 }
 
+export interface PeekResult {
+  /** false when the read itself failed — distinguishable from “nothing stored”. */
+  ok: boolean;
+  stored: { updatedAt: number } | null;
+}
+
 /**
  * The stored document's revision WITHOUT a full normalize (saves run often
- * and a normalize is expensive). Returns null when nothing is stored yet.
+ * and a normalize is expensive). `ok: false` means the read failed, which the
+ * save path must not confuse with “nothing stored”: treating a failed read as
+ * empty skipped the compare-and-swap guard and let a stale tab overwrite
+ * another tab's newer document.
  */
-export async function peekStoredLibrary(): Promise<{ updatedAt: number } | null> {
-  if (!dbSupported()) return null;
+export async function peekStoredLibrary(): Promise<PeekResult> {
+  if (!dbSupported()) return { ok: true, stored: null };
   try {
     const db = await openDB();
     const tx = db.transaction(STORE, 'readonly');
     const result = await requestResult(tx.objectStore(STORE).get(KEY));
-    if (result === undefined || result === null) return null;
+    if (result === undefined || result === null) return { ok: true, stored: null };
     if (typeof result === 'object' && result !== null) {
       const meta = (result as { meta?: { updatedAt?: unknown } }).meta;
       const updatedAt = meta?.updatedAt;
-      if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) return { updatedAt };
+      if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) {
+        return { ok: true, stored: { updatedAt } };
+      }
     }
-    return { updatedAt: 0 };
+    return { ok: true, stored: { updatedAt: 0 } };
   } catch {
-    return null;
+    return { ok: false, stored: null };
   }
 }
 
@@ -173,6 +184,9 @@ export async function saveLibrary(lib: Library): Promise<void> {
  * remove it.
  */
 let wipedSinceLoad = false;
+/** The stash currently in flight, so a wipe can wait it out (see clearLibrary). */
+let stashInFlight: Promise<string | null> | null = null;
+let stashSeq = 0;
 
 export async function stashUnreadableDocument(raw: unknown): Promise<string | null> {
   if (!dbSupported() || raw === undefined) return null;
@@ -180,19 +194,33 @@ export async function stashUnreadableDocument(raw: unknown): Promise<string | nu
   // copy now would resurrect what the wipe removed (the wipe's store.clear()
   // already runs, and this write would land after it).
   if (wipedSinceLoad) return null;
+  const attempt = (async (): Promise<string | null> => {
+    try {
+      const db = await openDB();
+      // Re-check INSIDE the await: a wipe may have run while the connection
+      // was opening — without this, the put would land after the
+      // store.clear() that promised the words were gone.
+      if (wipedSinceLoad) return null;
+      const tx = db.transaction(STORE, 'readwrite');
+      // A uniquifier: two stashes in the same millisecond used to share a key
+      // and silently overwrite one of the recoverable copies.
+      const key = `${KEY}.unreadable.${new Date().toISOString().replace(/[:.]/g, '-')}-${(++stashSeq).toString(36)}`;
+      tx.objectStore(STORE).put(raw, key);
+      await new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error('IndexedDB write failed'));
+        tx.onabort = () => reject(tx.error ?? new Error('IndexedDB write aborted'));
+      });
+      return key;
+    } catch {
+      return null;
+    }
+  })();
+  stashInFlight = attempt;
   try {
-    const db = await openDB();
-    const tx = db.transaction(STORE, 'readwrite');
-    const key = `${KEY}.unreadable.${new Date().toISOString().replace(/[:.]/g, '-')}`;
-    tx.objectStore(STORE).put(raw, key);
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB write failed'));
-      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB write aborted'));
-    });
-    return key;
-  } catch {
-    return null;
+    return await attempt;
+  } finally {
+    if (stashInFlight === attempt) stashInFlight = null;
   }
 }
 
@@ -202,6 +230,11 @@ export async function clearLibrary(): Promise<void> {
   // seconds after the read that spawned it) must not re-park a copy of the
   // story after the reader has asked for it to be gone.
   wipedSinceLoad = true;
+  // ...and wait out a stash already in flight when the latch went up: its
+  // re-check may have passed a moment earlier, and only ordering (stash
+  // settles, THEN the clear runs) leaves nothing behind.
+  const inFlight = stashInFlight;
+  if (inFlight) await inFlight.catch(() => {});
   const db = await openDB();
   const tx = db.transaction(STORE, 'readwrite');
   // The whole store, not just the main record: "Delete every book, every page,

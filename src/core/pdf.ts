@@ -308,11 +308,145 @@ const WIDTHS: Record<PdfFontKey, Record<string, number>> = {
   }),
 };
 
-export function textWidth(text: string, fontSize: number, font: PdfFontKey = 'helvetica'): number {
+/**
+ * Accented Latin letters take their base letter's advance in the base-14
+ * fonts; the ASCII tables above do not carry them, and the old 556/1000-em
+ * blanket fallback under-measured every wide one (Œ 889–1000, À–Å 667–722 …)
+ * so wrapped lines could be drawn past the page edge.
+ */
+const ACCENTED: Record<string, string> = {
+  À: 'A',
+  Á: 'A',
+  Â: 'A',
+  Ã: 'A',
+  Ä: 'A',
+  Å: 'A',
+  Ç: 'C',
+  È: 'E',
+  É: 'E',
+  Ê: 'E',
+  Ë: 'E',
+  Ì: 'I',
+  Í: 'I',
+  Î: 'I',
+  Ï: 'I',
+  Ñ: 'N',
+  Ò: 'O',
+  Ó: 'O',
+  Ô: 'O',
+  Õ: 'O',
+  Ö: 'O',
+  Ù: 'U',
+  Ú: 'U',
+  Û: 'U',
+  Ü: 'U',
+  Ý: 'Y',
+  à: 'a',
+  á: 'a',
+  â: 'a',
+  ã: 'a',
+  ä: 'a',
+  å: 'a',
+  ç: 'c',
+  è: 'e',
+  é: 'e',
+  ê: 'e',
+  ë: 'e',
+  ì: 'i',
+  í: 'i',
+  î: 'i',
+  ï: 'i',
+  ñ: 'n',
+  ò: 'o',
+  ó: 'o',
+  ô: 'o',
+  õ: 'o',
+  ö: 'o',
+  ù: 'u',
+  ú: 'u',
+  û: 'u',
+  ü: 'u',
+  ý: 'y',
+  ÿ: 'y',
+};
+
+/** Standalone WinAnsi glyphs with no base letter to fold onto (advances from the AFMs). */
+const EXTRA_WIDTHS: Record<PdfFontKey, Record<string, number>> = {
+  helvetica: {
+    Æ: 1000,
+    æ: 889,
+    Œ: 1000,
+    œ: 944,
+    Ø: 778,
+    ø: 556,
+    Ð: 722,
+    ð: 556,
+    Þ: 667,
+    þ: 556,
+    Ÿ: 667,
+    Š: 667,
+    š: 556,
+    Ž: 611,
+    ž: 500,
+    '©': 737,
+    '®': 737,
+    '‰': 1000,
+    '¼': 834,
+    '½': 834,
+    '¾': 834,
+    '±': 584,
+    '×': 584,
+    '÷': 584,
+    '°': 400,
+  },
+  times: {
+    Æ: 889,
+    æ: 889,
+    Œ: 889,
+    œ: 889,
+    Ø: 722,
+    ø: 500,
+    Ð: 722,
+    ð: 500,
+    Þ: 667,
+    þ: 500,
+    Ÿ: 722,
+    Š: 556,
+    š: 389,
+    Ž: 611,
+    ž: 444,
+    '©': 760,
+    '®': 760,
+    '‰': 1000,
+    '¼': 750,
+    '½': 750,
+    '¾': 750,
+    '±': 564,
+    '×': 564,
+    '÷': 564,
+    '°': 400,
+  },
+  courier: {},
+};
+
+function charWidth(ch: string, font: PdfFontKey): number {
   const table = WIDTHS[font];
+  const direct = table[ch];
+  if (direct !== undefined) return direct;
+  const extra = EXTRA_WIDTHS[font][ch];
+  if (extra !== undefined) return extra;
+  const base = ACCENTED[ch];
+  if (base !== undefined) {
+    const baseWidth = table[base];
+    if (baseWidth !== undefined) return baseWidth;
+  }
+  return 556;
+}
+
+export function textWidth(text: string, fontSize: number, font: PdfFontKey = 'helvetica'): number {
   let width = 0;
   for (const ch of text) {
-    width += (table[ch] ?? 556) * (fontSize / 1000);
+    width += charWidth(ch, font) * (fontSize / 1000);
   }
   return width;
 }

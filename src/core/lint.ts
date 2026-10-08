@@ -22,13 +22,45 @@ export interface LintReport {
 
 const TOKEN = /\b[\w'’]+\b/g;
 
+/** -ly words that are nouns/adjectives — a suffix test would misread them as adverbs. */
+const LY_NON_ADVERBS: ReadonlySet<string> = new Set([
+  'family',
+  'reply',
+  'supply',
+  'apply',
+  'imply',
+  'rely',
+  'multiply',
+  'july',
+  'italy',
+  'assembly',
+  'anomaly',
+  'likely',
+  'lonely',
+  'lovely',
+  'friendly',
+  'deadly',
+  'silly',
+  'belly',
+  'jelly',
+  'jolly',
+  'melancholy',
+  'rally',
+  'tally',
+  'folly',
+  'bully',
+]);
+
 export function lintText(text: string): LintReport {
   // Normalize line endings first: a CRLF page otherwise counts as a single
   // paragraph (and its sentences run together), which skews every metric.
   const normalized = text.replace(/\r\n?/g, '\n');
   const words = normalized.match(TOKEN) ?? [];
+  // A sentence that ends inside a closing quote ('He said "go home." Then …')
+  // must split: requiring whitespace directly after the punctuation merged it
+  // with the next sentence and undercounted every dialogue-heavy page.
   const sentences = normalized
-    .split(/[.!?…]+[\s\n]+/)
+    .split(/[.!?…]+["'”’)\]]*(?:\s+|$)/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   const paragraphs = normalized
@@ -47,7 +79,14 @@ export function lintText(text: string): LintReport {
         sentenceLengths.length
       : 0;
 
-  const adverbs = words.filter((w) => w.toLowerCase().endsWith('ly') && w.length > 4).length;
+  // "…ly" is a suffix, not a part of speech: nouns like family/reply/supply
+  // and adjectives like lonely/likely used to count as adverbs and push a page
+  // past the warning threshold with no adverb in it. The stoplist keeps the
+  // metric honest; the threshold itself is unchanged.
+  const adverbs = words.filter((w) => {
+    const lower = w.toLowerCase();
+    return lower.length > 4 && lower.endsWith('ly') && !LY_NON_ADVERBS.has(lower);
+  }).length;
   const adverbRatio = words.length > 0 ? adverbs / words.length : 0;
 
   const quoted = (text.match(/["“][^"”]{3,}["”]/g) ?? []).join(' ').length;

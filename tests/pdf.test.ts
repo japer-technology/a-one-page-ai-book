@@ -256,3 +256,22 @@ describe('PDF font selection', () => {
     expect(body.every((op) => op.font === 'F1')).toBe(true);
   });
 });
+
+describe('wide WinAnsi glyphs', () => {
+  it('measures OE/oe/AE and accented capitals by their real advances', () => {
+    // The old blanket 556/1000-em fallback under-measured these, so wrapped
+    // lines could be drawn past the page edge: 51×Œ at 11pt measured 311.9
+    // and stayed on one line while it really needed 498.7pt.
+    expect(textWidth('Œ', 11, 'times')).toBeCloseTo((889 * 11) / 1000, 4);
+    expect(textWidth('œ', 11, 'helvetica')).toBeCloseTo((944 * 11) / 1000, 4);
+    expect(textWidth('Æ', 11, 'helvetica')).toBeCloseTo((1000 * 11) / 1000, 4);
+    expect(textWidth('À', 11, 'times')).toBeCloseTo((722 * 11) / 1000, 4);
+    expect(textWidth('¼', 10, 'times')).toBeCloseTo((750 * 10) / 1000, 4);
+    expect(textWidth('©', 10, 'helvetica')).toBeCloseTo((737 * 10) / 1000, 4);
+  });
+
+  it('wraps a run that the old measure let overflow the line', () => {
+    const lines = wrapText('Œ'.repeat(51), 11, 312, 'times');
+    expect(lines.length).toBeGreaterThan(1);
+  });
+});

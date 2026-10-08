@@ -142,7 +142,10 @@ export function renderPage(api: AppApi): HTMLElement {
 
   installKeys(api, book, page);
 
-  const key = `page:${book.id}`;
+  // Keyed per page: a failed rewrite used to hide EVERY page of the book
+  // behind one stale error panel whose Retry rewrote whichever page was
+  // displayed. Each page now owns its own panel.
+  const key = `page:${book.id}:${page.id}`;
   const busy = genStates.get(key);
   if (busy) {
     return h(
@@ -339,8 +342,8 @@ export function renderPage(api: AppApi): HTMLElement {
           ),
           button(
             '🖼️ Quote card',
-            () => {
-              if (!quoteCardFor(compileBook(api.nodes, book), pageNum)) {
+            async () => {
+              if (!(await quoteCardFor(compileBook(api.nodes, book), pageNum))) {
                 api.toast('Could not render that quote card on this device.', 'error');
               }
             },
@@ -1320,7 +1323,7 @@ function installKeys(api: AppApi, book: Book, page: StoryNode): void {
         target.isContentEditable)
     )
       return;
-    if (genStates.get(`page:${book.id}`)) return;
+    if (genStates.get(`page:${book.id}:${page.id}`)) return;
 
     if (event.key === 'Escape') {
       clearSpanToolbar();
@@ -1371,7 +1374,9 @@ function beginView(api: AppApi, book: Book): HTMLElement {
   const title = titleNode.data.kind === 'title' ? titleNode.data.title : 'Untitled';
   const tagline = titleNode.data.kind === 'title' ? titleNode.data.tagline : '';
   const seed = seedTextOf(api.nodes, book);
-  const key = `page:${book.id}`;
+  // Keyed by the node this write grows under (the title): the begin panel and
+  // a later page's rewrite panel must never shadow each other.
+  const key = `page:${book.id}:${book.frontierId}`;
   const busy = genStates.get(key);
 
   if (busy) {

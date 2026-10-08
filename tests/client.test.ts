@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chat, chatJSON, isServerBusyError } from '../src/llm/client';
+import { chat, chatJSON, isServerBusyError, isServerWarmingError } from '../src/llm/client';
 // The retry policy (and the verdict on which failures are worth another
 // request) lives in llm/retry.ts; its own expectations are in tests/retry.test.ts.
-import { isTransientLLMError } from '../src/llm/retry';
+import { classifyLLMFailure, isTransientLLMError } from '../src/llm/retry';
 import type { EndpointSettings } from '../src/core/types';
 
 const openai: EndpointSettings = {
@@ -350,6 +350,36 @@ describe('a busy single-slot server', () => {
 
   it('a 503 is transient too — the server is still loading the model', () => {
     expect(isTransientLLMError(new Error('LLM server responded 503'))).toBe(true);
+  });
+
+  it('reports a 503 “model is not loaded” as warming, not busy', async () => {
+    // Ollama's readiness 503. The busy branch used to claim every 503 before
+    // the body was consulted, so the reader was told to raise a concurrency
+    // limit while the weights were still loading (and retrying used the busy
+    // ladder instead of the warming one).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ error: 'model "llama3" is not loaded' }, 503)),
+    );
+    const err = await chat({ endpoint: ollama, model: 'llama3' }, MESSAGES).catch(
+      (e: unknown) => e,
+    );
+    expect((err as Error).message).toContain('still loading the model');
+    expect(isServerWarmingError(err)).toBe(true);
+    expect(isServerBusyError(err)).toBe(false);
+    expect(classifyLLMFailure(err)).toBe('warming');
+    expect(isTransientLLMError(err)).toBe(true);
+  });
+
+  it('still reports a 503 with no readiness wording as busy', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ error: 'server overloaded' }, 503)),
+    );
+    const err = await chat({ endpoint: openai, model: 'm' }, MESSAGES).catch((e: unknown) => e);
+    expect((err as Error).message).toContain('generation slot');
+    expect(isServerBusyError(err)).toBe(true);
+    expect(classifyLLMFailure(err)).toBe('busy');
   });
 });
 

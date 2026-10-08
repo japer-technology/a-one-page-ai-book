@@ -64,11 +64,13 @@ export function renderQuoteCard(input: QuoteCardInput): HTMLCanvasElement {
   if (!ctx) throw new Error('Canvas unavailable');
   ctx.scale(scale, scale);
 
-  // Plaque + card with a soft shadow.
+  // Plaque + card with a soft shadow, offset below-right of the paper so a
+  // sliver stays visible — the old rect sat entirely inside the (larger)
+  // paper rect and was never seen.
   ctx.fillStyle = PLAQUE;
   ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.fillRect(70, 78, W - 140, H - 140);
+  ctx.fillRect(52 + 16, 56 + 20, W - 104, H - 112);
   ctx.fillStyle = PAPER;
   ctx.fillRect(52, 56, W - 104, H - 112);
 
@@ -145,37 +147,44 @@ export function renderQuoteCard(input: QuoteCardInput): HTMLCanvasElement {
   return canvas;
 }
 
-export function downloadQuoteCard(input: QuoteCardInput, fileName: string): boolean {
-  try {
-    const canvas = renderQuoteCard(input);
-    canvas.toBlob((blob) => {
-      // `toBlob` yields null on allocation failure; without this the button
-      // appeared to do nothing at all.
-      if (!blob) {
-        audit('quote card failed: canvas toBlob returned null');
-        return;
-      }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      try {
-        a.click();
-      } finally {
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      }
-    }, 'image/png');
-    return true;
-  } catch (err) {
-    audit(`quote card failed: ${String(err)}`);
-    return false;
-  }
+/**
+ * Render the card and trigger the download. Resolves true once the download
+ * was started, false when the card could not be encoded — the null-blob case
+ * used to resolve true, so the button silently did nothing while only the
+ * hidden audit log knew.
+ */
+export function downloadQuoteCard(input: QuoteCardInput, fileName: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const canvas = renderQuoteCard(input);
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          audit('quote card failed: canvas toBlob returned null');
+          resolve(false);
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        try {
+          a.click();
+        } finally {
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        }
+        resolve(true);
+      }, 'image/png');
+    } catch (err) {
+      audit(`quote card failed: ${String(err)}`);
+      resolve(false);
+    }
+  });
 }
 
-/** Returns false when the card could not be rendered — callers toast. */
-export function quoteCardFor(compiled: CompiledBook, pageNumber: number): boolean {
+/** Resolves false when the card could not be rendered — callers toast. */
+export async function quoteCardFor(compiled: CompiledBook, pageNumber: number): Promise<boolean> {
   const page = compiled.pages.find((p) => p.number === pageNumber);
   if (!page) return false;
   const slug = compiled.title
@@ -184,9 +193,11 @@ export function quoteCardFor(compiled: CompiledBook, pageNumber: number): boolea
     .replace(/^-+|-+$/g, '')
     .slice(0, 40);
   const label = page.kind === 'prologue' ? 'Prologue' : `Page ${page.number}`;
+  // Carry the book id like every other export filename: two same-titled books
+  // used to suggest identical card names.
   return downloadQuoteCard(
     { title: compiled.title, pageNumber: page.number, text: page.text, mood: page.mood, label },
-    `${slug || 'book'}-${page.kind === 'prologue' ? 'prologue' : `page-${page.number}`}-card.png`,
+    `${slug || 'book'}-${compiled.id.slice(0, 8)}-${page.kind === 'prologue' ? 'prologue' : `page-${page.number}`}-card.png`,
   );
 }
 

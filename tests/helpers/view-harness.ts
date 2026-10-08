@@ -94,8 +94,8 @@ export class StubApp {
   }
 
   // ---- Generation ---------------------------------------------------------
-  async generateText(): Promise<string> {
-    this.calls.push(['generateText']);
+  async generateText(messages?: unknown): Promise<string> {
+    this.calls.push(['generateText', messages]);
     return this.genTextReply;
   }
   async generateJSON<T>(): Promise<T> {

@@ -72,9 +72,7 @@ await waitFor(
 await evaluate(
   "[...document.querySelectorAll('.scan-row')].find(r => r.textContent.includes('reachable')).querySelector('button').click(); 'use'",
 );
-await evaluate(
-  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Test connection')).click(); 'test'",
-);
+await evaluate("document.querySelector('#endpoint-save-test').click(); 'test'");
 await waitFor(
   "[...document.querySelectorAll('.toast')].some(t => t.textContent.includes('Connected'))",
   30000,

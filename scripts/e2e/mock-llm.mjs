@@ -17,13 +17,11 @@ function pickContent(messages) {
   const joined = JSON.stringify(messages ?? []);
   if (/Reply with exactly: OK/.test(joined)) return 'OK';
   if (/JSON array of 5 objects/.test(joined)) {
-    return JSON.stringify([
-      { title: 'The Dead Letter', tagline: 'A story of salt and secrets' },
-      { title: 'The Keeper’s Grandson', tagline: 'What the fog brought back' },
-      { title: 'Low Tide', tagline: 'The sea keeps what it takes' },
-      { title: 'The Wax Seal', tagline: 'Some letters wait a century' },
-      { title: 'Lantern Light', tagline: 'Every light casts a shadow' },
-    ]);
+    // Each "Propose 5 more" walks to the NEXT batch — the way a real model
+    // offers fresh titles instead of repeating itself. (The app dedupes
+    // overlapping batches; identical batches would yield no new cards.)
+    const batch = TITLE_BATCHES[titleBatches++ % TITLE_BATCHES.length];
+    return JSON.stringify(batch);
   }
   // "I'm feeling lucky": the model proposes the story seeds.
   if (/different story SEEDS/.test(joined)) {
@@ -83,6 +81,25 @@ function chunks(text, count) {
   for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
   return out;
 }
+
+/** Successive title batches — "Propose 5 more" must show fresh titles. */
+let titleBatches = 0;
+const TITLE_BATCHES = [
+  [
+    { title: 'The Dead Letter', tagline: 'A story of salt and secrets' },
+    { title: 'The Keeper’s Grandson', tagline: 'What the fog brought back' },
+    { title: 'Low Tide', tagline: 'The sea keeps what it takes' },
+    { title: 'The Wax Seal', tagline: 'Some letters wait a century' },
+    { title: 'Lantern Light', tagline: 'Every light casts a shadow' },
+  ],
+  [
+    { title: 'The Salt Road', tagline: 'Every step erases the last' },
+    { title: 'A Map of Small Losses', tagline: 'Some borders are drawn in grief' },
+    { title: 'The Harbour Bell', tagline: 'It rings only for the missing' },
+    { title: 'Nightwater', tagline: 'What the dark keeps, it keeps for good' },
+    { title: 'The Second Keeper', tagline: 'One light, two shadows' },
+  ],
+];
 
 function readBody(req) {
   return new Promise((resolve) => {

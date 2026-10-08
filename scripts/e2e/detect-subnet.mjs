@@ -110,101 +110,106 @@ await send('Page.enable');
 // shares one Chromium — the next script would believe it is on this fake
 // network and skip the sweep it is there to check.
 const injected = await send('Page.addScriptToEvaluateOnNewDocument', { source: STUB });
-await send('Page.reload', { ignoreCache: true });
-await sleep(2500);
-await ev("location.hash = '#/settings'; 'ok'");
-const booted = await (async () => {
-  for (let i = 0; i < 40; i++) {
-    if (await ev(`!!document.querySelector('.view-settings')`)) return true;
-    await sleep(250);
-  }
-  return false;
-})();
-if (!booted) throw new Error('settings view never rendered');
-
-// ── 1. detection settles at once, without interrogating anything ───────────
-const started = Date.now();
-let netLine = '';
-let named = false;
-for (let i = 0; i < 80; i++) {
-  netLine = await ev(`document.querySelector('#net-line')?.textContent ?? ''`);
-  if (netLine.includes(`${BASE}.0/24`)) {
-    named = true;
-    break;
-  }
-  await sleep(100);
-}
-const settledMs = Date.now() - started;
-// Anything that is not this machine's own mock server is a probe at a range
-// the app was not asked to sweep.
-const foreign = await ev(
-  `(window.__requests ?? []).filter(u => !/^https?:\\/\\/(127\\.0\\.0\\.1|localhost)[:/]/.test(u))`,
-);
-check(
-  'the network the browser revealed is named at once',
-  named,
-  `${settledMs} ms — ${netLine.slice(0, 140)}`,
-);
-check(
-  'no probe is fired at any other range',
-  Array.isArray(foreign) && foreign.length === 0,
-  JSON.stringify(foreign),
-);
-
-// ── 2. the revealed subnet is the network the app names ───────────────────
-const subnetValue = await ev(`document.querySelector('.lan-subnet')?.value ?? ''`);
-check('the subnet box carries it too', subnetValue === BASE, subnetValue);
-check(
-  'it says that network is being scanned, not that it went unanswered',
-  /Scanning this machine and that network together/.test(netLine),
-  netLine.slice(0, 160),
-);
-
-// ── 3. the one-button scan sweeps it ──────────────────────────────────────
-await ev("document.querySelectorAll('.toast').forEach(t => t.remove()); 'clear'");
-await ev("document.querySelector('#llm-setup .btn-primary')?.click(); 'start'");
-// Long enough to prove the sweep is running (progress names the range) and
-// short enough to stop it before a dead range piles up dropped sockets.
-await sleep(1500);
-const state = await ev(`(() => ({
-  texts: [document.querySelector('#lan-progress'), document.querySelector('#net-line')]
-    .map(n => n?.textContent ?? '')
-    .filter(Boolean),
-  cancel: [...document.querySelectorAll('#llm-setup button')].some(b => /Cancel scan/.test(b.textContent)),
-  local: [...document.querySelectorAll('.llm-results .scan-row')].map(r => r.textContent),
-}))()`);
-const escaped = BASE.replace(/\./g, '\\.');
-check(
-  'the scan sweeps the revealed network',
-  state.texts.some(
-    (t) => new RegExp(`${escaped}\\.1–254`).test(t) && /(\d+\/254 scanned|responder)/.test(t),
-  ),
-  JSON.stringify(state.texts.slice(0, 2)),
-);
-check(
-  'it is not reported as an unanswered network instead',
-  !state.texts.some((t) => /not swept/.test(t)),
-);
-check('the button offers to cancel', state.cancel === true);
-check(
-  'the local half of the scan still ran',
-  state.local.some((t) => /LM Studio/.test(t)),
-  JSON.stringify(state.local.slice(0, 2)),
-);
-
-await ev("document.querySelector('#llm-setup .btn-danger')?.click(); 'cancel'");
-let verdict = '';
-for (let i = 0; i < 80; i++) {
-  verdict = await ev(`document.querySelector('#lan-progress')?.textContent ?? ''`);
-  if (new RegExp(`stopped[^]*${escaped}`).test(verdict)) break;
-  await sleep(400);
-}
-check('the cancelled sweep says it stopped', /^stopped/.test(verdict), verdict);
-
 const identifier = injected?.result?.identifier;
-if (identifier) await send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
 
-check('no console errors', consoleErrors.length === 0, JSON.stringify(consoleErrors.slice(0, 3)));
+try {
+  await send('Page.reload', { ignoreCache: true });
+  await sleep(2500);
+  await ev("location.hash = '#/settings'; 'ok'");
+  const booted = await (async () => {
+    for (let i = 0; i < 40; i++) {
+      if (await ev(`!!document.querySelector('.view-settings')`)) return true;
+      await sleep(250);
+    }
+    return false;
+  })();
+  if (!booted) throw new Error('settings view never rendered');
+
+  // ── 1. detection settles at once, without interrogating anything ───────────
+  const started = Date.now();
+  let netLine = '';
+  let named = false;
+  for (let i = 0; i < 80; i++) {
+    netLine = await ev(`document.querySelector('#net-line')?.textContent ?? ''`);
+    if (netLine.includes(`${BASE}.0/24`)) {
+      named = true;
+      break;
+    }
+    await sleep(100);
+  }
+  const settledMs = Date.now() - started;
+  // Anything that is not this machine's own mock server is a probe at a range
+  // the app was not asked to sweep.
+  const foreign = await ev(
+    `(window.__requests ?? []).filter(u => !/^https?:\\/\\/(127\\.0\\.0\\.1|localhost)[:/]/.test(u))`,
+  );
+  check(
+    'the network the browser revealed is named at once',
+    named,
+    `${settledMs} ms — ${netLine.slice(0, 140)}`,
+  );
+  check(
+    'no probe is fired at any other range',
+    Array.isArray(foreign) && foreign.length === 0,
+    JSON.stringify(foreign),
+  );
+
+  // ── 2. the revealed subnet is the network the app names ───────────────────
+  const subnetValue = await ev(`document.querySelector('.lan-subnet')?.value ?? ''`);
+  check('the subnet box carries it too', subnetValue === BASE, subnetValue);
+  check(
+    'it says that network is being scanned, not that it went unanswered',
+    /Scanning this machine and that network together/.test(netLine),
+    netLine.slice(0, 160),
+  );
+
+  // ── 3. the one-button scan sweeps it ──────────────────────────────────────
+  await ev("document.querySelectorAll('.toast').forEach(t => t.remove()); 'clear'");
+  await ev("document.querySelector('#llm-setup .btn-primary')?.click(); 'start'");
+  // Long enough to prove the sweep is running (progress names the range) and
+  // short enough to stop it before a dead range piles up dropped sockets.
+  await sleep(1500);
+  const state = await ev(`(() => ({
+    texts: [document.querySelector('#lan-progress'), document.querySelector('#net-line')]
+      .map(n => n?.textContent ?? '')
+      .filter(Boolean),
+    cancel: [...document.querySelectorAll('#llm-setup button')].some(b => /Cancel scan/.test(b.textContent)),
+    local: [...document.querySelectorAll('.llm-results .scan-row')].map(r => r.textContent),
+  }))()`);
+  const escaped = BASE.replace(/\./g, '\\.');
+  check(
+    'the scan sweeps the revealed network',
+    state.texts.some(
+      (t) => new RegExp(`${escaped}\\.1–254`).test(t) && /(\d+\/254 scanned|responder)/.test(t),
+    ),
+    JSON.stringify(state.texts.slice(0, 2)),
+  );
+  check(
+    'it is not reported as an unanswered network instead',
+    !state.texts.some((t) => /not swept/.test(t)),
+  );
+  check('the button offers to cancel', state.cancel === true);
+  check(
+    'the local half of the scan still ran',
+    state.local.some((t) => /LM Studio/.test(t)),
+    JSON.stringify(state.local.slice(0, 2)),
+  );
+
+  await ev("document.querySelector('#llm-setup .btn-danger')?.click(); 'cancel'");
+  let verdict = '';
+  for (let i = 0; i < 80; i++) {
+    verdict = await ev(`document.querySelector('#lan-progress')?.textContent ?? ''`);
+    if (new RegExp(`stopped[^]*${escaped}`).test(verdict)) break;
+    await sleep(400);
+  }
+  check('the cancelled sweep says it stopped', /^stopped/.test(verdict), verdict);
+
+  check('no console errors', consoleErrors.length === 0, JSON.stringify(consoleErrors.slice(0, 3)));
+} finally {
+  // Take the stub out again even when a check threw, so the next probe
+  // in this shared browser starts from the real network.
+  if (identifier) await send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
+}
 console.log(`\n${failures.length === 0 ? 'PASS' : 'FAIL'}: ${failures.length} check(s) failed`);
 ws.close();
 process.exit(failures.length === 0 ? 0 : 1);

@@ -82,6 +82,16 @@ function offerSeed(text: string): void {
 }
 
 // Session-scoped chat state: one pre-writing conversation at a time.
+/**
+ * The pre-writing chat's input draft and its session id. The input is rebuilt
+ * on every repaint (a chat reply, a background upkeep landing) and used to
+ * drop whatever the reader had half-typed; and a reply/distill that resolves
+ * after the conversation was reset (a book born, “new conversation”) must not
+ * write into the next session.
+ */
+let chatDraft = '';
+let chatSession = 0;
+
 const chat = {
   messages: [] as ChatMessage[],
   busy: false,
@@ -96,10 +106,12 @@ const chat = {
  * this view has. Also reachable from the reader's own "new conversation" button.
  */
 export function resetSeedSession(): void {
+  chatSession++;
   chat.messages = [];
   chat.brief = '';
   chat.busy = false;
   chatOpen = false;
+  chatDraft = '';
   draft.seed = '';
   draft.genre = '';
   draft.perspective = '';
@@ -116,9 +128,11 @@ export function resetSeedSession(): void {
 
 /** Clear just the conversation (the reader asked for a fresh one). */
 function clearConversation(): void {
+  chatSession++;
   chat.messages = [];
   chat.brief = '';
   chat.busy = false;
+  chatDraft = '';
 }
 
 /**
@@ -288,11 +302,18 @@ export function renderSeed(api: AppApi): HTMLElement {
     }
     lucky.busy = true;
     api2.refresh();
+    const session = chatSession;
     try {
       const fast = api2.lib.settings.fastModel || api2.lib.settings.endpoint.model;
       const raw = await api2.generateText(luckySeedMessages(5, collect(), lucky.offered), {
         model: fast,
       });
+      // The session was reset (a book was born, or the reader asked for a
+      // fresh conversation) while the roll was in flight: these ideas belong
+      // to the abandoned story and must not repopulate the pool or the box.
+      // Abort-on-navigate usually wins the race; this makes the invariant not
+      // depend on which promise settles first.
+      if (session !== chatSession) return;
       const ideas = parseStringList(raw).filter(usableSeed).slice(0, 5);
       if (ideas.length === 0) throw new Error('The model returned no usable seed');
       lucky.pool = ideas;
@@ -301,7 +322,7 @@ export function renderSeed(api: AppApi): HTMLElement {
       offerSeed(ideas[0] ?? '');
       api2.toast('Rolled by the model — click again for another', 'info');
     } catch (err) {
-      if (!isCancelled(err)) {
+      if (!isCancelled(err) && session === chatSession) {
         // Honest fallback: say what happened, then still fill the box.
         const idea = fallbackSeed();
         lucky.offered.push(idea);
@@ -357,6 +378,10 @@ export function renderSeed(api: AppApi): HTMLElement {
     class: 'input chat-input',
     type: 'text',
     placeholder: '“I want a quiet gothic mystery with a twist ending…”',
+    value: chatDraft,
+    oninput: (event: Event) => {
+      chatDraft = (event.target as HTMLInputElement).value;
+    },
     onkeydown: (event: KeyboardEvent) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -369,9 +394,14 @@ export function renderSeed(api: AppApi): HTMLElement {
     const text = input.value.trim();
     if (!text || chat.busy) return;
     input.value = '';
+    chatDraft = '';
     chat.messages.push({ role: 'user', content: text });
     chat.busy = true;
     chatOpen = true;
+    // The conversation this reply belongs to. If the reader starts a book (or
+    // asks for a new conversation) while the model is thinking, the reply must
+    // NOT land in the next session as a phantom turn.
+    const session = chatSession;
     api.refresh();
     // The re-render replaced the input — hand the caret back so the reader
     // can keep chatting without a mouse.
@@ -381,8 +411,10 @@ export function renderSeed(api: AppApi): HTMLElement {
       const reply = await api.generateText(chatMessages(trimChatHistory(chat.messages)), {
         model: fast,
       });
+      if (session !== chatSession) return;
       chat.messages.push({ role: 'assistant', content: reply.trim() });
     } catch (err) {
+      if (session !== chatSession) return;
       // A cancel is not an answer: pushing the notice into the transcript put
       // a fake assistant turn — "(The model didn't answer: Generation
       // cancelled.)" — into a conversation the reader had simply left.
@@ -400,6 +432,10 @@ export function renderSeed(api: AppApi): HTMLElement {
   const distill = async (api: AppApi): Promise<void> => {
     if (chat.messages.length < 2 || chat.busy) return;
     chat.busy = true;
+    // The conversation this brief belongs to: a distill that lands after
+    // “New conversation” (or after Begin) must not write the DISCARDED
+    // conversation back in as the surviving brief and seed.
+    const session = chatSession;
     api.refresh();
     try {
       const fast = api.lib.settings.fastModel || api.lib.settings.endpoint.model;
@@ -409,6 +445,7 @@ export function renderSeed(api: AppApi): HTMLElement {
         briefMessages(trimChatHistory(chat.messages, BRIEF_EXCHANGES_SENT)),
         { model: fast },
       );
+      if (session !== chatSession) return;
       chat.brief = brief.trim();
       // The brief fills the seed: a book distilled from a chat alone must be
       // able to begin. Edit either field — they stay in sync only here.
@@ -420,6 +457,7 @@ export function renderSeed(api: AppApi): HTMLElement {
         'success',
       );
     } catch (err) {
+      if (session !== chatSession) return;
       // A cancelled distill (the reader navigated in the meantime) is not a
       // failure to report: the toast outlives the view it came from.
       if (!isCancelled(err)) api.toast(api.genError(err), 'error');

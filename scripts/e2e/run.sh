@@ -7,8 +7,15 @@
 # Test connection (persists the endpoint). Exits non-zero on any failure.
 set -u
 cd "$(dirname "$0")/../.."
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/_profile.sh"
 
 APP_URL="file://$PWD/dist/page-turn.html#/settings"
+# A dedicated profile makes the run repeatable: the journey asserts first-run
+# behavior (an empty shelf), so it must start clean. On snap chromium a /tmp
+# profile is invisible to this host and never actually cleared — see
+# _profile.sh for the full story.
+PROFILE="$(pt_default_profile pt-e2e-profile)"
 MOCK_PID=""
 CHROME_PID=""
 cleanup() {
@@ -47,8 +54,14 @@ done
   exit 1
 }
 
+# Stop any leftover browser still holding this profile (from a crashed earlier
+# run), then start from a clean profile.
+for pid in $(pgrep -f "user-data-dir=${PROFILE}" || true); do kill "$pid" 2>/dev/null || true; done
+rm -rf "$PROFILE"
+
 chromium --headless --disable-gpu --no-sandbox --remote-debugging-port=9222 \
-  --remote-allow-origins='*' "$APP_URL" >/tmp/page-turn-chrome.log 2>&1 &
+  --remote-allow-origins='*' --user-data-dir="$PROFILE" \
+  "$APP_URL" >/tmp/page-turn-chrome.log 2>&1 &
 CHROME_PID=$!
 
 cdp_up=0

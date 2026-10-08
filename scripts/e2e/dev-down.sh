@@ -5,8 +5,11 @@
 # the one dev-up last started (recorded in /tmp/pt-profile.current), or the one
 # given as an argument.
 set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/_profile.sh"
 
-PROFILE="$(cat /tmp/pt-profile.current 2>/dev/null || echo /tmp/pt-profile)"
+PROFILE="$(cat /tmp/pt-profile.current 2>/dev/null || true)"
+[ -n "$PROFILE" ] || PROFILE="$(pt_default_profile pt-profile)"
 if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
   PROFILE="$1"
 fi

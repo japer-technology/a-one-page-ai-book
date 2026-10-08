@@ -67,9 +67,19 @@ const conflictBusy = new Set<string>();
  * Standing-rule and tweak drafts. These inputs have no model state behind them,
  * so a re-render used to silently discard whatever the reader had half-typed —
  * and a re-render is exactly what happens when the background cast or summary
- * update lands while they are typing.
+ * update lands while they are typing. Keyed per book: one shared draft leaked
+ * a half-typed rule from book A into every other book's console.
  */
-const ruleDraft = { text: '' };
+const ruleDrafts = new Map<string, { text: string }>();
+
+function ruleDraftFor(bookId: string): { text: string } {
+  let draft = ruleDrafts.get(bookId);
+  if (!draft) {
+    draft = { text: '' };
+    ruleDrafts.set(bookId, draft);
+  }
+  return draft;
+}
 /** Requests started by the turn console itself, so its buttons can go busy. */
 const turnBusy = new Set<string>();
 /** Set when a conflict check itself FAILED, as opposed to finding conflicts. */
@@ -118,6 +128,7 @@ export function renderTurn(api: AppApi): HTMLElement {
   pruneMap(ghosts, 200);
   pruneMap(ghostRequests, 200);
   pruneMap(conflictErrors, 200);
+  pruneMap(ruleDrafts, 200);
   if (autoSuggested.size > 300) autoSuggested.clear();
   if (turnFocused.size > 300) turnFocused.clear();
   const fromId = api.params.from ?? frontierParent(api);
@@ -132,7 +143,11 @@ export function renderTurn(api: AppApi): HTMLElement {
   }
   const fromTitle = from.data.kind === 'title';
 
-  const key = `turn:${book.id}`;
+  // Keyed per position: a failed generation used to wedge the console for the
+  // WHOLE book — every position showed the same error panel, and its Retry
+  // generated from whichever page was on screen at the click. Each position
+  // now owns its panel, and Retry can only repeat its own attempt.
+  const key = `turn:${book.id}:${from.id}`;
   const busy = genStates.get(key);
   if (busy) {
     return h(
@@ -419,15 +434,27 @@ export function renderTurn(api: AppApi): HTMLElement {
   }
 
   // ---- Emotion dials -------------------------------------------------------
-  const touchedCount = Object.keys(input.emotions).length;
+  const dialsLabel = h('span', {
+    text: `🎚️ Emotion dials${Object.keys(input.emotions).length > 0 ? ` — ${Object.keys(input.emotions).length} touched` : ''}`,
+  });
+  // Dragging a dial must not re-render the view (the range would lose the
+  // drag), but the fold's “— N touched” count is live feedback: update the
+  // label in place as dials move.
+  const updateDialsLabel = () => {
+    const count = Object.keys(input.emotions).length;
+    dialsLabel.textContent = `🎚️ Emotion dials${count > 0 ? ` — ${count} touched` : ''}`;
+  };
   const dials = h(
     'div',
     { class: 'dial-grid' },
-    ...EMOTION_NAMES.map((name) => dialRow(name, input)),
+    ...EMOTION_NAMES.map((name) => dialRow(name, input, updateDialsLabel)),
   );
 
   // ---- Standing rules ------------------------------------------------------
   const rules = book.rules ?? [];
+  // Per-book draft: a half-typed rule for book A must not appear pre-filled
+  // in book B's console.
+  const ruleDraft = ruleDraftFor(book.id);
   const ruleInput = h('input', {
     class: 'input rule-input',
     type: 'text',
@@ -561,7 +588,7 @@ export function renderTurn(api: AppApi): HTMLElement {
     api.lib.settings.autoSuggest &&
     list.length === 0 &&
     !autoSuggested.has(stateKey) &&
-    !genStates.has(`turn:${book.id}`)
+    !genStates.has(`turn:${book.id}:${from.id}`)
   ) {
     autoSuggested.add(stateKey);
     setTimeout(() => void suggest(api, book, stateKey, suggestArea), 0);
@@ -740,9 +767,7 @@ export function renderTurn(api: AppApi): HTMLElement {
           h(
             'summary',
             { class: 'dials-summary' },
-            h('span', {
-              text: `🎚️ Emotion dials${touchedCount > 0 ? ` — ${touchedCount} touched` : ''}`,
-            }),
+            dialsLabel,
             h('span', {
               class: 'field-hint',
               text: '±3, structural not adjectival · 0 = inherit the mood',
@@ -805,7 +830,11 @@ export function renderTurn(api: AppApi): HTMLElement {
   );
 }
 
-function dialRow(name: (typeof EMOTION_NAMES)[number], input: TurnInput): HTMLElement {
+function dialRow(
+  name: (typeof EMOTION_NAMES)[number],
+  input: TurnInput,
+  onTouched?: () => void,
+): HTMLElement {
   const meta = EMOTION_META[name];
   const value = input.emotions[name] ?? 0;
   const valueLabel = h('span', {
@@ -828,6 +857,7 @@ function dialRow(name: (typeof EMOTION_NAMES)[number], input: TurnInput): HTMLEl
         nextValue === 0 ? 'inherit' : `${nextValue > 0 ? '+' : ''}${nextValue}`;
       valueLabel.className = `dial-value${nextValue === 0 ? ' dial-inherit' : nextValue > 0 ? ' dial-plus' : ' dial-minus'}`;
       range.title = describeDial(name, nextValue);
+      onTouched?.();
     },
   });
   return h(
@@ -1011,8 +1041,15 @@ async function checkConflicts(
   } catch (err) {
     // Keep this OUT of `conflicts`: the render maps a non-empty list to the red
     // "this direction conflicts with the story" banner, which turned an
-    // unreachable model into an invented continuity problem.
-    conflictErrors.set(stateKey, api.genError(err));
+    // unreachable model into an invented continuity problem. And keep it out
+    // of `conflictErrors` too when the reader CANCELLED the check (navigating
+    // away aborts it) or has since edited the direction: a request the reader
+    // stopped is not a model failure, and the banner used to greet them on
+    // their next visit to the console.
+    const cancelled = err instanceof DOMException && err.name === 'AbortError';
+    if (!cancelled && input.direction === checked) {
+      conflictErrors.set(stateKey, api.genError(err));
+    }
   }
   conflictBusy.delete(stateKey);
   api.refresh();
