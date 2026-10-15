@@ -32,4 +32,25 @@ describe('mdLibraryEntries', () => {
     expect(bookFile?.content).toContain('Mood map');
     expect(entries.find((e) => e.name === 'index.md')?.content).toContain('**The Dead Letter**');
   });
+
+  it('survives a finite but out-of-range book timestamp (no RangeError)', () => {
+    // `toISOString()` throws `RangeError: Invalid time value` beyond
+    // ±8.64e15 ms — and only NON-finite timestamps are rejected at import, so
+    // a hand-edited 1e300 reached this formatter, killed the whole .md export
+    // and silently froze the OPFS markdown mirror.
+    const lib = defaultLibrary();
+    const seed = makeSeedNode('A seed.', emptySeedOptions());
+    const title = makeTitleNode(seed.id, { title: 'T', tagline: '' });
+    const page = makePageNode(title.id, DEFAULT_TURN, 'm', 'Text.');
+    const book = finishBook(makeBook(seed.id, title.id, 'm'), page.id);
+    book.createdAt = 9e15; // beyond ±8.64e15 ms, but a finite number
+    book.updatedAt = JSON.parse('1e999') as number; // Infinity, if one slips in
+    lib.nodes = { [seed.id]: seed, [title.id]: title, [page.id]: page };
+    lib.books = [book];
+
+    const entries = mdLibraryEntries(lib);
+    const bookFile = entries.find((e) => e.name.startsWith('books/'));
+    expect(bookFile?.content).toContain('Started: unknown');
+    expect(bookFile?.content).toContain('Updated: unknown');
+  });
 });

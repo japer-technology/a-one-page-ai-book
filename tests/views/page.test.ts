@@ -67,6 +67,19 @@ function aiButton(root: HTMLElement): HTMLElement {
 }
 
 describe('the paragraph crafting tools', () => {
+  it('closes an open rewrite panel on Escape', () => {
+    const { root } = fixture();
+    click(tool(root, 0, '↻'));
+    expect(root.querySelector('.para-panel')).toBeTruthy();
+
+    window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+
+    // 'esc close editors' is the promise the help text makes; the paragraph
+    // panels (rewrite/insert) used to survive it while only the add form was
+    // cleared.
+    expect(root.querySelector('.para-panel')).toBeNull();
+  });
+
   it('inserts a model paragraph AFTER the anchor instead of rewriting it', async () => {
     const { app, root, pageId } = fixture();
     app.genTextReply = 'The new paragraph.';

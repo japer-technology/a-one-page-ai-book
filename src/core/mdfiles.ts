@@ -20,6 +20,19 @@ export function bookMdName(lib: Library, bookId: string): string {
   return `books/${slugify(titleOf(lib.nodes, book)) || 'untitled'}-${book.id.slice(0, 8)}.md`;
 }
 
+/**
+ * A book timestamp as a calendar day. `toISOString()` throws `RangeError:
+ * Invalid time value` for a finite number outside the JS Date range
+ * (|t| > 8.64e15 ms — a hand-edited `1e300` survives import, since only
+ * non-finite values are rejected) and a single bad book killed the whole .md
+ * export and froze the OPFS markdown mirror. Range-safe instead.
+ */
+function bookDay(timestamp: number): string {
+  return Number.isFinite(timestamp) && Math.abs(timestamp) <= 8.64e15
+    ? new Date(timestamp).toISOString().slice(0, 10)
+    : 'unknown';
+}
+
 function bookMd(lib: Library, bookId: string): MdEntry {
   const book = lib.books.find((b) => b.id === bookId);
   if (!book) return { name: 'unknown.md', content: '' };
@@ -39,7 +52,7 @@ function bookMd(lib: Library, bookId: string): MdEntry {
     `- Pages kept: ${stats.pages} · Words kept: ${stats.words}`,
     `- Versions: ${stats.versions} · Branches: ${stats.branches}`,
     `- Model: ${book.model || 'unknown'}`,
-    `- Started: ${new Date(book.createdAt).toISOString().slice(0, 10)} · Updated: ${new Date(book.updatedAt).toISOString().slice(0, 10)}`,
+    `- Started: ${bookDay(book.createdAt)} · Updated: ${bookDay(book.updatedAt)}`,
     ...(book.tags.length > 0 ? [`- Tags: ${book.tags.join(', ')}`] : []),
     ...(book.guests.length > 0 ? [`- Co-written with: ${book.guests.join(', ')}`] : []),
     ...(mood ? [`- ${mood}`] : []),

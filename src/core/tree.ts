@@ -240,6 +240,17 @@ function freezeTurn(input: TurnInput): TurnInput {
   return structuredClone(input);
 }
 
+/**
+ * Re-record the decision on an existing turn node (same node, updated input).
+ * Used when a later attempt reuses a frontier turn left by a cancelled one —
+ * the stored turn (and the About ledger built from it) must name the direction
+ * that was actually used, not the abandoned one.
+ */
+export function setTurnInput(node: StoryNode, input: TurnInput): StoryNode {
+  if (node.kind !== 'turn' || node.data.kind !== 'turn') return node;
+  return { ...node, data: { ...node.data, input: freezeTurn(input) } };
+}
+
 export function makeSeedNode(text: string, options: SeedOptions, brief = ''): StoryNode {
   return {
     id: newId(),

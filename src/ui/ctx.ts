@@ -119,6 +119,12 @@ export interface AppApi {
   appendVersion(pageId: string, text: string, by: 'ai' | 'user', model?: string): void;
   chooseVersion(pageId: string, version: number): void;
   attachTurn(book: Book, pageId: string, input: TurnInput): StoryNode;
+  /**
+   * Re-record the decision on an existing turn node before reusing it: a
+   * cancelled attempt leaves its turn at the frontier, and reusing it must
+   * not keep the abandoned direction.
+   */
+  updateTurnInput(turnId: string, input: TurnInput): void;
   finishBook(book: Book, pageId: string, note: string): void;
   unfinishBook(book: Book): void;
   removeBook(bookId: string): void;

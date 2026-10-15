@@ -521,12 +521,15 @@ out.themeApplied = await waitFor(
   5000,
   'sepia theme applied',
 );
-out.wallChanged = await evaluate(
-  "(getComputedStyle(document.body).backgroundImage !== '' && getComputedStyle(document.body).backgroundImage.includes('radial-gradient')) ? true : false",
-);
+// The wall must actually RE-SKIN: compare the sepia wall against the wall
+// after switching back to dark. The old check only asked whether SOME
+// radial-gradient existed, which every theme (including the default) has.
+const sepiaWall = await evaluate('getComputedStyle(document.body).backgroundImage');
 await evaluate(
   "[...document.querySelectorAll('.segmented .seg')].find(b => b.textContent === 'dark').click(); 'dark-again'",
 );
+const darkWall = await evaluate('getComputedStyle(document.body).backgroundImage');
+out.wallChanged = sepiaWall.includes('radial-gradient') && sepiaWall !== darkWall;
 await evaluate(
   "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Settings')).click(); 'settings-again'",
 );

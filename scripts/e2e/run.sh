@@ -54,9 +54,18 @@ done
   exit 1
 }
 
-# Stop any leftover browser still holding this profile (from a crashed earlier
-# run), then start from a clean profile.
+# Stop any leftover browser still holding this profile OR the debug port — a
+# crashed earlier run, or a dev-up browser from a different profile: the
+# readiness greps below would happily drive THAT browser instead of ours, with
+# its accumulated profile state — then start from a clean profile.
+PRE_WS=$(curl -sf --max-time 2 http://127.0.0.1:9222/json/version | grep -o '"webSocketDebuggerUrl":[^,]*' || true)
 for pid in $(pgrep -f "user-data-dir=${PROFILE}" || true); do kill "$pid" 2>/dev/null || true; done
+if command -v ss >/dev/null 2>&1; then
+  for pid in $(ss -ltnpH 'sport = :9222' 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true); do
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 0.5
+fi
 rm -rf "$PROFILE"
 
 chromium --headless --disable-gpu --no-sandbox --remote-debugging-port=9222 \
@@ -78,8 +87,15 @@ done
   echo "chromium CDP never came up on :9222" >&2
   exit 1
 }
-# And it must be OUR app the debugger is showing: a stale browser holding the
-# port answers /json/version too, but serves a different page.
+# And it must be OUR browser showing OUR app: a stale browser holding the port
+# answers /json/version too and may even show page-turn.html — so also require
+# the debugger GUID to have CHANGED from the one holding the port before we
+# tried to clear it.
+POST_WS=$(curl -sf --max-time 2 http://127.0.0.1:9222/json/version | grep -o '"webSocketDebuggerUrl":[^,]*' || true)
+if [ -n "$PRE_WS" ] && [ "$PRE_WS" = "$POST_WS" ]; then
+  echo "the CDP endpoint on :9222 is still the browser that was already running" >&2
+  exit 1
+fi
 curl -sf http://127.0.0.1:9222/json | grep -q 'page-turn.html' || {
   echo "the CDP endpoint on :9222 is not showing page-turn.html — is a stale browser holding the port?" >&2
   exit 1

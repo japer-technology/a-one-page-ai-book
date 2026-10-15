@@ -6,7 +6,7 @@
  */
 import type { Library } from './types';
 import { compileBook } from './compile';
-import { collectSubtree } from './tree';
+import { collectSubtree, statsOf } from './tree';
 
 export interface Achievement {
   id: string;
@@ -35,13 +35,18 @@ export function computeStreak(days: string[], today: string): { streak: number; 
   // (YYYY-MM-DD), but impossible days like "2026-02-30" still parse (JS rolls
   // them over) and each one used to reset the longest-run walk to a spurious
   // run of 1 — reporting a "longest streak" of 1 for a calendar with no real
-  // day, and a longest BELOW the current streak next to it.
-  const set = new Set(days.filter((day) => shiftDate(day, 0) === day));
+  // day, and a longest BELOW the current streak next to it. The empty string
+  // must be rejected too: shiftDate() returns '' for anything it cannot parse
+  // and '' is a fixed point of itself, so it passed this filter and then the
+  // walk below could never advance — an unbreakable infinite loop inside the
+  // shelf render.
+  const set = new Set(days.filter((day) => day.length > 0 && shiftDate(day, 0) === day));
   let streak = 0;
   let cursor = today;
   // If today is missing, start counting from yesterday (streak not yet broken).
   if (!set.has(cursor)) cursor = shiftDate(cursor, -1);
-  while (set.has(cursor)) {
+  // `cursor.length > 0` bounds the walk even if a future sentinel gets in.
+  while (cursor.length > 0 && set.has(cursor)) {
     streak++;
     cursor = shiftDate(cursor, -1);
   }
@@ -90,8 +95,12 @@ export function computeShelfStats(lib: Library, today: string): ShelfStats {
     if (book.status === 'finished') finished++;
     if (book.status === 'finished' && book.ironMode === 'iron') ironFinished++;
     const compiled = compileBook(nodes, book);
-    pages += compiled.pages.length;
-    wordsKept += compiled.words;
+    // Count pages and words the way the book card and the .md export do
+    // (statsOf): the compiled list includes the page-zero prologue, so the
+    // shelf strip and the card for the same book disagreed on one screen.
+    const stats = statsOf(nodes, book);
+    pages += stats.pages;
+    wordsKept += stats.words;
     if (/^Sequel to\b/i.test(compiled.seed)) sequelCount++;
     const subtree = collectSubtree(nodes, book.seedNodeId);
     for (const node of subtree) {

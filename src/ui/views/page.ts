@@ -1329,7 +1329,10 @@ function installKeys(api: AppApi, book: Book, page: StoryNode): void {
       clearSpanToolbar();
       editState.delete(page.id);
       for (const k of [...paraEdit.keys()]) if (k.startsWith(`${page.id}:`)) paraEdit.delete(k);
-      paraPanel.delete(`${page.id}:add`);
+      // EVERY open panel for this page — the paragraph rewrite/insert prompts
+      // live under `${page.id}:${index}`, so clearing only the add form left
+      // them on screen after the reader asked to close editors.
+      for (const k of [...paraPanel.keys()]) if (k.startsWith(`${page.id}:`)) paraPanel.delete(k);
       api.refresh();
       return;
     }

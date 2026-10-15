@@ -24,6 +24,12 @@ const PKG = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 
 function gitShortHash() {
   try {
+    // git discovers repositories upward: a tree unpacked inside some other
+    // repository would otherwise stamp a foreign HEAD into the banner.
+    const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: root })
+      .toString()
+      .trim();
+    if (path.resolve(top) !== path.resolve(root)) return 'unknown';
     return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root }).toString().trim();
   } catch {
     return 'unknown';
@@ -86,10 +92,22 @@ let js = await readFile(path.join(OUT, 'main.js'), 'utf8');
 js += `\nwindow.__BUILD__={name:${JSON.stringify(PKG.name)},version:${JSON.stringify(PKG.version)},builtAt:${JSON.stringify(builtAt)},commit:${JSON.stringify(gitShortHash())}};\n`;
 
 let html = await readFile(path.join(root, 'build/template.html'), 'utf8');
-if (!html.includes('{{__CSS__}}') || !html.includes('{{__JS__}}')) {
-  throw new Error('build/template.html must contain the {{__CSS__}} and {{__JS__}} placeholders');
+// Exactly one of each placeholder: `replace` substitutes only the FIRST
+// occurrence, so a literal `{{__JS__}}` mentioned earlier in the document (a
+// comment, a CSS string) would swallow the whole bundle and still pass every
+// contract check — a dead single-file app with no diagnostics.
+for (const marker of ['{{__CSS__}}', '{{__JS__}}']) {
+  const count = html.split(marker).length - 1;
+  if (count !== 1) {
+    throw new Error(
+      `build/template.html must contain exactly one ${marker} placeholder (found ${count})`,
+    );
+  }
 }
 html = html.replace('{{__CSS__}}', () => css).replace('{{__JS__}}', () => js);
+if (html.includes('{{__CSS__}}') || html.includes('{{__JS__}}')) {
+  throw new Error('a placeholder survived substitution — refusing to emit a dead file');
+}
 
 // Safety: the injected script must not terminate the host <script> tag early,
 // and must not enter the tokenizer's escaped states. esbuild escapes
@@ -104,11 +122,16 @@ if (scriptCloses !== 1) {
       'Check esbuild escaping or the template.',
   );
 }
-for (const [label, re] of [
-  ['<!--', /<!--/],
-  ['</style', /<\/style/i],
+// Each guard is scoped to the asset where the sequence can actually corrupt
+// the file: `</style` inside JS and `<!--`/`</script` inside CSS are inert
+// (script-data and RAWTEXT states), and esbuild already escapes the genuinely
+// dangerous same-asset cases. Refusing legal cross-asset content pointed
+// maintainers at the wrong file.
+for (const [label, re, assets] of [
+  ['<!--', /<!--/, [js]],
+  ['</style', /<\/style/i, [css]],
 ]) {
-  if (re.test(js) || re.test(css)) {
+  if (assets.some((asset) => re.test(asset))) {
     throw new Error(
       `Inlined asset contains a raw "${label}" sequence — refusing to emit a file that would not parse. ` +
         'Escape it in the source that introduced it.',

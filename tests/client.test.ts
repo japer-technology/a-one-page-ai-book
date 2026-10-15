@@ -60,6 +60,27 @@ describe('OpenAI-compatible dialect', () => {
     expect(tokens.join('')).toBe('Hello world');
   });
 
+  it('keeps every token when a keepalive line precedes a multi-line event', async () => {
+    // A proxy keepalive (`data: ping`) can never parse; it used to stay in the
+    // event buffer, and the NEXT event — split across two data lines — then
+    // failed every join (ping+line1, ping+line1+line2), so all its tokens were
+    // silently dropped and the page came back truncated mid-sentence.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse('text/event-stream; charset=utf-8', [
+          'data: ping\n\n',
+          'data: {"choices":[{"delta":{"content":\n',
+          'data: "Hello"}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ]),
+      ),
+    );
+    const text = await chat({ endpoint: openai, model: 'm', onToken: () => {} }, MESSAGES);
+    expect(text).toBe('Hello world');
+  });
+
   it('falls back to plain JSON when the server ignores stream:true', async () => {
     vi.stubGlobal(
       'fetch',
@@ -416,5 +437,24 @@ describe('multi-line SSE events', () => {
     await expect(
       chat({ endpoint: openai, model: 'm', onToken: () => {} }, MESSAGES),
     ).rejects.toThrow(/CUDA out of memory/);
+  });
+
+  it('recovers when a junk line lands between the data lines of one event', async () => {
+    // A keepalive can arrive mid-payload; the suffix scan alone then sees
+    // junk in every join, and the event's tokens were silently lost.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse('text/event-stream; charset=utf-8', [
+          'data: {"choices":[{"delta":{"content":\n',
+          'data: ping\n\n',
+          'data: "One"}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":" two"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ]),
+      ),
+    );
+    const text = await chat({ endpoint: openai, model: 'm', onToken: () => {} }, MESSAGES);
+    expect(text).toBe('One two');
   });
 });

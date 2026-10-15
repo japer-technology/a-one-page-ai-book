@@ -79,16 +79,29 @@ export async function updateSummary(
     api.refresh();
     // Trailing pass: a page that landed while this one ran was skipped by the
     // busy-guard, so the memory would otherwise lag one page behind forever.
-    const trailing = pendingSummary.get(book.id);
-    if (trailing && trailing !== pageNode.id) {
-      pendingSummary.delete(book.id);
-      void updateSummary(api, book, trailing);
-    }
+    runTrailingSummary(api, book, pageNode.id);
   } catch (err) {
     busy.delete(book.id);
     if (pendingSummary.get(book.id) === pageNodeId) pendingSummary.delete(book.id);
     busy.set(book.id, { status: 'error', error: api.genError(err) });
     api.refresh();
+    // A failure must not strand the page that queued behind it: without this
+    // the rolling memory lags one page behind until the reader clicks Retry
+    // or keeps yet another page.
+    runTrailingSummary(api, book, pageNodeId);
+  }
+}
+
+/**
+ * Run the update for the newest page that queued while another one was in
+ * flight (the busy-guard skipped it). Shared by the success and failure paths
+ * so neither can strand it.
+ */
+function runTrailingSummary(api: AppApi, book: Book, pageNodeId: string): void {
+  const queued = pendingSummary.get(book.id);
+  if (queued && queued !== pageNodeId) {
+    pendingSummary.delete(book.id);
+    void updateSummary(api, book, queued);
   }
 }
 

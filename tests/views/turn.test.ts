@@ -21,7 +21,7 @@ import {
 import { defaultLibrary, emptySeedOptions } from '../../src/core/schema';
 import { DEFAULT_TURN } from '../../src/core/types';
 import type { Book, Library, StoryNode } from '../../src/core/types';
-import { click, findButton, mountView, settle, StubApp, type } from '../helpers/view-harness';
+import { all, click, findButton, mountView, settle, StubApp, type } from '../helpers/view-harness';
 
 function libOf(nodes: StoryNode[], books: Book[]): Library {
   const settings = defaultLibrary().settings;
@@ -38,7 +38,7 @@ function libOf(nodes: StoryNode[], books: Book[]): Library {
   };
 }
 
-function fixture(): { app: StubApp; root: HTMLElement } {
+function fixture(): { app: StubApp; root: HTMLElement; pageId: string } {
   const seed = makeSeedNode('s', emptySeedOptions());
   const title = makeTitleNode(seed.id, { title: 'The Dead Letter', tagline: '' });
   const turn1 = makeTurnNode(title.id, DEFAULT_TURN);
@@ -48,7 +48,7 @@ function fixture(): { app: StubApp; root: HTMLElement } {
   const app = new StubApp(libOf([seed, title, turn1, page, waiting], [book]), book, 'turn');
   app.state.params = { from: page.id };
   const root = mountView(app, renderTurn);
-  return { app, root };
+  return { app, root, pageId: page.id };
 }
 
 const directionBox = (root: HTMLElement): HTMLTextAreaElement =>
@@ -248,5 +248,97 @@ describe('the standing-rule draft', () => {
     // Book B's console must start with an EMPTY rule input: the single shared
     // draft used to pre-fill book A's half-typed rule here.
     expect(root.querySelector<HTMLInputElement>('.rule-input')?.value).toBe('');
+  });
+});
+
+describe('a cancelled turn and the decision ledger', () => {
+  it('re-records the direction when the abandoned turn node is reused', async () => {
+    const { app, root, pageId } = fixture();
+    let failFirst!: (err: unknown) => void;
+    let resolveSecond!: (text: string) => void;
+    let calls = 0;
+    app.generateText = (() => {
+      calls++;
+      if (calls === 1) {
+        return new Promise((_resolve, reject) => {
+          failFirst = reject;
+        });
+      }
+      return new Promise((resolve) => {
+        resolveSecond = resolve as (text: string) => void;
+      });
+    }) as typeof app.generateText;
+
+    // Attempt 1: a direction, then Cancel from the busy panel.
+    type(directionBox(root), 'FRESH DIRECTION A');
+    click(findButton(root, 'Generate next page'));
+    click(findButton(root, 'Cancel'));
+    failFirst(new DOMException('Generation cancelled', 'AbortError'));
+    await settle();
+    await settle();
+    expect(directionBox(root)).toBeTruthy();
+
+    // Attempt 2: a different direction, generated for real.
+    type(directionBox(root), 'SECOND DIRECTION B');
+    click(findButton(root, 'Generate next page'));
+    resolveSecond('The second page.');
+    await settle();
+    await settle();
+
+    // The turn node at the frontier now names the direction ACTUALLY used —
+    // the About ledger is built from these inputs, so keeping the abandoned
+    // one made the book's own record contradict the page.
+    const reused = Object.values(app.nodes).find(
+      (node) => node.kind === 'turn' && node.parentId === pageId,
+    );
+    expect(reused?.data.kind === 'turn' ? reused.data.input.direction : null).toBe(
+      'SECOND DIRECTION B',
+    );
+    expect(app.calls.some((call) => call[0] === 'updateTurnInput')).toBe(true);
+  });
+});
+
+describe('dismissing a failed generation', () => {
+  it('gives the console back instead of locking the reader at that turn', async () => {
+    const { app, root } = fixture();
+    let failGen!: (err: unknown) => void;
+    app.generateText = (() =>
+      new Promise((_resolve, reject) => {
+        failGen = reject;
+      })) as typeof app.generateText;
+
+    type(directionBox(root), 'OPEN THE DOOR');
+    click(findButton(root, 'Generate next page'));
+    failGen(new Error('server down'));
+    await settle();
+    await settle();
+
+    // The console is replaced by the error panel…
+    expect(root.querySelector('.direction-input')).toBeNull();
+    expect(findButton(root, 'Retry')).toBeTruthy();
+    // …and the reader can dismiss it to edit the direction or back out.
+    click(findButton(root, 'Dismiss'));
+    expect(directionBox(root)).toBeTruthy();
+  });
+
+  it('never offers a refusal as a suggestion chip', async () => {
+    // The suggest prompt can answer with a refusal; it must not become a chip
+    // the reader can click into the direction box.
+    const seed = makeSeedNode('s', emptySeedOptions());
+    const title = makeTitleNode(seed.id, { title: 'The Dead Letter', tagline: '' });
+    const turn1 = makeTurnNode(title.id, DEFAULT_TURN);
+    const page = makePageNode(turn1.id, DEFAULT_TURN, 'm', 'The letter waited.');
+    const waiting = makeTurnNode(page.id, DEFAULT_TURN);
+    const book = setFrontier(makeBook(seed.id, title.id, 'm'), waiting.id);
+    const app = new StubApp(libOf([seed, title, turn1, page, waiting], [book]), book, 'turn');
+    app.state.params = { from: page.id };
+    app.genJsonReply = ["I'm sorry, but I can't help with that.", '👻'];
+    const root = mountView(app, renderTurn);
+
+    click(findButton(root, '✨ Suggest directions'));
+    await settle();
+    await settle();
+
+    expect(all(root, '.chip-suggest').map((chip) => chip.textContent)).toEqual(['👻']);
   });
 });

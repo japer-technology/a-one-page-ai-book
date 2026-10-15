@@ -205,12 +205,28 @@ async function readSSE(response: Response, onToken: (t: string) => void): Promis
       return whole;
     }
     // Not a multi-line payload: a server that writes no blank separator
-    // between events — then the last line on its own is the event.
-    if (eventData.length > 1) {
-      const last = asEvent(payload);
-      if (last !== null) {
+    // between events, or a junk line the stream cannot parse (a proxy
+    // keepalive `data: ping`, an injected HTML frame). Then the event is a
+    // SUFFIX of what accumulated — and every suffix must be tried, not just
+    // the last line: after a junk line, a following MULTI-LINE event made
+    // every join fail (junk+line1, junk+line1+line2 …), so all its tokens
+    // were silently dropped and the page came back truncated mid-sentence.
+    for (let k = 1; k < eventData.length; k++) {
+      const suffix = asEvent(eventData.slice(k).join('\n'));
+      if (suffix !== null) {
         eventData = [];
-        return last;
+        return suffix;
+      }
+    }
+    // A junk line BETWEEN the data lines of one event (a keepalive landing
+    // mid-payload): no suffix parses, but dropping each single interior line
+    // exposes the real payload underneath.
+    for (let k = 1; k < eventData.length - 1; k++) {
+      const without = [...eventData.slice(0, k), ...eventData.slice(k + 1)].join('\n');
+      const fixed = asEvent(without);
+      if (fixed !== null) {
+        eventData = [];
+        return fixed;
       }
     }
     return false;

@@ -23,7 +23,13 @@ type GroupKey = 'people' | 'places' | 'things' | 'threads';
 
 interface CastUIState {
   adding: GroupKey | null;
-  editing: string | null; // `${group}:${index}`
+  /**
+   * The entry an open edit form belongs to: its group, and the name it was
+   * opened on. Keying by array INDEX meant a background cast update that
+   * re-ordered the group left the form pointing at whichever entry slid into
+   * that slot — a following Save then overwrote an innocent entry.
+   */
+  editing: { group: GroupKey; name: string } | null;
   draft: { name: string; note: string; details: string };
   /**
    * Whether the panel is expanded. Forcing `open` on every construction meant
@@ -103,6 +109,23 @@ export async function updateBible(
       background: true,
       quiet: !manual,
     });
+    // The reader may edit the cast while the model is thinking. Saving the
+    // reply would rebuild the bible from the PRE-await snapshot and silently
+    // discard their edit (an added entry vanished, a rename reverted) — and
+    // merging against the live bible would resurrect a name they just renamed
+    // away. Their curation wins outright: on any change under the call, drop
+    // this reply. The next kept page refreshes the cast again.
+    const live = bibleUpTo(api.nodes, pageNode.id)?.bible ?? null;
+    if ((live?.updatedAt ?? 0) !== (previous?.updatedAt ?? 0)) {
+      busy.delete(book.id);
+      // Same cleanup as the other exits: a marker naming THIS page must go,
+      // or the next update (which runs for another page) would see it as
+      // trailing work and re-extract this one unrequested.
+      if (pendingBible.get(book.id) === pageNodeId) pendingBible.delete(book.id);
+      api.refresh();
+      runTrailingUpdate(api, book, pageNodeId);
+      return;
+    }
     const parsed = parseBible(typeof raw === 'string' ? raw : JSON.stringify(raw), previous);
     parsed.at = pageNumberAt(api.nodes, pageNode.id);
     parsed.updatedAt = Date.now();
@@ -119,11 +142,7 @@ export async function updateBible(
     api.refresh();
     // Trailing pass: if a newer page was requested while this one ran, its
     // update was skipped by the busy-guard — run it now.
-    const trailing = pendingBible.get(book.id);
-    if (trailing && trailing !== pageNodeId) {
-      pendingBible.delete(book.id);
-      void updateBible(api, book, trailing);
-    }
+    runTrailingUpdate(api, book, pageNodeId);
   } catch (err) {
     busy.delete(book.id);
     // A superseded request must not leave its marker behind, or the next
@@ -131,6 +150,23 @@ export async function updateBible(
     if (pendingBible.get(book.id) === pageNodeId) pendingBible.delete(book.id);
     busy.set(book.id, { status: 'error', error: api.genError(err) });
     api.refresh();
+    // A failure must not strand the page that queued behind it: without this
+    // the cast lags one page behind until the reader clicks Retry or keeps
+    // yet another page.
+    runTrailingUpdate(api, book, pageNodeId);
+  }
+}
+
+/**
+ * Run the update for the newest page that queued while another one was in
+ * flight (the busy-guard skipped it). Shared by the success, stale-skip and
+ * failure paths so none of them can strand it.
+ */
+function runTrailingUpdate(api: AppApi, book: Book, pageNodeId: string): void {
+  const queued = pendingBible.get(book.id);
+  if (queued && queued !== pageNodeId) {
+    pendingBible.delete(book.id);
+    void updateBible(api, book, queued);
   }
 }
 
@@ -310,8 +346,11 @@ function castEntry(
   entry: BibleEntry,
   ui: CastUIState,
 ): HTMLElement {
-  const key = `${group}:${index}`;
-  if (ui.editing === key && targetNodeId) {
+  const editingThis =
+    ui.editing !== null &&
+    ui.editing.group === group &&
+    ui.editing.name.toLowerCase() === entry.name.toLowerCase();
+  if (editingThis && targetNodeId) {
     return entryForm(api, book, targetNodeId, group, index, ui, entry);
   }
   return h(
@@ -334,7 +373,7 @@ function castEntry(
         'aria-label': `Rename or edit ${entry.name}`,
         title: 'Rename / edit this entry',
         onclick: () => {
-          ui.editing = key;
+          ui.editing = { group, name: entry.name };
           ui.adding = null;
           ui.draft = { name: entry.name, note: entry.note, details: entry.details ?? '' };
           api.refresh();
@@ -348,6 +387,12 @@ function castEntry(
         title: 'Remove this entry',
         onclick: () => {
           if (!targetNodeId) return;
+          // Clear the editor BEFORE the mutation re-renders: saveBible paints
+          // synchronously, and an editor left set would re-open on whichever
+          // entry slid into the cleared slot — a following Save then wrote
+          // this draft over an innocent entry.
+          ui.editing = null;
+          ui.adding = null;
           api.saveBible(
             targetNodeId,
             mutateBible(api, targetNodeId, (bible) => {
@@ -356,8 +401,6 @@ function castEntry(
               return { ...bible, [group]: list };
             }),
           );
-          ui.editing = null;
-          ui.adding = null;
           api.toast(`Removed “${entry.name}”`, 'info');
         },
       }),
@@ -418,6 +461,11 @@ function entryForm(
       api.toast('Give it a name first', 'info');
       return;
     }
+    // The entry this form was opened on, by NAME: a background cast update
+    // can rewrite and re-order the group while the form is open, and saving
+    // by the old index then overwrote whichever entry had moved into that
+    // slot. (An add form has no opened-on name.)
+    const openedOn = index === null ? null : (ui.editing?.name ?? null);
     // Close the form BEFORE the mutation re-renders (saveBible re-renders
     // synchronously): clearing the flags afterwards left the form on screen
     // with the saved draft still in it, so a second Save — which looked like
@@ -428,16 +476,22 @@ function entryForm(
       targetNodeId,
       mutateBible(api, targetNodeId, (bible) => {
         const list = [...bible[group]];
+        const resolved = openedOn
+          ? list.findIndex((entry) => entry.name.toLowerCase() === openedOn.toLowerCase())
+          : -1;
+        const previous = resolved >= 0 ? list[resolved] : undefined;
         const entry: BibleEntry = {
           name,
           note: draft.note.trim(),
-          details: group === 'people' && draft.details.trim() ? draft.details.trim() : undefined,
+          // Only people render a sheet in this form; re-saving a place, thing
+          // or thread must not delete the details it already carried.
+          details: group === 'people' ? draft.details.trim() || undefined : previous?.details,
         };
-        if (index === null) list.push(entry);
-        else {
-          const previous = list[index];
-          list[index] = previous ? { ...previous, ...entry } : entry;
-        }
+        // The opened-on entry no longer exists (removed, or rewritten under a
+        // new name): add the draft rather than overwrite whoever sits at the
+        // stale index.
+        if (resolved === -1) list.push(entry);
+        else list[resolved] = { ...previous, ...entry };
         return { ...bible, [group]: list };
       }),
     );
@@ -495,7 +549,14 @@ async function renameSurgery(
   const key = `surgery:${book.id}`;
   if (genStates.has(key)) return;
   const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`\\b${escape(oldName)}\\b`, 'i');
+  // Unicode-aware boundaries: JavaScript's \b is ASCII-only, so a name whose
+  // edge characters are punctuation ("Dr. Voss!") or non-Latin ("千代") could
+  // never match — the surgery reported those names absent while the text
+  // plainly contained them.
+  const pattern = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}_])${escape(oldName)}(?=$|[^\\p{L}\\p{N}_])`,
+    'iu',
+  );
   const spine = spinePages(api.nodes, book.frontierId);
   const targets = spine.filter((pageNode) => {
     if (pageNode.data.kind !== 'page') return false;

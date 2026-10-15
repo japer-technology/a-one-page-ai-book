@@ -124,8 +124,8 @@ boots with a fresh in-memory library. Persistence is best-effort by design; rend
 4. **Emit-time safety checks:** the inliner counts `</script>` occurrences (must be exactly the
    host's one — esbuild escapes the rest) and fails the build rather than ship a corrupt file.
 
-Result: `dist/page-turn.html` — ~70 kB, works from `file://`, zero network calls at boot.
-`dist/index.html` is a convenience copy.
+Result: `dist/page-turn.html` — ~324 kB (the build prints the exact size), works from `file://`,
+zero network calls at boot. `dist/index.html` is a convenience copy.
 
 **Dev mode** (`build/serve.mjs`) serves the same sources as real ESM with sourcemaps and
 watch-rebuilds — so the developer's fast loop and the shipped artifact are literally the same code.
@@ -360,6 +360,6 @@ its natural landing spot:
   [CONTRIBUTING.md](../CONTRIBUTING.md).
 - New pure logic ⇒ new test. New view ⇒ keep it a function of `AppApi` and nothing else.
 - Any change that must appear in the shipped file goes through `pnpm build`; `dist/` is never edited
-  by hand (and never committed — CI publishes it).
+  by hand (it is committed alongside the source, and CI also publishes it).
 - The single-file contract is load-bearing: if a change breaks it, the build must fail, not silently
   ship.

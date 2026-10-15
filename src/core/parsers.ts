@@ -22,7 +22,11 @@ export function stripCodeFence(text: string): string {
  */
 export function parseJSONLoose<T>(text: string): T {
   const candidates = [text.trim(), stripCodeFence(text)];
-  for (const candidate of candidates) {
+  // Small models write curly quotes: “[a”, “b”] is a list, not prose. The
+  // de-curled variants come LAST so a value that legitimately contains a
+  // curly quote still parses from the original text first.
+  const decurled = (s: string): string => s.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+  for (const candidate of [...candidates, ...candidates.map(decurled)]) {
     try {
       return JSON.parse(repairTrailingCommas(candidate)) as T;
     } catch {
@@ -140,26 +144,57 @@ function balancedSlices(text: string): string[] {
  * never content: every salvage path must drop them, or a refusal becomes a
  * pickable title, a seed idea, or a "conflict".
  */
-function looksLikeRefusal(line: string): boolean {
+export function looksLikeRefusal(line: string): boolean {
   const text = line.trim();
-  return (
-    // An apology that CONTINUES into a refusal ("I'm sorry, but I can't…",
-    // "I'm sorry, I cannot provide…"). A bare "I'm sorry" must NOT match —
-    // "I'm Sorry — two words nobody wanted" is a proposable title.
-    /^i(?:['’]m| am)\s+sorry\b[^.!?\n]{0,60}?(?:\bbut\b|\bi (?:can(?:not|['’]?t)|won['’]?t|am (?:not )?(?:able|going)|must decline)\b|\bunable\b|\bcannot\b)/i.test(
-      text,
-    ) ||
-    // "Sorry, but I can't…" / "Sorry, I cannot…" — refusal continuations only;
-    // "Sorry, Wrong Number" is a title.
-    /^sorry\b\s*[,!:—–-]\s*(?:but\s+)?i(?:['’]m| am)?\s*(?:can(?:not|['’]?t)|won['’]?t|unable|am (?:not )?(?:able|going)|must decline)\b/i.test(
-      text,
-    ) ||
-    /^i apologi[sz]e\b/i.test(text) ||
-    /^as an? (?:ai|assistant|language model)\b/i.test(text) ||
-    /^i (?:can(?:['’]?t|not)|won['’]?t|will not|must decline|am (?:not )?(?:able|going) to|['’]m (?:not )?(?:able|going) to)\s+(?:help|assist|provide|write|continue|generate|create|comply|offer|answer|respond|do)\b/i.test(
-      text,
-    )
+  return refusalPattern().test(text) || /^as an? (?:ai|assistant|language model)\b/i.test(text);
+}
+
+/**
+ * The refusal detector, built once. The rules that matter:
+ *
+ * - A refusal names the action it refuses ("cannot write …", "unable to help
+ *   …"), possibly after "to"/"with"; the action is then followed by what it
+ *   targets ("this", "that", a title/page…) or the end of the line. A title
+ *   like "I Cannot Help Falling in Love" has no refused action, so it survives,
+ *   and a bare pronoun after the action is no target either ("I Can't Help It",
+ *   "I Cannot Do It" and "I Won't Write You a Poem" are titles — only after
+ *   help/assist does a person object count, as in "I can't help YOU")
+ *   — and so do "I'm Sorry, But I Love You" and "Sorry, Wrong Number": an
+ *   apology lead-in only counts when a refusal clause FOLLOWS it. (Both
+ *   directions were once broken: the apostrophe forms of the refusal clause
+ *   were unreachable, while any line merely starting with an apology word was
+ *   dropped.)
+ */
+let refusalRe: RegExp | null = null;
+function refusalPattern(): RegExp {
+  if (refusalRe) return refusalRe;
+  const action =
+    '(?:help|assist|provide|write|continue|generate|create|comply|offer|answer|respond|do|produce|complete|fulfill|fulfil|satisfy|participate|engage)';
+  const actionGerund =
+    '(?:helping|assisting|providing|writing|continuing|generating|creating|complying|offering|answering|responding|doing|producing|completing|fulfilling|satisfying|participating|engaging)';
+  // What the refused action is aimed at — or the end of the line. A bare
+  // pronoun is deliberately NOT here: "I can't help it", "I cannot do it"
+  // and "I won't write you a poem" are titles, not refusals — except after
+  // help/assist, where "I can't help YOU" refuses to assist a person.
+  const targetInner =
+    'this|that|in|the|a|an|my|your|our|any|no|something|about|titles?|pages?|content|requests?|questions?|stories?|story|text|prose|words|further|more|such|these|those|against|with|on|for|to|now|here|currently|at|right|yet';
+  const target = `(?:${targetInner})`;
+  const targetHelped = `(?:you|him|her|them|${targetInner})`;
+  // "cannot" / "can't" / "won't" / "will not" / "must decline" / "unable" /
+  // "not able (to)" / "not going (to)" / "don't feel comfortable" / "don't
+  // think I can" / "won't be able to".
+  const clause =
+    "(?:cannot|can\\s+not|can['’]?t|won['’]?t|will\\s+not|must\\s+decline|unable|(?:am\\s+)?not\\s+(?:able|going)|(?:do\\s+not|don['’]?t)\\s+feel\\s+(?:comfortable|able)|(?:am\\s+)?not\\s+comfortable|(?:won['’]?t|will\\s+not)\\s+be\\s+able\\s+to|(?:do\\s+not|don['’]?t)\\s+think\\s+(?:i|we)\\s+(?:can|could)|(?:am\\s+)?not\\s+going\\s+to\\s+be\\s+able\\s+to|(?:am\\s+)?not\\s+at\\s+liberty\\s+to|(?:would|['’]d)\\s+rather\\s+not|refuse[sd]?\\s+to|could(?:\\s+not|n['’]?t)|cannot\\s+and\\s+will\\s+not)";
+  const apology =
+    "(?:i(?:['’]m|\\s+am)\\s+sorry\\b[^.!?\\n]{0,60}?|sorry\\b\\s*[,.;:;!—–-]\\s*|i\\s+apologi[sz]e\\b[^.!?\\n]{0,60}?|i(?:['’]m|\\s+am)\\s+afraid\\b[^.!?\\n]{0,60}?)";
+  // A short opener the model puts before its apology or refusal.
+  const opener = '(?:unfortunately|apologies|my\\s+apologies|regrettably)\\s*,?\\s*';
+  const helped = '(?:help|assist|helping|assisting)';
+  refusalRe = new RegExp(
+    `^\\s*(?!i\\s+can(?:['’]t|\\s+not)\\s+help\\s+(?:the|my)\\s+way\\b)(?!i\\s+won['’]?t\\s+write\\s+your\\s+name\\b)(?:${opener})?(?:${apology})?\\s*[.,;:!?—–-]?\\s*(?:but\\s+)?i(?:['’]m|\\s+am)?\\s*(?:${clause})\\s+(?:(?:to|with|in)\\s+|in\\s+good\\s+conscience\\s+|possibly\\s+|really\\s+|ever\\s+)?(?:(?:${helped})\\b(?:\\s*(?:$|[,.;:!?…—]|(?:${targetHelped})\\b))|(?:${action}|${actionGerund})(?:\\s+(?:to\\s+)?(?:${action}|${actionGerund}))*\\b(?:\\s*(?:$|[,.:;!?…—]|(?:${target})\\b))|(?:${target})\\b)`,
+    'i',
   );
+  return refusalRe;
 }
 
 /** The best string an item carries: strings as-is, records by their first known field. */
@@ -189,26 +224,39 @@ function itemText(item: unknown): string {
 export function parseStringList(text: string): string[] {
   const usable = (list: string[]): string[] =>
     list.filter((item) => item.length > 0 && !looksLikeRefusal(item));
+  const lineSalvage = (): string[] =>
+    usable(
+      text
+        .split('\n')
+        .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
+        .filter((line) => line.length > 0),
+    );
   try {
     const parsed = parseJSONLoose<unknown>(text);
     if (Array.isArray(parsed)) return usable(parsed.map(itemText));
     if (parsed && typeof parsed === 'object') {
       for (const value of Object.values(parsed)) {
-        if (Array.isArray(value)) {
-          const list = usable(value.map(itemText));
-          if (list.length > 0) return list;
-        }
+        if (!Array.isArray(value)) continue;
+        const list = usable(value.map(itemText));
+        if (list.length > 0) return list;
       }
     }
+    // Whole-reply JSON with nothing usable in it IS the answer: `{"suggestions":
+    // []}` must come back empty, not as one bogus idea reading the raw JSON.
+    // Only when the WHOLE reply is that JSON, though: parseJSONLoose also finds
+    // balanced slices inside prose, and those must still reach the line salvage
+    // — a reply opening with `{"conflicts": []}` but naming the real verdict
+    // afterwards keeps the verdict.
+    try {
+      JSON.parse(repairTrailingCommas(stripCodeFence(text).trim()));
+      return [];
+    } catch {
+      // A fragment, not the whole answer: fall through to the line salvage.
+    }
   } catch {
-    // fall back to line splitting below
+    // Not JSON at all: the model wrote a list, which the line salvage is for.
   }
-  return usable(
-    text
-      .split('\n')
-      .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
-      .filter((line) => line.length > 0),
-  );
+  return lineSalvage();
 }
 
 /**
@@ -255,8 +303,13 @@ export function parseTitleOptions(text: string): Array<{ title: string; tagline:
 
   // JSON that parsed IS the answer, even when it holds nothing: re-reading the
   // JSON text as a line list turned `{"titles": []}` into a title card reading
-  // `{"titles`, and a book can be named after it.
-  return list.map(toOption).filter((x): x is { title: string; tagline: string } => x !== null);
+  // `{"titles`, and a book can be named after it. A refusal returned in the
+  // JSON shape is still a refusal, not a pickable title.
+  return list
+    .map(toOption)
+    .filter(
+      (x): x is { title: string; tagline: string } => x !== null && !looksLikeRefusal(x.title),
+    );
 }
 
 /**
@@ -290,16 +343,19 @@ function parseTitleLines(text: string): Array<{ title: string; tagline: string }
       out.push({ title: clean(match[1]), tagline: clean(match[2]) });
       continue;
     }
-    match = line.match(/^(.+?)\s*[-:]\s*(.+)$/);
+    match = line.match(/^(.+?)(?:\s+-\s*|\s*:\s*)(.+)$/);
     if (match && match[1] && match[2]) {
       out.push({ title: clean(match[1]), tagline: clean(match[2]) });
       continue;
     }
     // A bare line counts as a title only when it looks like one: it starts
-    // capitalized and is not a full sentence (no trailing period) — that
-    // keeps refusal prose ("I cannot help with that request.") out.
-    if (/^[A-Z0-9"“]/.test(line) && !line.endsWith('.')) {
-      out.push({ title: clean(line), tagline: '' });
+    // capitalized and is not a full sentence. A trailing period is stripped
+    // when the line is short enough to be a title ("The Dead Letter."); the
+    // refusal filter has already run, and longer period-terminated lines are
+    // prose.
+    const bare = line.endsWith('.') ? line.slice(0, -1).trim() : line;
+    if (/^[A-Z0-9"“]/.test(bare) && (!line.endsWith('.') || bare.split(/\s+/).length <= 6)) {
+      out.push({ title: clean(bare), tagline: '' });
     }
   }
   return out;
@@ -374,8 +430,10 @@ export function parseBible(text: string, previous: StoryBible | null = null): St
     const value = object?.[key] ?? object?.cast?.[key as never];
     const list: BibleEntry[] = Array.isArray(value) ? coerceEntries(value) : [];
     if (list.length === 0) {
-      // Keep the previous entries for this group — never regress to empty.
-      return previous ? base[key].slice(0, cap) : list;
+      // Keep the previous entries for this group — never regress to empty,
+      // and never truncate them: the reader can add entries over the cap by
+      // hand, and slicing here would delete exactly their newest one.
+      return previous ? base[key] : list;
     }
     if (!previous) return list.slice(0, cap);
     // The model rewrites the group, and the panel PROMISES the reader's
@@ -401,7 +459,10 @@ export function parseBible(text: string, previous: StoryBible | null = null): St
     const admitted = additions.slice(0, room);
     const covered = new Set([...updates, ...admitted].map(lower));
     const carry = base[key].filter((entry) => !covered.has(lower(entry)));
-    return [...updates, ...admitted, ...carry].slice(0, cap);
+    // The effective cap is never below what the group already holds: the
+    // reader's own additions may go over the cap, and a reply that merely
+    // refreshes the known names must not truncate them from the tail.
+    return [...updates, ...admitted, ...carry].slice(0, Math.max(cap, base[key].length));
   };
   const people = entries('people');
   const places = entries('places');

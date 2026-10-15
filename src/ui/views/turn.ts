@@ -18,7 +18,7 @@ import {
   suggestionsMessages,
 } from '../../core/prompt';
 import { getNode, pageNumberAt, seedTextOf, titleNodeOf } from '../../core/tree';
-import { parseStringList } from '../../core/parsers';
+import { looksLikeRefusal, parseStringList } from '../../core/parsers';
 import type {
   Book,
   ChapterIntent,
@@ -938,7 +938,9 @@ async function suggest(
       model: api.lib.settings.fastModel || api.lib.settings.endpoint.model,
     });
     if (api.staleGen(token)) return;
-    const list = raw.filter((s) => typeof s === 'string' && s.length > 0).slice(0, 3);
+    const list = raw
+      .filter((s) => typeof s === 'string' && s.length > 0 && !looksLikeRefusal(s))
+      .slice(0, 3);
     suggestions.set(stateKey, list);
     suggestIndex.set(stateKey, 0);
     api.refresh();
@@ -997,7 +999,12 @@ function parseEndings(raw: unknown): Array<{ title: string; premise: string }> {
         }
         return { title: '', premise: '' };
       })
-      .filter((e) => e.title.length > 0 || e.premise.length > 0);
+      .filter(
+        (e) =>
+          (e.title.length > 0 || e.premise.length > 0) &&
+          !looksLikeRefusal(e.title) &&
+          !looksLikeRefusal(e.premise),
+      );
     if (out.length > 0) return out.slice(0, 3);
   } catch {
     // fall through to string salvage
@@ -1006,7 +1013,7 @@ function parseEndings(raw: unknown): Array<{ title: string; premise: string }> {
   return text
     .split(/\n+/)
     .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim())
-    .filter((line) => line.length > 0)
+    .filter((line) => line.length > 0 && !looksLikeRefusal(line))
     .slice(0, 3)
     .map((line) => {
       const [title, ...rest] = line.split(/[—–:]\s*/);
@@ -1108,11 +1115,7 @@ function ghostPanel(
         '🌿 Adopt as a branch',
         () => {
           const input: TurnInput = { ...DEFAULT_TURN, emotions: {}, direction: ghost.direction };
-          const frontier = getNode(api.nodes, book.frontierId);
-          const turn =
-            frontier && frontier.kind === 'turn' && frontier.parentId === from.id
-              ? frontier
-              : api.attachTurn(book, from.id, input);
+          const turn = turnAt(api, book, from, input);
           api.attachPage(book, turn.id, input, ghost.text, api.lib.settings.endpoint.model, 'ai');
           ghosts.delete(stateKey);
           genStates.delete(key);
@@ -1195,15 +1198,27 @@ function writeMyself(api: AppApi, book: Book, from: StoryNode): void {
   const stateKey = `${book.id}:${from.id}`;
   const input = inputs.get(stateKey) ?? stickyFor(book.id);
   inputs.set(stateKey, input);
-  const frontier = getNode(api.nodes, book.frontierId);
-  const turn =
-    frontier && frontier.kind === 'turn' && frontier.parentId === from.id
-      ? frontier
-      : api.attachTurn(book, from.id, input);
+  const turn = turnAt(api, book, from, input);
   const node = api.attachPage(book, turn.id, input, '', api.lib.settings.endpoint.model, 'user');
   api.toast('Your page — write it, then keep it like any other', 'info');
   startEditingPage(node.id);
   api.navigate('page');
+}
+
+/**
+ * The turn to hang the next page under: the frontier turn when it is already
+ * the one from `from`, with the CURRENT decision re-recorded on it. A
+ * cancelled attempt leaves its turn node at the frontier; reusing it used to
+ * keep the abandoned direction in the stored turn, so the About decision log
+ * (built from turn inputs) named a direction the reader never used.
+ */
+function turnAt(api: AppApi, book: Book, from: StoryNode, input: TurnInput): StoryNode {
+  const frontier = getNode(api.nodes, book.frontierId);
+  if (frontier && frontier.kind === 'turn' && frontier.parentId === from.id) {
+    api.updateTurnInput(frontier.id, input);
+    return frontier;
+  }
+  return api.attachTurn(book, from.id, input);
 }
 
 async function generateNext(
@@ -1225,12 +1240,10 @@ async function generateNext(
     rememberSticky(book.id, input);
   }
   // Retry after a failed generation reuses the recorded decision instead of
-  // creating a duplicate turn node (which would fake a branch point).
-  const frontier = getNode(api.nodes, book.frontierId);
-  const turn =
-    frontier && frontier.kind === 'turn' && frontier.parentId === from.id
-      ? frontier
-      : api.attachTurn(book, from.id, input);
+  // creating a duplicate turn node (which would fake a branch point). The
+  // reuse re-records the CURRENT input: a cancelled attempt's turn keeps
+  // whatever it was created with otherwise.
+  const turn = turnAt(api, book, from, input);
   const nextPageNumber = pageNumberAt(api.nodes, from.id) + 1;
   const node = await generatePage(
     api,

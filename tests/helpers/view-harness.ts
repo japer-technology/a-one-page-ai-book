@@ -22,7 +22,7 @@
  * chooseVersion) and no-ops the rest, recording every call so a test can
  * assert on what the view asked for.
  */
-import { setFrontier } from '../../src/core/tree';
+import { setFrontier, setTurnInput } from '../../src/core/tree';
 import type { Book, Library, StoryNode, TurnInput } from '../../src/core/types';
 import type { AppApi, ToastKind, ViewName } from '../../src/ui/ctx';
 
@@ -185,6 +185,15 @@ export class StubApp {
   attachTurn(): StoryNode {
     this.calls.push(['attachTurn']);
     throw new Error('not stubbed');
+  }
+  updateTurnInput(turnId: string, input: TurnInput): void {
+    this.calls.push(['updateTurnInput', turnId, input]);
+    const node = this.state.lib.nodes[turnId];
+    if (!node || node.kind !== 'turn' || node.data.kind !== 'turn') return;
+    this.update((lib) => ({
+      ...lib,
+      nodes: { ...lib.nodes, [turnId]: setTurnInput(node, input) },
+    }));
   }
   finishBook(): void {
     this.calls.push(['finishBook']);

@@ -277,7 +277,17 @@ function normalizeNode(raw: unknown): StoryNode {
       if (data.portrait !== undefined && typeof data.portrait !== 'string') delete data.portrait;
       break;
   }
-  return { id, kind: kind as StoryNode['kind'], parentId, createdAt: raw.createdAt, data };
+  return {
+    id,
+    kind: kind as StoryNode['kind'],
+    parentId,
+    // `JSON.parse('1e999')` is Infinity, which `typeof` accepts. It then
+    // stringified back to `null` on export, and the app's own export could no
+    // longer be re-imported ("createdAt must be a number"). Normalize like
+    // every other JSON-sourced timestamp.
+    createdAt: finiteOr(raw.createdAt, Date.now()),
+    data,
+  };
 }
 
 /**
@@ -540,9 +550,8 @@ function normalizeSettings(raw: unknown): Library['settings'] {
       : {},
     exportMeter: isRecord(raw.exportMeter)
       ? {
-          lastExportAt:
-            typeof raw.exportMeter.lastExportAt === 'number' ? raw.exportMeter.lastExportAt : 0,
-          pages: typeof raw.exportMeter.pages === 'number' ? raw.exportMeter.pages : 0,
+          lastExportAt: finiteOr(raw.exportMeter.lastExportAt, 0),
+          pages: finiteOr(raw.exportMeter.pages, 0),
         }
       : { lastExportAt: 0, pages: 0 },
     readingPositions: isRecord(raw.readingPositions)

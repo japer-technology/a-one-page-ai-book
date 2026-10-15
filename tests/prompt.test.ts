@@ -80,6 +80,32 @@ describe('buildContext', () => {
     const ctx = buildContext(nodes, book);
     expect(ctx.lastDirection?.direction).toBe('beat 3');
   });
+
+  it('counts the standing rules inside the fixed budget', () => {
+    const seed = makeSeedNode('A seed.', emptySeedOptions());
+    const title = makeTitleNode(seed.id, { title: 'T', tagline: '' });
+    const nodes: Record<string, StoryNode> = { [seed.id]: seed, [title.id]: title };
+    let parent = title.id;
+    for (let i = 1; i <= 20; i++) {
+      const page = makePageNode(parent, DEFAULT_TURN, 'm', `Page ${i}. `.repeat(70));
+      nodes[page.id] = page;
+      parent = page.id;
+    }
+    const last = Object.values(nodes)
+      .filter((n) => n.kind === 'page')
+      .at(-1)!;
+    const book = finishBook(makeBook(seed.id, title.id, 'm'), last.id);
+    const pageWords = (ctx: { pages: string[] }) =>
+      ctx.pages.reduce((sum, p) => sum + p.split(/\s+/).length, 0);
+    const without = pageWords(buildContext(nodes, { ...book, rules: [] }));
+    const rule = 'Keep the prose spare and grounded. '.repeat(30).trim(); // 180 words
+    const withRules = pageWords(buildContext(nodes, { ...book, rules: [rule] }));
+    // The rules are a fixed block (docs/ARCHITECTURE §7): leaving them out of
+    // the sizing let the assembled prompt overshoot the budget by their whole
+    // word count. The verbatim window must shrink to make room for them.
+    expect(without).toBeGreaterThan(2000);
+    expect(without - withRules).toBeGreaterThanOrEqual(100);
+  });
 });
 
 describe('prompt assembly', () => {
@@ -470,6 +496,27 @@ describe('conflictVerdicts', () => {
     expect(conflictVerdicts(['[]'])).toEqual([]);
   });
 
+  it('drops a no-conflict verdict phrased as a negation', () => {
+    // "No inconsistency found." matched none of the literal patterns, so the
+    // model's own denial of conflict was displayed as the conflict it denies.
+    expect(conflictVerdicts(['No inconsistency found.'])).toEqual([]);
+    expect(conflictVerdicts(['There is no inconsistency with the story so far.'])).toEqual([]);
+    expect(conflictVerdicts(['There are no contradictions.'])).toEqual([]);
+    expect(conflictVerdicts(['Nothing conflicts with the story.'])).toEqual([]);
+    expect(conflictVerdicts(['No problem — everything checks out.'])).toEqual([]);
+  });
+
+  it('keeps a real conflict even when it is phrased around “no”', () => {
+    expect(
+      conflictVerdicts([
+        'The story has no shortage of conflicts — the gun was destroyed on page 2.',
+      ]),
+    ).toHaveLength(1);
+    expect(
+      conflictVerdicts(['No problem, but the lighthouse was destroyed on page 2.']),
+    ).toHaveLength(1);
+  });
+
   it('drops a bare assertion of consistency but keeps real verdicts', () => {
     expect(conflictVerdicts(['The direction is consistent with the story so far.'])).toEqual([]);
     expect(conflictVerdicts(['It seems fully consistent with established facts.'])).toEqual([]);
@@ -504,6 +551,58 @@ describe('conflictVerdicts, hedged wording', () => {
     expect(
       conflictVerdicts([
         'The tone is consistent with the story, but the gun was destroyed in chapter 2.',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('keeps a no-conflict denial that goes on to name a contradiction', () => {
+    // The negation branches drop chatter like "No inconsistency found." — but
+    // a rebuttal that names the contradiction ("…but the gun was destroyed on
+    // page 2.") IS a report and must survive.
+    expect(conflictVerdicts(['No conflict, but the gun was destroyed on page 2.'])).toHaveLength(1);
+    expect(
+      conflictVerdicts(['Nothing conflicts at first glance, but the gun was destroyed on page 2.']),
+    ).toHaveLength(1);
+    expect(
+      conflictVerdicts([
+        'There is no way to resolve the conflict: the letter was burned in page 3.',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('drops a plain no-conflict denial even when it says the word "conflict"', () => {
+    expect(conflictVerdicts(['No conflict found.'])).toHaveLength(0);
+    expect(conflictVerdicts(['No conflict.'])).toHaveLength(0);
+    expect(conflictVerdicts(['There is no conflict with the story so far.'])).toHaveLength(0);
+    expect(conflictVerdicts(['Nothing is inconsistent with the story so far.'])).toHaveLength(0);
+    expect(conflictVerdicts(["I don't see any conflicts."])).toHaveLength(0);
+    expect(conflictVerdicts(["I can't find any contradictions."])).toHaveLength(0);
+    expect(
+      conflictVerdicts(['The direction does not conflict with anything established.']),
+    ).toHaveLength(0);
+  });
+
+  it('keeps plural no-conflict rebuttals that name a contradiction', () => {
+    expect(conflictVerdicts(['No conflicts, but the gun was destroyed on page 2.'])).toHaveLength(
+      1,
+    );
+    expect(
+      conflictVerdicts(['None found, but the lighthouse was destroyed in chapter 2.']),
+    ).toHaveLength(1);
+  });
+
+  it('keeps consistency claims whose contradiction uses another wording', () => {
+    expect(
+      conflictVerdicts([
+        'The direction is consistent with the story so far; the only contradiction is that the gun was destroyed on page 2.',
+      ]),
+    ).toHaveLength(1);
+    expect(
+      conflictVerdicts(['The direction is consistent, except the gun was destroyed on page 2.']),
+    ).toHaveLength(1);
+    expect(
+      conflictVerdicts([
+        'It seems consistent on the surface, though Mara cannot be alive after page 4.',
       ]),
     ).toHaveLength(1);
   });

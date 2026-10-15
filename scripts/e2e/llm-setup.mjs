@@ -73,8 +73,14 @@ if (process.argv.includes('--fresh')) {
   await waitFor(`!!document.querySelector('.view-settings')`, 8000, 'settings after reset');
   console.log('(storage cleared — fresh install)');
 }
-// Give detection a moment to settle.
-await sleep(3000);
+// Poll for the detection verdict instead of a fixed 3 s sleep: on a cold
+// machine, or a network whose gateway answers late, detection legitimately
+// needs longer — and the one-shot read after 3 s failed the whole run there.
+await waitFor(
+  "(document.querySelector('#net-line')?.textContent ?? '').includes('/24')",
+  25000,
+  'network detection',
+);
 
 console.log('=== Step 0: detection ===');
 const netLine = await ev(`document.querySelector('#net-line')?.textContent ?? ''`);

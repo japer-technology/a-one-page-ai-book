@@ -39,6 +39,7 @@ import {
   setBookRules,
   setChosenVersion,
   setFrontier,
+  setTurnInput,
   setVersionPinned,
   cloneSubtree,
   prologueOf,
@@ -997,6 +998,14 @@ class App implements AppApi {
       books: replaceBook(lib, setFrontier(book, node.id)),
     }));
     return node;
+  }
+
+  updateTurnInput(turnId: string, input: TurnInput): void {
+    this.update((lib) => {
+      const node = getNode(lib.nodes, turnId);
+      if (!node || node.kind !== 'turn') return lib;
+      return { ...lib, nodes: { ...lib.nodes, [turnId]: setTurnInput(node, input) } };
+    });
   }
 
   finishBook(book: Book, pageId: string, note: string): void {

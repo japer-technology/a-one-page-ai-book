@@ -106,6 +106,7 @@ function fakeApi(state: ReturnType<typeof onePageBook>, calls: Call[]): AppApi {
     appendVersion: vi.fn(),
     chooseVersion: vi.fn(),
     attachTurn: vi.fn() as never,
+    updateTurnInput: vi.fn(),
     finishBook: vi.fn(),
     unfinishBook: vi.fn(),
     removeBook: vi.fn(),

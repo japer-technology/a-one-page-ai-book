@@ -9,11 +9,11 @@
  * same sources that get inlined into the single file at build time.
  */
 import { context } from 'esbuild';
-import { copyFile, mkdir, watch } from 'node:fs/promises';
+import { copyFile, mkdir, realpath, watch } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
 import { stat } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -23,7 +23,9 @@ const portFlag = process.argv.indexOf('--port');
 const portOverride = portFlag !== -1 ? Number.parseInt(process.argv[portFlag + 1] ?? '', 10) : NaN;
 /** --port <n> wins over the default; the flag used to be silently ignored. */
 const requestedPort = (fallback) =>
-  Number.isInteger(portOverride) && portOverride > 0 ? portOverride : fallback;
+  Number.isInteger(portOverride) && portOverride > 0 && portOverride < 65536
+    ? portOverride
+    : fallback;
 
 if (preview) {
   const dist = join(root, 'dist');
@@ -40,7 +42,13 @@ if (preview) {
       let p = normalize(decodeURIComponent((req.url ?? '/').split('?')[0]));
       if (p === '/') p = '/index.html';
       const file = join(dist, p);
-      if (!file.startsWith(dist)) throw new Error('forbidden');
+      // Compare RESOLVED paths: `file.startsWith(dist)` was vacuous (p is
+      // absolute-normalized, so file is always dist+p) and a symlink inside
+      // dist/ escaped the sandbox entirely.
+      const [realDist, realFile] = await Promise.all([realpath(dist), realpath(file)]);
+      if (realFile !== realDist && !realFile.startsWith(realDist + sep)) {
+        throw new Error('forbidden');
+      }
       const info = await stat(file);
       // A directory is not a file: writing its size and piping a read stream
       // produced an async EISDIR on a stream with no 'error' listener, and

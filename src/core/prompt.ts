@@ -88,6 +88,10 @@ export function buildContextTo(
   if (cast) fixedWords += countWords(castText(cast));
   if (summary) fixedWords += countWords(summaryText(summary));
   if (lastDirection) fixedWords += countWords(directionText(lastDirection, lastChapterNumber)) + 40;
+  // Standing rules are a fixed block too (docs/ARCHITECTURE §7): leaving them
+  // out of the sizing let the assembled prompt overshoot the budget by their
+  // whole word count.
+  fixedWords += countWords(rulesText(book.rules ?? []));
   const pagesBudget = Math.max(CONTEXT_WORD_BUDGET - fixedWords, MIN_PAGE_WORDS);
   const trimmed: string[] = [];
   let words = 0;
@@ -786,13 +790,21 @@ export function rewriteSpanMessages(
  */
 export function conflictVerdicts(items: string[]): string[] {
   const NO_CONFLICTS = /no conflicts|none found|^\s*\[\s*\]\s*$/i;
+  // A denial of conflict phrased as a negation: "No inconsistency found.",
+  // "There are no contradictions.", "Nothing conflicts with the story." —
+  // but NOT a rebuttal that then names a contradiction ("No conflict, but the
+  // gun was destroyed on page 2." reports one). So unlike the literal
+  // branches above, these only count when the line carries no contradiction
+  // of its own — the same guard the consistency-assertion branch uses below.
+  const NO_CONFLICTS_NEGATED =
+    /\bno\b(?!\s+(?:shortage|lack)\b)[^.!?\n]{0,30}?(?:conflict|contradiction|inconsisten)|\bnothing\b[^.!?\n]{0,30}?\b(?:conflicts?|contradicts?|inconsistent)\b|\b(?:does\s+not|doesn['’]?t|do\s+not|don['’]?t|did\s+not|didn['’]?t)\s+conflict\b|\b(?:don['’]?t|can['’]?t|cannot|can\s+not)\s+(?:see|find|spot)\s+(?:any\s+)?(?:conflicts?|contradictions?|inconsistenc\w*)\b/i;
   // "…is largely/mostly/generally consistent…" is still an assertion of
   // consistency — the verb may be followed by any short hedge, not a fixed
   // list. The negative lookahead keeps the two ways a CONFLICT is phrased
   // ("is not consistent", "is inconsistent") out of this match, and the bare
   // "Consistent." verdict line is caught on its own.
   const ASSERTS_CONSISTENCY =
-    /^\s*(?:\w+[\s,]+){0,2}?consistent\b|\b(?:is|seems|looks|appears|remains|(?:would|will|can|could|should|must)\s+be)\s+(?:(?!not\b|n't\b)\w+[\s,]+){0,2}?\bconsistent\b|(?:(?<![A-Za-z])not|n['’]t)\s+inconsistent\b/i;
+    /^\s*(?:\w+[\s,]+){0,2}?consistent\b|\b(?:is|seems|looks|appears|remains|(?:would|will|can|could|should|must)\s+be)\s+(?:(?!not\b|n't\b)\w+[\s,]+){0,2}?\bconsistent\b|(?:(?<![A-Za-z])not|n['’]t)\s+inconsistent\b|^\s*no\s+(?:problems?|issues?|discrepancies)\b/i;
   // But a sentence that asserts consistency AND names a contradiction
   // ("…is consistent with the story, but the gun was destroyed") IS a conflict.
   // "not inconsistent" asserts consistency, not a contradiction — the negated
@@ -800,10 +812,30 @@ export function conflictVerdicts(items: string[]): string[] {
   // The contraction branch requires its apostrophe: a bare "nt" (accou-nt,
   // poi-nt, fro-nt) followed by "inconsistent" is a REAL conflict and must not
   // be blanked.
-  const CONTRADICTION = /\b(?:conflict|contradict|inconsistent|however|but)\b/i;
+  // Words that connect to or name a contradiction: the \w* stems catch
+  // "contradiction"/"contradicts"; though/although/except join but/however.
+  const CONTRADICTION =
+    /\b(?:conflict\w*|contradict\w*|inconsisten\w*|however|but|though|although|except)\b/i;
+  // A contradiction named as a physical wreck carries no connector word.
+  const NAMES_CONTRADICTION = /\b(?:destroyed|burn\w*|died|dead|killed|no longer|gone)\b/i;
   const NEGATED_INCONSISTENT = /(?:(?<![A-Za-z])not|n['’]t)\s+inconsistent\b/gi;
+  const namesAContradiction = (line: string): boolean =>
+    CONTRADICTION.test(line) || NAMES_CONTRADICTION.test(line);
   return items.filter((item) => {
-    if (NO_CONFLICTS.test(item)) return false;
+    // Both denial branches drop chatter only. A denial that goes on to name a
+    // contradiction — with a connector ("No conflicts, but the gun was
+    // destroyed on page 2.") or as a wreck ("no way to resolve the conflict:
+    // the letter was burned in page 3") — IS a report. The guard is judged on
+    // the item with the denial span blanked, so the denial's own vocabulary
+    // cannot count as the contradiction it names.
+    if (NO_CONFLICTS.test(item)) {
+      const rest = item.replace(NO_CONFLICTS, ' ');
+      if (!namesAContradiction(rest)) return false;
+    }
+    if (NO_CONFLICTS_NEGATED.test(item)) {
+      const rest = item.replace(NO_CONFLICTS_NEGATED, ' ');
+      if (!namesAContradiction(rest)) return false;
+    }
     const withoutNegated = item.replace(NEGATED_INCONSISTENT, ' ');
     return !(ASSERTS_CONSISTENCY.test(item) && !CONTRADICTION.test(withoutNegated));
   });

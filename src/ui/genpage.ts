@@ -170,7 +170,23 @@ export function renderGenPanel(api: AppApi, key: string, onRetry: () => void): H
     'div',
     { class: 'gen-panel' },
     h('div', { class: 'banner banner-error' }, state.error),
-    button('Retry', () => onRetry(), 'primary'),
+    h(
+      'div',
+      { class: 'row gap' },
+      button('Retry', () => onRetry(), 'primary'),
+      // The error state lives for the session (each position owns its panel,
+      // and nothing else clears it), so without a way out the reader was
+      // locked at that page turn — unable to edit the direction, shorten the
+      // page, or back out. Dismissing just clears the panel.
+      button(
+        'Dismiss',
+        () => {
+          clearGenState(key, state.token);
+          api.refresh();
+        },
+        'ghost',
+      ),
+    ),
   );
 }
 

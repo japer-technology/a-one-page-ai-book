@@ -52,6 +52,32 @@ describe('normalizeLibrary', () => {
     ).toThrow(/unknown kind/);
   });
 
+  it('normalizes a non-finite node timestamp so its own export re-imports', () => {
+    // `JSON.parse('1e999')` is Infinity — a number — and it was accepted, then
+    // stringified back to `null` on export, so the app's own file could no
+    // longer be imported ("createdAt must be a number"). Normalized like every
+    // other JSON-sourced timestamp.
+    const raw = goodLibrary();
+    const pageId = raw.books[0]!.frontierId;
+    raw.nodes[pageId]!.createdAt = Infinity;
+    const lib = normalizeLibrary(raw);
+    expect(Number.isFinite(lib.nodes[pageId]!.createdAt)).toBe(true);
+    const roundTrip = normalizeLibrary(JSON.parse(JSON.stringify(lib)));
+    expect(roundTrip.nodes[pageId]!.createdAt).toBe(lib.nodes[pageId]!.createdAt);
+  });
+
+  it('normalizes non-finite export-meter numbers', () => {
+    const lib = normalizeLibrary({
+      books: [],
+      nodes: {},
+      // `JSON.parse('1e999')` is how a corrupted file carries Infinity — a
+      // literal `1e999` in the test source would itself trip the linter.
+      settings: { exportMeter: { lastExportAt: Infinity, pages: JSON.parse('1e999') } },
+    });
+    expect(Number.isFinite(lib.settings.exportMeter.lastExportAt)).toBe(true);
+    expect(Number.isFinite(lib.settings.exportMeter.pages)).toBe(true);
+  });
+
   it('normalizes temperature into range', () => {
     const lib = normalizeLibrary({
       books: [],

@@ -171,7 +171,12 @@ try {
     .filter((l) => /writing-partner/.test(l.system))
     .map((l) => l.messages);
 } catch {
-  // No log: skip the chain assertion rather than fail on the harness.
+  // No log: the chain checks below are the point of this probe — a run that
+  // cannot measure must not print PASS.
+  sent = [];
+}
+if (sent.length === 0) {
+  failures.push('the chat chain was not measured — PT_MOCK_LOG missing or unreadable');
 }
 if (sent.length > 0) {
   console.log(`  messages sent per chat turn: ${sent.join(', ')}`);
