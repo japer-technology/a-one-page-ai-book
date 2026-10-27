@@ -80,7 +80,7 @@ export function renderLibrary(api: AppApi): HTMLElement {
   }
 
   const search = h('input', {
-    class: 'search',
+    class: 'input search',
     type: 'search',
     placeholder: 'Search titles, seeds & pages…',
     'aria-label': 'Search your books',
@@ -113,20 +113,25 @@ export function renderLibrary(api: AppApi): HTMLElement {
           )
         : h(
             'div',
-            { class: 'empty-state' },
-            h('h1', { text: 'The One-Page AI Book' }),
+            { class: 'empty-state library-welcome' },
+            h('p', { class: 'eyebrow', text: 'A little spark. A whole new story.' }),
+            h('h1', { text: 'Your next chapter starts here.' }),
             h('p', {
               class: 'lede',
-              text: 'You write one sentence — a seed. A local LLM writes the book with you, one page at a time. You direct every page turn. Every version is remembered forever.',
+              text: 'Bring an idea. Write with a local AI, one page at a time. You choose what happens next — every version stays yours.',
             }),
-            api.lib.settings.seenOnboarding ? null : onboarding(api),
-            noModelBanner(api),
             h(
               'div',
               { class: 'row gap' },
               button('＋ Start a book', () => api.navigate('seed'), 'primary'),
               button('↥ Import library…', () => importLibrary(api)),
             ),
+            h('p', {
+              class: 'library-reassurance',
+              text: 'No account. No cloud. Your stories stay on your device.',
+            }),
+            noModelBanner(api),
+            api.lib.settings.seenOnboarding ? null : onboarding(api),
           )
       : null;
 
@@ -210,12 +215,12 @@ export function renderLibrary(api: AppApi): HTMLElement {
 
   const sortSelect = h(
     'select',
-    { class: 'input sort-select', title: 'Sort the shelf' },
+    { class: 'input sort-select', title: 'Sort the shelf', 'aria-label': 'Sort your books' },
     ...[
-      ['recent', 'recent'],
-      ['mood', 'by mood'],
-      ['length', 'by length'],
-      ['branches', 'most branched'],
+      ['recent', 'Recently updated'],
+      ['mood', 'By mood'],
+      ['length', 'By length'],
+      ['branches', 'Most branched'],
     ].map(([v, label]) =>
       h('option', { value: v, selected: v === sortMode ? true : undefined, text: label }),
     ),
@@ -230,22 +235,52 @@ export function renderLibrary(api: AppApi): HTMLElement {
     books.length > 0 ? search : null,
     books.length > 0 ? sortSelect : null,
     h(
-      'div',
-      { class: 'row gap' },
-      button('↥ Import', () => importLibrary(api), 'ghost', {
-        title: 'Import a .ptlibrary.json or .ptbook.json file',
-      }),
-      button('⇓ Library as .md files', () => void exportMdLibrary(api), 'ghost', {
-        title: 'The whole library as plain, readable markdown files (.zip)',
-      }),
-      button('⇓ Export library', () => exportLibrary(api), 'ghost', {
-        title: 'Save every book and every decision as one JSON file',
-      }),
-      button('＋ New book', () => api.navigate('seed'), 'primary'),
+      'details',
+      { class: 'library-files' },
+      h('summary', { text: 'Import & export' }),
+      h(
+        'div',
+        { class: 'row gap' },
+        button('↥ Import', () => importLibrary(api), 'ghost', {
+          title: 'Import a .ptlibrary.json or .ptbook.json file',
+        }),
+        button('⇓ Library as .md files', () => void exportMdLibrary(api), 'ghost', {
+          title: 'The whole library as plain, readable markdown files (.zip)',
+        }),
+        button('⇓ Export library', () => exportLibrary(api), 'ghost', {
+          title: 'Save every book and every decision as one JSON file',
+        }),
+      ),
     ),
   );
 
-  return h('div', { class: 'view view-library' }, empty, shelf, nudge, tagChips, toolbar, listWrap);
+  const heading =
+    all.length > 0
+      ? h(
+          'header',
+          { class: 'library-heading view-head' },
+          h(
+            'div',
+            {},
+            h('p', { class: 'eyebrow', text: 'Your writing room' }),
+            h('h1', { text: 'Your library' }),
+            h('p', { class: 'lede', text: 'Pick up a story, or start something new.' }),
+          ),
+          button('＋ New book', () => api.navigate('seed'), 'primary'),
+        )
+      : null;
+
+  return h(
+    'div',
+    { class: 'view view-library' },
+    heading,
+    empty,
+    nudge,
+    all.length > 0 ? toolbar : null,
+    tagChips,
+    listWrap,
+    shelf,
+  );
 }
 
 function bookCard(api: AppApi, book: Book): HTMLElement {
@@ -544,19 +579,7 @@ function onboarding(api: AppApi): HTMLElement {
         'Every version and fork is remembered; walk back and branch any time.',
       ),
     ),
-    h(
-      'div',
-      { class: 'row gap' },
-      button(
-        'Got it — start my first book',
-        () => {
-          dismiss();
-          api.navigate('seed');
-        },
-        'primary',
-      ),
-      button('Skip tour', dismiss),
-    ),
+    h('div', { class: 'row gap' }, button('Hide this guide', dismiss, 'chip')),
   );
 }
 

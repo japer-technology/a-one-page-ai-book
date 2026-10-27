@@ -36,6 +36,14 @@ Three facts shape every practice in this guide:
 
 Every book walks the same loop. You can leave and re-enter at any step, from any branch.
 
+The top navigation keeps **Library**, **New book**, **Settings**, and **Help** in reach. Inside a
+book, a separate workspace bar shows its title and **Write**, **Read**, **Story map**, and
+**About**. **Write** returns to the book's current frontier (or its ending if finished). The
+selected destination is underlined; on smaller screens, navigation wraps rather than disappearing
+into a menu. Keyboard users can choose **Skip to content** before the navigation. The model button
+shows your selection, not a connection-status guarantee. On a populated shelf, **Import & export**
+opens the library's file tools below search and sort.
+
 1. **Setup** — Settings → scan for local LLMs (or type a URL), pick a model, optionally assign a
    fast model for the cheap phases.
 2. **The chat (optional)** — talk the book into existence with the writing partner, then distill the

@@ -3,6 +3,83 @@
 
 /* ---- Library ------------------------------------------------------------ */
 
+.view-library {
+  max-width: 1040px;
+  margin-inline: auto;
+}
+
+.library-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
+}
+
+.library-heading h1 {
+  font-size: clamp(2rem, 5vw, 3rem);
+}
+
+.library-welcome {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.library-welcome h1 {
+  max-width: 650px;
+  margin: 1rem auto;
+  font-family: var(--serif);
+  font-size: clamp(2.4rem, 6vw, 4rem);
+  font-weight: 400;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+}
+
+.library-welcome > .row {
+  justify-content: center;
+  margin-top: 1.8rem;
+}
+
+.library-reassurance {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 1.2rem 0 2rem;
+}
+
+.library-welcome > .banner {
+  max-width: 46rem;
+  margin-inline: auto;
+  text-align: left;
+}
+
+.view-library > .toolbar {
+  padding: 1rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.library-files {
+  flex-basis: 100%;
+}
+
+.library-files > summary {
+  color: var(--muted);
+  cursor: pointer;
+  padding-block: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.library-files > .row {
+  padding-top: 0.5rem;
+}
+
+.view-library > .shelf-stats {
+  margin-top: 1.5rem;
+}
+
 .empty-state {
   text-align: center;
   padding: 3rem 1rem 2rem;
@@ -17,7 +94,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.8rem;
+  gap: 1rem;
   flex-wrap: wrap;
   margin-bottom: 1rem;
 }
@@ -40,8 +117,8 @@
   background: var(--bg-card);
   border: 1px solid var(--line);
   border-left: 4px solid var(--accent-strong);
-  border-radius: var(--radius-sm);
-  padding: 0.9rem 1rem;
+  border-radius: var(--radius);
+  padding: 1.25rem;
 }
 
 .book-card.finished {
@@ -545,11 +622,7 @@
 
 /* ---- Responsive --------------------------------------------------------- */
 
-/* The nav is a non-wrapping flex row. With a book open its content measures
-   ~693px idle and ~847px while the "being processed" light shows — so from
-   900px down it wraps: brand and utilities on top, the links on their own
-   scrollable row beneath. (Below 560px the phone paddings of the block below
-   still apply on top of these.) */
+/* Keep primary destinations visible instead of hiding them in a mobile menu. */
 @media (max-width: 900px) {
   .nav {
     gap: 0.6rem;
@@ -561,27 +634,66 @@
   .nav-links {
     order: 3;
     flex-basis: 100%;
-    overflow-x: auto;
+    flex-wrap: wrap;
     padding-bottom: 0.1rem;
   }
 
   .model-chip {
-    max-width: 130px;
+    max-width: 180px;
+  }
+
+  .model-chip-label {
+    display: none;
   }
 }
 
 @media (max-width: 560px) {
+  .nav-right {
+    flex: 1 1 140px;
+  }
+
+  .nav-links .nav-link {
+    flex: 1;
+  }
+
+  .main {
+    padding: 1.25rem 1rem 3rem;
+  }
+
+  .book-nav {
+    width: 100%;
+  }
+
+  .book-nav .nav-link {
+    flex: 1;
+    padding-inline: 0.5rem;
+  }
+
+  .library-heading > .btn {
+    width: 100%;
+  }
+
   .grid-2 {
     grid-template-columns: 1fr;
   }
 
   .book-card {
-    flex-direction: column;
+    flex-wrap: wrap;
+  }
+
+  .book-card .book-cover {
+    width: 64px;
+    height: 80px;
+  }
+
+  .book-card .book-main {
+    flex-basis: calc(100% - 80px);
   }
 
   .book-actions {
     flex-direction: row;
     flex-wrap: wrap;
+    width: 100%;
   }
 }
 
@@ -1780,7 +1892,7 @@
 
 .onboard-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
   gap: 1rem;
   margin-bottom: 0.9rem;
 }
