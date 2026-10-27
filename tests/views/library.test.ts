@@ -74,6 +74,31 @@ const searchBox = (root: HTMLElement): HTMLInputElement =>
   root.querySelector('input.search') as HTMLInputElement;
 
 describe('the bookshelf', () => {
+  it('offers one primary start action and import on an empty shelf', () => {
+    const app = new StubApp(defaultLibrary(), null, 'library');
+    const root = mountView(app, renderLibrary);
+    expect(root.querySelectorAll('.btn-primary')).toHaveLength(1);
+    expect(root.querySelector('.btn-primary')?.textContent).toContain('Start a book');
+    expect(root.querySelector('.toolbar')).toBeNull();
+    expect(root.textContent).toContain('Import library');
+    click(all(root, 'button').find((b) => b.textContent === 'Hide this guide'));
+    expect(app.lib.settings.seenOnboarding).toBe(true);
+    expect(root.querySelector('.onboarding')).toBeNull();
+    expect(root.querySelectorAll('.btn-primary')).toHaveLength(1);
+  });
+
+  it('gives a populated library a heading, creation action, and file tools', () => {
+    const { root } = shelf();
+    expect(root.querySelector('h1')?.textContent).toBe('Your library');
+    expect(root.querySelectorAll('.library-heading .btn-primary')).toHaveLength(1);
+    expect(root.querySelector('.toolbar .btn-primary')).toBeNull();
+    expect(root.querySelector('.toolbar')?.textContent).toContain('Export library');
+    const files = root.querySelector<HTMLDetailsElement>('.library-files');
+    expect(files?.open).toBe(false);
+    expect(files?.querySelector('summary')?.textContent).toBe('Import & export');
+    expect(root.querySelector('.sort-select')?.getAttribute('aria-label')).toBe('Sort your books');
+  });
+
   it('filters by title while typing, and keeps a no-match note across a re-render', () => {
     const { root } = shelf();
     type(searchBox(root), '');
