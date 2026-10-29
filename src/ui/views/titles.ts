@@ -32,6 +32,9 @@ export function renderTitles(api: AppApi): HTMLElement {
   selection.set(seedId, sel);
 
   const state = busy.get(seedId);
+  if (state && state.error === null && api.staleGen(state.token)) {
+    state.error = 'Title generation was interrupted. Retry when ready.';
+  }
   if (state && state.error === null) {
     return h(
       'div',
@@ -43,6 +46,11 @@ export function renderTitles(api: AppApi): HTMLElement {
         h('p', { class: 'lede', text: seed.text }),
       ),
       h('div', { class: 'busy-row' }, spinner(), ' asking your local LLM for titles'),
+      button('Cancel', () => {
+        state.error = 'Title generation cancelled. Retry when ready.';
+        api.abortGeneration();
+        api.refresh();
+      }),
     );
   }
 
@@ -67,6 +75,12 @@ export function renderTitles(api: AppApi): HTMLElement {
       h('p', { class: 'lede', text: `Seed: “${seed.text}”` }),
     ),
     error,
+    !api.lib.settings.endpoint.model
+      ? h('p', {
+          class: 'banner',
+          text: 'Choose a local model in Settings before proposing titles. Your seed is saved.',
+        })
+      : null,
     h(
       'div',
       { class: 'title-list' },
@@ -75,7 +89,15 @@ export function renderTitles(api: AppApi): HTMLElement {
     h(
       'div',
       { class: 'row gap' },
-      button('🎲 Propose 5 more', () => generate(api, seedId, seed.text, seed.options, true)),
+      button(
+        '🎲 Propose 5 more',
+        () => generate(api, seedId, seed.text, seed.options, true),
+        'ghost',
+        {
+          disabled: !api.lib.settings.endpoint.model,
+        },
+      ),
+      button('Settings', () => api.navigate('settings')),
       button(
         sel.index >= 0 && (sel.edited || seed.titles[sel.index]?.title)
           ? '✔ Use this title →'
@@ -186,7 +208,7 @@ async function generate(
       model: fast || api.lib.settings.endpoint.model,
     });
     if (api.staleGen(token)) {
-      if (busy.get(seedId)?.token === token) busy.delete(seedId);
+      finishInterrupted(api, seedId, token);
       return;
     }
     const parsed = parseTitleOptions(raw);
@@ -218,10 +240,22 @@ async function generate(
     // Only touch the busy entry if it still belongs to THIS request — a
     // superseded generation must not clear the newer one's spinner.
     if (busy.get(seedId)?.token !== token) return;
-    busy.delete(seedId);
-    if (api.staleGen(token)) return;
+    if (api.staleGen(token)) {
+      finishInterrupted(api, seedId, token);
+      return;
+    }
     busy.set(seedId, { token, error: api.genError(err) });
     api.refresh();
+  }
+}
+
+function finishInterrupted(api: AppApi, seedId: string, token: number): void {
+  if (busy.get(seedId)?.token !== token) return;
+  if (api.view === 'titles' && api.params.seed === seedId) {
+    busy.set(seedId, { token, error: 'Title generation cancelled. Retry when ready.' });
+    api.refresh();
+  } else {
+    busy.delete(seedId);
   }
 }
 
@@ -231,6 +265,7 @@ function retry(api: AppApi, seedId: string, text: string, options: SeedOptions):
 
 // Auto-start the first batch when the view opens with an empty title list.
 export function maybeAutoGenerate(api: AppApi): void {
+  if (api.view !== 'titles' || !api.lib.settings.endpoint.model) return;
   const seedId = api.params.seed ?? '';
   const seedNode = seedId ? getNode(api.nodes, seedId) : null;
   if (

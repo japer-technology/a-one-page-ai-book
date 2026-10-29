@@ -12,11 +12,20 @@
  * record the call, return the book.
  */
 import { describe, expect, it } from 'vitest';
-import { renderTitles } from '../../src/ui/views/titles';
+import { maybeAutoGenerate, renderTitles } from '../../src/ui/views/titles';
 import { makeSeedNode } from '../../src/core/tree';
 import { defaultLibrary, emptySeedOptions } from '../../src/core/schema';
 import type { Book, Library, StoryNode, TitleOption } from '../../src/core/types';
-import { all, click, mountView, settle, StubApp, type, texts } from '../helpers/view-harness';
+import {
+  all,
+  click,
+  findButton,
+  mountView,
+  settle,
+  StubApp,
+  type,
+  texts,
+} from '../helpers/view-harness';
 
 function libOf(nodes: StoryNode[], books: Book[]): Library {
   const settings = defaultLibrary().settings;
@@ -64,6 +73,43 @@ const chooseButton = (root: HTMLElement): HTMLButtonElement => {
 };
 
 describe('the title phase', () => {
+  it('keeps an unconfigured start recoverable without firing a doomed request', () => {
+    const seed = makeSeedNode('An unfinished story.', emptySeedOptions());
+    const lib = defaultLibrary();
+    lib.nodes[seed.id] = seed;
+    const app = new StubApp(lib, null, 'titles');
+    app.state.params = { seed: seed.id };
+    const root = mountView(app, (api) => {
+      maybeAutoGenerate(api);
+      return renderTitles(api);
+    });
+    expect(app.calls.some((call) => call[0] === 'generateText')).toBe(false);
+    expect(root.textContent).toContain('Your seed is saved');
+    click(findButton(root, 'Settings'));
+    expect(app.view).toBe('settings');
+  });
+
+  it('lets readers cancel titles and retry without getting stuck on the spinner', async () => {
+    const { app, root } = fixture();
+    let finish!: (text: string) => void;
+    app.generateText = () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    click(findButton(root, 'Propose 5 more'));
+    expect(root.textContent).toContain('Proposing titles');
+    click(findButton(root, 'Cancel'));
+    finish('[{"title":"Stale title","tagline":""}]');
+    await settle();
+    expect(root.textContent).not.toContain('Proposing titles');
+    expect(root.textContent).toContain('Retry');
+    expect(app.calls.some((call) => call[0] === 'appendTitles')).toBe(false);
+    app.generateText = async () => '[{"title":"Fresh title","tagline":""}]';
+    click(findButton(root, 'Retry'));
+    await settle();
+    expect(app.calls.some((call) => call[0] === 'appendTitles')).toBe(true);
+  });
+
   it('renders the proposals and hands the chosen option to pickTitle', () => {
     const { app, root, seedId } = fixture();
     expect(texts(root, '.title-card h2')).toEqual(['The Dead Letter', 'Salt & Secrets']);

@@ -156,6 +156,38 @@ out.connectedToast = await waitForOr(
 out.inlineStatus = await evaluate("document.querySelector('#endpoint-status').textContent");
 out.savedAfterTest = await evaluate('window.__PAGE_TURN__.model()');
 
+// Exercise the real CORS preflight and bearer header, not just a fetch stub.
+await changeValue('#endpoint-url', 'http://127.0.0.1:1234/protected', 'input');
+await evaluate(
+  "document.querySelector('#endpoint-url').dispatchEvent(new Event('change', { bubbles: true }))",
+);
+await changeValue('#endpoint-key', 'page-turn-test-key', 'input');
+await evaluate("document.querySelector('#endpoint-reload-models').click()");
+out.authenticatedModels = await waitFor(
+  "document.querySelector('#endpoint-model')?.value === 'mock-storyteller-7b'",
+  10000,
+  'authenticated model list',
+);
+await evaluate("document.querySelector('#endpoint-save-test').click()");
+out.authenticatedChat = await waitFor(
+  "document.querySelector('#endpoint-status')?.textContent.includes('Connected')",
+  10000,
+  'authenticated chat test',
+);
+// Restore the public fixture for the remaining journey.
+await changeValue('#endpoint-url', 'http://127.0.0.1:1234', 'input');
+await evaluate(
+  "document.querySelector('#endpoint-url').dispatchEvent(new Event('change', { bubbles: true }))",
+);
+await changeValue('#endpoint-key', '', 'input');
+await evaluate("document.querySelector('#endpoint-reload-models').click()");
+await waitFor(
+  "document.querySelector('#endpoint-model')?.value === 'mock-storyteller-7b'",
+  10000,
+  'public model list restored',
+);
+await evaluate("document.querySelector('#endpoint-save').click()");
+
 // Appearance must survive navigation and must not wipe an unsaved endpoint.
 // Typing a model name the server did not list is the "Other…" path of the
 // picker, so drive the real UI: choose Other, then type.
@@ -240,6 +272,28 @@ out.titleCards = await waitFor(
   'five title cards',
 );
 out.firstTitle = await evaluate("document.querySelector('.title-card h2').textContent");
+const unfinishedSeed = await evaluate('window.__PAGE_TURN__.params().seed');
+await evaluate(
+  "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Library')).click()",
+);
+const unfinishedSelector = `.unfinished-start[data-seed-id="${unfinishedSeed}"]`;
+out.unfinishedStartVisible = await waitFor(
+  `!!document.querySelector(${JSON.stringify(unfinishedSelector)})`,
+  5000,
+  'unfinished seed on the shelf',
+);
+await sleep(1000);
+await reloadAndWait(unfinishedSelector, 'unfinished seed after reopening the app');
+out.unfinishedStartSurvivesReload = true;
+await evaluate(
+  `document.querySelector(${JSON.stringify(unfinishedSelector)}).querySelector('button').click()`,
+);
+out.unfinishedTitlesRestored = await waitFor(
+  `document.querySelectorAll('.title-card').length >= 5 &&
+    document.querySelector('.title-card h2')?.textContent === ${JSON.stringify(out.firstTitle)}`,
+  5000,
+  'saved title proposals',
+);
 await evaluate("document.querySelector('.title-card').click(); 'selected'");
 await evaluate(
   "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Use this title')).click(); 'used'",
@@ -601,6 +655,8 @@ console.log(JSON.stringify(out, null, 2));
 
 const ok =
   out.connectedToast === true &&
+  out.authenticatedModels === true &&
+  out.authenticatedChat === true &&
   // The picker must choose the best writer on the server (7B instruct), not
   // the alphabetically-first entry (the 3B), and the endpoint saved by
   // "Save & test" must be the same model that was tested.
@@ -608,6 +664,9 @@ const ok =
   out.bestModelStarred === true &&
   out.savedAfterTest?.model === 'mock-storyteller-7b' &&
   out.titleCards === true &&
+  out.unfinishedStartVisible === true &&
+  out.unfinishedStartSurvivesReload === true &&
+  out.unfinishedTitlesRestored === true &&
   out.firstTurnAppeared === true &&
   out.workingLight === true &&
   out.page1Appeared === true &&

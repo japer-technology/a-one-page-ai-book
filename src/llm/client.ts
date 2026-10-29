@@ -8,7 +8,7 @@
  */
 import type { ChatMessage, EndpointSettings } from '../core/types';
 import { parseJSONLoose } from '../core/parsers';
-import { normalizeBaseUrl } from './endpoints';
+import { baseUrlProblem, normalizeBaseUrl } from './endpoints';
 
 export interface GenOptions {
   endpoint: EndpointSettings;
@@ -363,7 +363,7 @@ async function readJSONError(response: Response): Promise<string> {
       const message = (json.error as { message?: unknown }).message;
       if (typeof message === 'string') return message;
     }
-    return '';
+    return text.slice(0, 300);
   } catch {
     return text.slice(0, 300);
   }
@@ -387,6 +387,8 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
   const base = normalizeBaseUrl(endpoint.baseUrl);
 
   if (!model) throw new Error('No model selected — pick one in Settings first.');
+  const problem = baseUrlProblem(endpoint.baseUrl);
+  if (problem) throw new Error(problem);
 
   // Ollama native first; fall back to the OpenAI-compatible path if it 404s.
   if (endpoint.vendor === 'ollama') {
@@ -432,8 +434,12 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
       if (content.trim().length === 0) throw new Error('LLM returned an empty page');
       return content;
     }
-    if (response.status !== 404 && response.status !== 405) {
-      throw httpError(response.status, await readJSONError(response));
+    const errorBody = await readJSONError(response);
+    if (
+      (response.status !== 404 && response.status !== 405) ||
+      (response.status === 404 && /model\b.*(?:not found|does not exist|pull)/i.test(errorBody))
+    ) {
+      throw httpError(response.status, errorBody);
     }
     // fall through to /v1 (some builds only expose the OpenAI endpoint)
   }

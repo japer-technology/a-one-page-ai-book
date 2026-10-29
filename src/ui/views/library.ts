@@ -5,7 +5,15 @@
 import type { AppApi } from '../ctx';
 import { button, fmtDate, h, plural } from '../dom';
 import { compileBook } from '../../core/compile';
-import { getNode, seedTextOf, sortBooks, statsOf, titleNodeOf, titleOf } from '../../core/tree';
+import {
+  getNode,
+  removeSubtree,
+  seedTextOf,
+  sortBooks,
+  statsOf,
+  titleNodeOf,
+  titleOf,
+} from '../../core/tree';
 import { EMOTION_NAMES } from '../../core/types';
 import type { Book, StoryNode } from '../../core/types';
 import {
@@ -57,6 +65,36 @@ function installMenuDismiss(): void {
 export function renderLibrary(api: AppApi): HTMLElement {
   installMenuDismiss();
   const all = sortBooks(api.lib);
+  const bookSeeds = new Set(all.map((book) => book.seedNodeId));
+  const starts = Object.values(api.nodes)
+    .filter((node) => node.data.kind === 'seed' && !bookSeeds.has(node.id))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  const unfinished = starts.length
+    ? h(
+        'section',
+        { class: 'unfinished-starts' },
+        h('h2', { text: 'Unfinished starts' }),
+        h('p', {
+          text: 'Your saved seeds and title proposals. Resume here after configuring your model or reopening the app.',
+        }),
+        ...starts.map((node) =>
+          h(
+            'article',
+            { class: 'panel unfinished-start', 'data-seed-id': node.id },
+            h('p', { text: node.data.kind === 'seed' ? node.data.text : '' }),
+            h(
+              'div',
+              { class: 'row gap' },
+              button('Resume titles', () => api.navigate('titles', { seed: node.id })),
+              button('Delete start', () => {
+                if (!window.confirm('Delete this seed and all its title proposals?')) return;
+                api.update((lib) => ({ ...lib, nodes: removeSubtree(lib.nodes, node.id) }));
+              }),
+            ),
+          ),
+        ),
+      )
+    : null;
   const allTags = [...new Set(all.flatMap((book) => book.tags ?? []))].sort();
   // A tag filter that no longer exists (the last tagged book was deleted or
   // untagged) would hide the whole shelf — and the only "clear" control lived
@@ -275,6 +313,7 @@ export function renderLibrary(api: AppApi): HTMLElement {
     { class: 'view view-library' },
     heading,
     empty,
+    unfinished,
     nudge,
     all.length > 0 ? toolbar : null,
     tagChips,

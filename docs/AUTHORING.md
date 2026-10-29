@@ -122,6 +122,12 @@ brief** before you begin, and it rides into:
 
 ## 4. The title phase — the doorway
 
+Your seed is saved before the model is called. If setup is incomplete or generation fails, open
+**Settings**, configure the endpoint, then return to **Library → Unfinished starts → Resume
+titles**. These starts survive closing the app and disappear from that section once you choose a
+title. **Cancel** stops a title request without losing the seed or earlier proposals; **Retry**
+asks again. **Delete start** removes only that unfinished seed and its proposals.
+
 After the seed, the model proposes **five titles at a time**, each with a one-line tagline. You can:
 
 - **pick one** (click a card, then _✔ Use this title →_),

@@ -42,15 +42,73 @@ describe('probeCandidate', () => {
     expect(result.latencyMs).not.toBeNull();
   });
 
-  it('reports reachable with empty models when the payload is not a model list', async () => {
+  it('rejects an unrelated server that returns HTTP 200 without a model list', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => jsonResponse({ hello: 'world' })),
     );
     const result = await probeCandidate(candidate, 500);
+    expect(result.status).toBe('absent');
+    expect(result.models).toEqual([]);
+    expect(result.detail).toContain('did not return an LLM model list');
+  });
+
+  it('accepts an empty but valid model list', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ data: [] })),
+    );
+    const result = await probeCandidate(candidate);
     expect(result.status).toBe('reachable');
     expect(result.models).toEqual([]);
-    expect(result.detail).toContain('model list empty or unreadable');
+    expect(result.detail).toContain('load a chat model');
+  });
+
+  it('authenticates only the explicitly probed endpoint', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ id: 'writer' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await probeCandidate(candidate, 500, ' local-test-key ');
+    expect(result.models).toEqual(['writer']);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${candidate.baseUrl}/v1/models`,
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: 'Bearer local-test-key' }),
+        redirect: 'error',
+      }),
+    );
+    expect(JSON.stringify(result)).not.toContain('local-test-key');
+  });
+
+  it('does not send authorization in no-cors presence checks', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ type: 'opaque', status: 0 });
+    vi.stubGlobal('fetch', fetchMock);
+    expect((await probeCandidate(candidate, 500, 'local-test-key')).status).toBe('cors-blocked');
+    expect(fetchMock.mock.calls[1]?.[1]).not.toHaveProperty('headers');
+  });
+
+  it('preserves an auth failure when the alternative Ollama route is missing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({}, 401))
+        .mockResolvedValueOnce(jsonResponse({}, 404)),
+    );
+    expect((await probeCandidate({ ...candidate, vendor: 'ollama' })).status).toBe('unauthorized');
+  });
+
+  it('tries the alternative Ollama list when the native route returns HTML', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('<html>not an API</html>'))
+        .mockResolvedValueOnce(jsonResponse({ data: [{ id: 'writer' }] })),
+    );
+    expect((await probeCandidate({ ...candidate, vendor: 'ollama' })).models).toEqual(['writer']);
   });
 
   it('does not call a non-LLM server reachable just because it answered', async () => {

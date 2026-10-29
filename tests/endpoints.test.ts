@@ -68,6 +68,8 @@ describe('model list parsers', () => {
   it('ignores malformed payloads', () => {
     expect(parseOllamaTags({ nope: true })).toEqual([]);
     expect(parseOpenAIModels(null)).toEqual([]);
+    expect(parseOpenAIModels({ data: [null, 1, {}, { id: ' writer ' }] })).toEqual(['writer']);
+    expect(parseOllamaTags({ models: [null, {}, { name: ' writer ' }] })).toEqual(['writer']);
   });
 });
 
@@ -182,5 +184,16 @@ describe('baseUrlProblem', () => {
   it('still asks for a server first', () => {
     expect(baseUrlProblem('')).toMatch(/full URL first/);
     expect(baseUrlProblem('127.0.0.1:1234')).toMatch(/full URL first/);
+  });
+
+  it('rejects URL suffixes that would swallow the appended API route', () => {
+    expect(baseUrlProblem('http://localhost:1234/#/chat')).toMatch(/query string or fragment/);
+    expect(baseUrlProblem('http://localhost:1234/?mode=chat')).toMatch(/query string or fragment/);
+  });
+
+  it('normalizes the model-list route just like the chat route', () => {
+    expect(modelListUrls({ ...CANDIDATES[0]!, baseUrl: 'http://localhost:1234/v1/' })).toEqual([
+      'http://localhost:1234/v1/models',
+    ]);
   });
 });

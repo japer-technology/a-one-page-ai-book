@@ -246,6 +246,39 @@ describe('the response stream is always released', () => {
 });
 
 describe('errors', () => {
+  it('preserves Ollama model-not-found errors without trying a different API', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ error: "model 'missing' not found, try pulling it first" }, 404),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(chat({ endpoint: ollama, model: 'missing' }, MESSAGES)).rejects.toThrow(
+      /model 'missing' not found/,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a server diagnostic stored outside the error field', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ detail: 'Context window exceeded' }, 400)),
+    );
+    await expect(chat({ endpoint: openai, model: 'm' }, MESSAGES)).rejects.toThrow(
+      /Context window exceeded/,
+    );
+  });
+
+  it('rejects malformed imported endpoints before fetching', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(
+      chat(
+        { endpoint: { ...openai, baseUrl: 'http://localhost:1234/#chat' }, model: 'm' },
+        MESSAGES,
+      ),
+    ).rejects.toThrow(/fragment/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('explains 401 as a key problem', async () => {
     vi.stubGlobal(
       'fetch',

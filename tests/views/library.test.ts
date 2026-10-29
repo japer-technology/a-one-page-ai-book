@@ -22,7 +22,7 @@ import {
   makeTurnNode,
   setFrontier,
 } from '../../src/core/tree';
-import { defaultLibrary, emptySeedOptions } from '../../src/core/schema';
+import { defaultLibrary, emptySeedOptions, normalizeLibrary } from '../../src/core/schema';
 import { DEFAULT_TURN } from '../../src/core/types';
 import type { Book, Library, StoryNode } from '../../src/core/types';
 import { all, click, mountView, StubApp, type } from '../helpers/view-harness';
@@ -74,6 +74,35 @@ const searchBox = (root: HTMLElement): HTMLInputElement =>
   root.querySelector('input.search') as HTMLInputElement;
 
 describe('the bookshelf', () => {
+  it('restores unfinished starts from storage and resumes their title proposals', () => {
+    const started = makeSeedNode('A seed whose model was offline.', emptySeedOptions());
+    const titled = bookOn('Already titled', 'A different seed.');
+    const lib = normalizeLibrary(
+      JSON.parse(JSON.stringify(libOf([started, ...titled.nodes], [titled.book]))),
+    );
+    const app = new StubApp(lib, null, 'library');
+    const root = mountView(app, renderLibrary);
+    expect(root.querySelectorAll('.unfinished-start')).toHaveLength(1);
+    expect(root.querySelector('.unfinished-start')?.textContent).toContain('model was offline');
+    click(all(root, 'button').find((b) => b.textContent === 'Resume titles'));
+    expect(app.view).toBe('titles');
+    expect(app.params.seed).toBe(started.id);
+  });
+
+  it('deletes only the chosen unfinished start and its proposals', () => {
+    window.confirm = () => true;
+    const seed = makeSeedNode('Discard this start.', emptySeedOptions());
+    const proposal = makeTitleNode(seed.id, { title: 'Unused', tagline: '' });
+    const kept = bookOn('Keep this book', 'Keep this seed.');
+    const app = new StubApp(libOf([seed, proposal, ...kept.nodes], [kept.book]), null, 'library');
+    const root = mountView(app, renderLibrary);
+    click(all(root, 'button').find((b) => b.textContent === 'Delete start'));
+    expect(app.nodes[seed.id]).toBeUndefined();
+    expect(app.nodes[proposal.id]).toBeUndefined();
+    expect(app.lib.books).toEqual([kept.book]);
+    expect(root.querySelector('.unfinished-start')).toBeNull();
+  });
+
   it('offers one primary start action and import on an empty shelf', () => {
     const app = new StubApp(defaultLibrary(), null, 'library');
     const root = mountView(app, renderLibrary);
