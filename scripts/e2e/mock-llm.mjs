@@ -178,6 +178,14 @@ createServer(async (req, res) => {
     res.end();
     return;
   }
+  if (req.url?.startsWith('/protected/')) {
+    if (req.headers.authorization !== 'Bearer page-turn-test-key') {
+      res.writeHead(401, { 'content-type': 'application/json', ...CORS });
+      res.end(JSON.stringify({ error: 'API key required' }));
+      return;
+    }
+    req.url = req.url.slice('/protected'.length);
+  }
   if (req.method === 'GET' && req.url === '/v1/models') {
     res.writeHead(200, { 'content-type': 'application/json', ...CORS });
     res.end(

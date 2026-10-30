@@ -9,7 +9,7 @@
  * an opaque response means "an HTTP server answered here, but it won't talk
  * to this page's origin" — reported as `cors-blocked` with actionable help.
  */
-import { CANDIDATES, modelListUrls, parseModelsResponse } from './endpoints';
+import { baseUrlProblem, CANDIDATES, modelListUrls, parseModelsResponse } from './endpoints';
 import type { EndpointCandidate } from './endpoints';
 
 export type ProbeStatus = 'reachable' | 'cors-blocked' | 'unauthorized' | 'absent';
@@ -36,29 +36,56 @@ export function timeoutSignal(ms: number): TimeoutHandle {
 export async function probeCandidate(
   candidate: EndpointCandidate,
   timeoutMs = 1800,
+  apiKey = '',
 ): Promise<ProbeResult> {
+  const problem = baseUrlProblem(candidate.baseUrl);
+  if (problem) {
+    return { candidate, status: 'absent', models: [], latencyMs: null, detail: problem };
+  }
   const urls = modelListUrls(candidate);
+  const headers: Record<string, string> = { accept: 'application/json' };
+  if (apiKey.trim()) headers.authorization = `Bearer ${apiKey.trim()}`;
 
   // Pass 1: CORS fetch each model-list URL.
   let lastHttpStatus: number | null = null;
   let networkError = false;
   let timedOut = false;
+  let unreadable = false;
+  let unauthorizedStatus: number | null = null;
   for (const url of urls) {
     const t = timeoutSignal(timeoutMs);
     const started = performance.now();
     try {
       const response = await fetch(url, {
         method: 'GET',
-        headers: { accept: 'application/json' },
+        headers,
         signal: t.signal,
+        redirect: 'error',
       });
       lastHttpStatus = response.status;
+      if (response.status === 401 || response.status === 403) {
+        unauthorizedStatus = response.status;
+      }
       if (!response.ok) continue; // e.g. Ollama without /v1 — try the next URL
       let models: string[] = [];
       try {
-        models = parseModelsResponse(candidate.vendor, await response.json());
+        const payload: unknown = await response.json();
+        const record =
+          payload && typeof payload === 'object'
+            ? (payload as { data?: unknown; models?: unknown })
+            : null;
+        if (
+          !record ||
+          (!Array.isArray(record.data) &&
+            !(candidate.vendor === 'ollama' && Array.isArray(record.models)))
+        ) {
+          unreadable = true;
+          continue;
+        }
+        models = parseModelsResponse(candidate.vendor, payload);
       } catch {
-        models = []; // server answered 200 with non-JSON — reachable, list unreadable
+        unreadable = true;
+        continue;
       }
       return {
         candidate,
@@ -68,7 +95,7 @@ export async function probeCandidate(
         detail:
           models.length > 0
             ? `${models.length} model(s) loaded`
-            : 'server responded; model list empty or unreadable',
+            : 'server responded; no models listed — load a chat model in the server',
       };
     } catch {
       // TypeError = connection refused OR CORS rejection; our own timeout
@@ -92,15 +119,17 @@ export async function probeCandidate(
     // A 401/403 is a SUPPORTED configuration (key-protected endpoint), not a
     // CORS problem: badging it "CORS-blocked" sent the reader off to configure
     // server-side origins when the fix was pasting their API key.
-    const unauthorized = lastHttpStatus === 401 || lastHttpStatus === 403;
+    const unauthorized = unauthorizedStatus !== null;
     return {
       candidate,
       status: unauthorized ? 'unauthorized' : 'absent',
       models: [],
       latencyMs: null,
       detail: unauthorized
-        ? `answered HTTP ${lastHttpStatus} — the server is there and wants an API key (add it in Settings, then Save)`
-        : `something is listening on that port but it is not an LLM model list (HTTP ${lastHttpStatus})`,
+        ? `answered HTTP ${unauthorizedStatus} — check the API key in Settings, then reload the models`
+        : unreadable
+          ? 'server answered, but did not return an LLM model list — check the URL and protocol'
+          : `something is listening on that port but it is not an LLM model list (HTTP ${lastHttpStatus})`,
     };
   }
 

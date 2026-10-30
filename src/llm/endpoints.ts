@@ -97,16 +97,17 @@ export const CANDIDATES: EndpointCandidate[] = [
 
 /** URLs to probe for a candidate, in order. */
 export function modelListUrls(candidate: EndpointCandidate): string[] {
+  const base = normalizeBaseUrl(candidate.baseUrl);
   if (candidate.vendor === 'ollama') {
-    return [`${candidate.baseUrl}/api/tags`, `${candidate.baseUrl}/v1/models`];
+    return [`${base}/api/tags`, `${base}/v1/models`];
   }
-  return [`${candidate.baseUrl}/v1/models`];
+  return [`${base}/v1/models`];
 }
 
 export function parseOllamaTags(json: unknown): string[] {
   if (json && typeof json === 'object' && Array.isArray((json as { models?: unknown }).models)) {
     return ((json as { models: Array<{ name?: unknown }> }).models ?? [])
-      .map((m) => (typeof m.name === 'string' ? m.name : ''))
+      .map((m) => (m && typeof m.name === 'string' ? m.name.trim() : ''))
       .filter((n) => n.length > 0)
       .sort();
   }
@@ -116,7 +117,7 @@ export function parseOllamaTags(json: unknown): string[] {
 export function parseOpenAIModels(json: unknown): string[] {
   if (json && typeof json === 'object' && Array.isArray((json as { data?: unknown }).data)) {
     return ((json as { data: Array<{ id?: unknown }> }).data ?? [])
-      .map((m) => (typeof m.id === 'string' ? m.id : ''))
+      .map((m) => (m && typeof m.id === 'string' ? m.id.trim() : ''))
       .filter((n) => n.length > 0)
       .sort();
   }
@@ -135,6 +136,8 @@ export function parseModelsResponse(vendor: EndpointVendor, json: unknown): stri
 /** "http://127.0.0.1:1234/v1/" -> "http://127.0.0.1:1234" (keeps deeper path prefixes). */
 export function normalizeBaseUrl(input: string): string {
   let url = input.trim();
+  // Leave unsupported suffixes intact so validation can explain them.
+  if (/[?#]/.test(url)) return url;
   // Also strip a full endpoint path pasted from server docs or another app
   // ('…/v1/chat/completions', '…/v1/models', Ollama's '…/api/chat'): the chat
   // client appends its own '/v1/chat/completions', so the pasted path used to
@@ -175,6 +178,9 @@ export function baseUrlProblem(input: string): string | null {
   }
   if (parsed.username.length > 0 || parsed.password.length > 0) {
     return 'The URL must not contain a username or password.';
+  }
+  if (/[?#]/.test(url)) {
+    return 'Use the server base URL without a query string or fragment; put API keys in the API key field.';
   }
   return null;
 }

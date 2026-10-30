@@ -189,6 +189,10 @@ export function renderSettings(api: AppApi): HTMLElement {
     form.autoSummary = api.lib.settings.autoSummary;
     form.autoSuggest = api.lib.settings.autoSuggest;
     form.fastModel = api.lib.settings.fastModel;
+    if (picker.forUrl !== normalizeBaseUrl(endpoint.baseUrl)) picker.models = [];
+    picker.forUrl = normalizeBaseUrl(endpoint.baseUrl);
+    picker.custom = form.model.length > 0 && !picker.models.includes(form.model);
+    picker.error = '';
     seededEndpointNet = api.lib.settings.lanSubnet;
     // A remembered subnet is the reader's own answer from last time: trust it
     // over anything we detect now.
@@ -253,6 +257,7 @@ export function renderSettings(api: AppApi): HTMLElement {
           form.model = '';
           api.toast('Model cleared — it belonged to the previous server.', 'info');
         }
+        clearFastModel(api);
         renderModelPicker(api);
       }
     },
@@ -425,6 +430,7 @@ export function renderSettings(api: AppApi): HTMLElement {
     },
   });
   const fastModelInput = h('input', {
+    id: 'fast-model',
     class: 'input',
     type: 'text',
     list: 'discovered-models',
@@ -1020,6 +1026,7 @@ function selectServer(api: AppApi, options: AdoptOptions): void {
   // the reader never gave it to — directly contradicting the field's own
   // promise ("sent only to this endpoint").
   clearKeyIfHostChanged(options.baseUrl);
+  if (normalizeBaseUrl(form.url) !== normalizeBaseUrl(options.baseUrl)) clearFastModel(api);
   form.name = options.label;
   form.url = options.baseUrl;
   form.vendor = options.vendor;
@@ -1260,10 +1267,10 @@ function renderModelPicker(api: AppApi, box?: HTMLElement): void {
     return;
   }
 
-  const selected = picker.models.includes(form.model)
-    ? form.model
-    : picker.custom
-      ? CUSTOM_MODEL
+  const selected = picker.custom
+    ? CUSTOM_MODEL
+    : picker.models.includes(form.model)
+      ? form.model
       : '';
   const select = h(
     'select',
@@ -1306,6 +1313,7 @@ function renderModelPicker(api: AppApi, box?: HTMLElement): void {
       text: 'Other — type a name…',
     }),
   );
+  select.value = selected;
 
   const reload = button(
     picker.loading ? '↻ Loading…' : '↻ Reload models',
@@ -1364,30 +1372,38 @@ function modelLabel(model: string, isBest: boolean): string {
  * only way to see the new list was to run the whole discovery again.
  */
 async function reloadModels(api: AppApi): Promise<void> {
+  if (picker.loading) return;
   const baseUrl = normalizeBaseUrl(form.url);
-  if (!/^https?:\/\/[^/]+/i.test(baseUrl)) {
-    api.toast('Choose a server first.', 'info');
+  const problem = baseUrlProblem(baseUrl);
+  if (problem) {
+    api.toast(problem, 'error');
     return;
   }
+  const vendor = form.vendor;
+  const apiKey = endpointKey();
   picker.loading = true;
   picker.error = '';
   renderModelPicker(api);
-  const result = await probeCandidate({
-    id: 'reload',
-    label: form.name || 'Endpoint',
-    baseUrl,
-    vendor: form.vendor,
-    note: '',
-  });
+  const result = await probeCandidate(
+    { id: 'reload', label: form.name || 'Endpoint', baseUrl, vendor, note: '' },
+    5000,
+    apiKey,
+  );
   picker.loading = false;
   // The reader can retype the address while the list loads: the result belongs
   // to the URL it was ASKED for, not to whatever is in the box now.
-  if (baseUrl !== normalizeBaseUrl(form.url)) {
+  if (
+    baseUrl !== normalizeBaseUrl(form.url) ||
+    vendor !== form.vendor ||
+    apiKey !== endpointKey()
+  ) {
     renderModelPicker(api);
     return;
   }
   picker.forUrl = baseUrl;
   if (result.status !== 'reachable') {
+    picker.models = [];
+    picker.custom = true;
     picker.error = `Could not read the model list (${result.detail}).`;
     renderModelPicker(api);
     api.toast(`Model list unavailable — ${result.detail}`, 'info');
@@ -1401,7 +1417,10 @@ async function reloadModels(api: AppApi): Promise<void> {
   for (const model of result.models) {
     if (!discoveredModels.includes(model)) discoveredModels.push(model);
   }
-  if (!picker.models.includes(form.model)) form.model = pickBestModel(result.models);
+  if (picker.models.length > 0 && !picker.models.includes(form.model)) {
+    form.model = pickBestModel(result.models);
+  }
+  picker.custom = !picker.models.includes(form.model);
   renderModelPicker(api);
   renderEndpointStatusInto(api);
   api.toast(`${picker.models.length} model(s) on ${baseUrl}.`, 'success');
@@ -1678,8 +1697,13 @@ async function testConnection(api: AppApi, buttonEl?: HTMLButtonElement): Promis
     setStatus('', 'none');
     return;
   }
-  const endpoint = collectEndpoint();
+  const endpoint = api.lib.settings.endpoint;
+  const fastModel = api.lib.settings.fastModel;
   const token = api.beginGen();
+  const current = (): boolean =>
+    !api.staleGen(token) &&
+    api.lib.settings.endpoint === endpoint &&
+    api.lib.settings.fastModel === fastModel;
   const started = performance.now();
   testing = true;
   try {
@@ -1687,7 +1711,21 @@ async function testConnection(api: AppApi, buttonEl?: HTMLButtonElement): Promis
       model: endpoint.model,
       endpoint,
     });
-    if (api.staleGen(token)) return;
+    if (!current()) return;
+    if (fastModel && fastModel !== endpoint.model) {
+      setStatus(`Main model answered; testing fast model ${fastModel}…`, 'pending');
+      try {
+        await api.generateText([{ role: 'user', content: 'Reply with exactly: OK' }], {
+          model: fastModel,
+          endpoint,
+        });
+      } catch (err) {
+        throw new Error(
+          `Main model works, but fast model "${fastModel}" failed: ${api.genError(err)} Clear or correct the Fast model field; new-book titles use it.`,
+        );
+      }
+      if (!current()) return;
+    }
     const ms = Math.round(performance.now() - started);
     setStatus(
       `Connected in ${ms} ms — ${endpoint.model} answered “${answer.trim().slice(0, 40)}”. Saved; your books will use it.`,
@@ -1695,6 +1733,7 @@ async function testConnection(api: AppApi, buttonEl?: HTMLButtonElement): Promis
     );
     api.toast(`Connected to ${endpoint.model} in ${ms} ms.`, 'success');
   } catch (err) {
+    if (!current()) return;
     // `generateText` already surfaced this error through the app's funnel as a
     // toast — which fades after a few seconds. The status line must not depend
     // on a transient notice: carry the reason itself, or the reader is left
@@ -1702,6 +1741,14 @@ async function testConnection(api: AppApi, buttonEl?: HTMLButtonElement): Promis
     setStatus(`The endpoint saved, but the test call failed: ${api.genError(err)}`, 'bad');
   } finally {
     testing = false;
+    if (!current()) {
+      setStatus(
+        api.staleGen(token)
+          ? 'Connection test cancelled. Save & test again when ready.'
+          : 'Settings changed during the test. Save & test again to check the current endpoint and models.',
+        api.staleGen(token) ? 'none' : 'bad',
+      );
+    }
     // `api.update` above re-rendered the view, so the captured node is DETACHED
     // by now — mutating it left the visible button stuck on "Testing…"
     // (disabled) until an unrelated re-render happened to rebuild it. Fix the
@@ -2066,13 +2113,12 @@ function vendorNote(candidate: EndpointCandidate): string {
 /** Probe whatever the user typed in the Base URL field, as a one-off candidate. */
 async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
   const baseUrl = normalizeBaseUrl(form.url);
-  if (!/^https?:\/\/[^/]+/i.test(baseUrl)) {
-    api.toast(
-      'Type a full URL first, e.g. http://127.0.0.1:1234 or http://192.168.1.50:8080/v1',
-      'error',
-    );
+  const problem = baseUrlProblem(baseUrl);
+  if (problem) {
+    api.toast(problem, 'error');
     return;
   }
+  const apiKey = endpointKey();
   const candidate: EndpointCandidate = {
     id: 'custom',
     label: form.name.trim() || 'Custom endpoint',
@@ -2088,7 +2134,7 @@ async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
     h('span', { class: 'scan-label', text: baseUrl }),
   );
   box.prepend(row);
-  const result = await probeCandidate(candidate);
+  const result = await probeCandidate(candidate, 5000, apiKey);
   // Record the verdict and re-render from STATE instead of only patching the
   // row captured at click time: an appearance change in the meantime rebuilds
   // the whole view, and `replaceWith` on a detached node is a silent no-op —
@@ -2097,7 +2143,12 @@ async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
     ...scan.results.filter((r) => r.candidate.baseUrl !== result.candidate.baseUrl),
     result,
   ];
-  if (result.status === 'reachable') {
+  if (
+    result.status === 'reachable' &&
+    baseUrl === normalizeBaseUrl(form.url) &&
+    candidate.vendor === form.vendor &&
+    apiKey === endpointKey()
+  ) {
     for (const model of result.models) {
       if (!discoveredModels.includes(model)) discoveredModels.push(model);
     }
@@ -2106,7 +2157,7 @@ async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
     selectServer(api, {
       label: candidate.label,
       baseUrl,
-      vendor: form.vendor,
+      vendor: candidate.vendor,
       models: result.models,
       origin: baseUrl,
     });
@@ -2136,8 +2187,20 @@ function collectEndpoint(): EndpointSettings {
     temperature: Number.isFinite(form.temperature)
       ? Math.min(2, Math.max(0, form.temperature))
       : 0.9,
-    apiKey: form.apiKey.trim(),
+    apiKey: endpointKey(),
   };
+}
+
+function endpointKey(): string {
+  return form.keyOrigin === originOf(form.url) ? form.apiKey.trim() : '';
+}
+
+function clearFastModel(api: AppApi): void {
+  if (!form.fastModel) return;
+  form.fastModel = '';
+  const input = live('fast-model');
+  if (input instanceof HTMLInputElement) input.value = '';
+  api.toast('Fast model cleared — it belonged to the previous server.', 'info');
 }
 
 async function persist(api: AppApi): Promise<void> {
