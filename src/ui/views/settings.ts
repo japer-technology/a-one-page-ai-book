@@ -61,7 +61,6 @@ const CUSTOM_MODEL = '\u0000custom';
 
 // Session view state.
 const scan = { running: false, results: [] as ProbeResult[] };
-const discoveredModels: string[] = [];
 const lan = {
   running: false,
   results: [] as LanServer[],
@@ -97,7 +96,7 @@ let confirmedBase = '';
 /** The models of the currently selected server, best writer first. */
 const picker = {
   models: [] as string[],
-  /** Which server they came from, so a stale list is never shown as current. */
+  /** Which server the list and manually entered models belong to. */
   forUrl: '',
   loading: false,
   error: '',
@@ -250,7 +249,7 @@ export function renderSettings(api: AppApi): HTMLElement {
       const fromAdoptedServer = picker.forUrl.length > 0;
       if (fromAdoptedServer && normalizeBaseUrl(picker.forUrl) !== normalizeBaseUrl(form.url)) {
         picker.models = [];
-        picker.forUrl = '';
+        picker.forUrl = normalizeBaseUrl(form.url);
         picker.error = '';
         picker.custom = false;
         if (form.model.trim().length > 0) {
@@ -1043,9 +1042,6 @@ function selectServer(api: AppApi, options: AdoptOptions): void {
   setField('endpoint-url', options.baseUrl);
   setField('endpoint-vendor', options.vendor);
 
-  for (const model of options.models) {
-    if (!discoveredModels.includes(model)) discoveredModels.push(model);
-  }
   picker.models = rankModels(options.models);
   picker.forUrl = options.baseUrl;
   picker.error = '';
@@ -1224,6 +1220,7 @@ function renderModelPicker(api: AppApi, box?: HTMLElement): void {
     // No re-render on typing: rebuilding the input mid-word would drop focus.
     oninput: (event: Event) => {
       form.model = (event.target as HTMLInputElement).value;
+      picker.custom = true;
     },
   });
 
@@ -1339,11 +1336,11 @@ function renderModelPicker(api: AppApi, box?: HTMLElement): void {
   );
 }
 
-/** Every model name worth suggesting: the ones discovered so far, plus both drafts. */
+/** Suggestions belong to the selected server, just like both model fields. */
 function modelOptions(): string[] {
-  return [...new Set([...discoveredModels, form.model, form.fastModel])].filter(
-    (model) => model.length > 0,
-  );
+  const models =
+    normalizeBaseUrl(picker.forUrl) === normalizeBaseUrl(form.url) ? picker.models : [];
+  return [...new Set([...models, form.model, form.fastModel])].filter((model) => model.length > 0);
 }
 
 /**
@@ -1409,15 +1406,13 @@ async function reloadModels(api: AppApi): Promise<void> {
     api.toast(`Model list unavailable — ${result.detail}`, 'info');
     return;
   }
+  const keepCustom = picker.custom && form.model.trim().length > 0;
   picker.models = rankModels(result.models);
   if (result.models.length === 0) {
     picker.error = 'The server answered, but listed no models.';
     picker.custom = true;
   }
-  for (const model of result.models) {
-    if (!discoveredModels.includes(model)) discoveredModels.push(model);
-  }
-  if (picker.models.length > 0 && !picker.models.includes(form.model)) {
+  if (!keepCustom && picker.models.length > 0 && !picker.models.includes(form.model)) {
     form.model = pickBestModel(result.models);
   }
   picker.custom = !picker.models.includes(form.model);
@@ -1644,9 +1639,6 @@ async function saveEndpoint(api: AppApi): Promise<boolean> {
     api.toast('Pick a model in step 2 first, or type its name.', 'error');
     return false;
   }
-  if (endpoint.model) {
-    discoveredModels.push(endpoint.model);
-  }
   lan.base = lan.base || savedSubnet();
   const subnet = normalizeSubnetBase(lan.base) ?? '';
   api.update((lib) => ({
@@ -1700,10 +1692,20 @@ async function testConnection(api: AppApi, buttonEl?: HTMLButtonElement): Promis
   const endpoint = api.lib.settings.endpoint;
   const fastModel = api.lib.settings.fastModel;
   const token = api.beginGen();
-  const current = (): boolean =>
-    !api.staleGen(token) &&
-    api.lib.settings.endpoint === endpoint &&
-    api.lib.settings.fastModel === fastModel;
+  const current = (): boolean => {
+    const draft = collectEndpoint();
+    return (
+      !api.staleGen(token) &&
+      api.lib.settings.endpoint === endpoint &&
+      api.lib.settings.fastModel === fastModel &&
+      draft.baseUrl === endpoint.baseUrl &&
+      draft.vendor === endpoint.vendor &&
+      draft.model === endpoint.model &&
+      draft.apiKey === endpoint.apiKey &&
+      draft.temperature === endpoint.temperature &&
+      form.fastModel.trim() === fastModel
+    );
+  };
   const started = performance.now();
   testing = true;
   try {
@@ -1942,18 +1944,13 @@ async function runScan(api: AppApi, controls: Controls): Promise<void> {
   const best = bestReachable(scan.results);
   const lanBest = lan.results.find((server) => server.corsOk && server.models.length > 0);
   if (best && !lanBest && !picker.models.length) {
-    for (const model of best.models) {
-      if (!discoveredModels.includes(model)) discoveredModels.push(model);
-    }
-    if (!form.model && best.models.length > 0) form.model = pickBestModel(best.models);
-    picker.models = rankModels(best.models);
-    // Adopt the ADDRESS along with the models: the list is presented as that
-    // server's, and a half-adoption (its models, another address in the URL
-    // box) is how a bogus (url, model) pair reached Save and broke every later
-    // generation.
-    picker.forUrl = best.candidate.baseUrl;
-    form.url = best.candidate.baseUrl;
-    form.vendor = best.candidate.vendor;
+    selectServer(api, {
+      label: best.candidate.label,
+      baseUrl: best.candidate.baseUrl,
+      vendor: best.candidate.vendor,
+      models: best.models,
+      origin: best.candidate.label,
+    });
   }
   api.refresh();
 
@@ -2149,9 +2146,6 @@ async function probeCustom(api: AppApi, controls: Controls): Promise<void> {
     candidate.vendor === form.vendor &&
     apiKey === endpointKey()
   ) {
-    for (const model of result.models) {
-      if (!discoveredModels.includes(model)) discoveredModels.push(model);
-    }
     // A hand-typed address is a deliberate choice: adopt it, load its models
     // and pre-select the best one — the same outcome a discovery click gives.
     selectServer(api, {

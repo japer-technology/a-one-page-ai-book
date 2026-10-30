@@ -201,6 +201,11 @@ createServer(async (req, res) => {
     try {
       const parsed = JSON.parse(await readBody(req));
       logRequest(1234, parsed);
+      if (parsed.model === 'missing-fast-model') {
+        res.writeHead(404, { 'content-type': 'application/json', ...CORS });
+        res.end(JSON.stringify({ error: { message: 'model missing-fast-model not found' } }));
+        return;
+      }
       const content = pickContent(parsed.messages);
       // A little dwell time, so two requests fired in the same tick really do
       // overlap the way they do against a real single-slot server.

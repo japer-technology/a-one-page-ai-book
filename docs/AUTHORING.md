@@ -59,6 +59,14 @@ opens the library's file tools below search and sort.
 10. **After the book** — read it, export it, write the prologue that knew, take the Director's
     Portrait, seed the sequel, or keep branching.
 
+For a key-protected endpoint, enter its **API key** before **Probe this URL** or **Reload models**;
+both use that key, while automatic discovery does not. Use an HTTP(S) server URL without embedded
+credentials, a query string, or a fragment. Server error messages remain visible to help diagnose
+failed requests. Changing servers clears the old model choices and suggestions; changing origins
+also clears the old key. **Other — type a name…** keeps your custom model when reloading the list.
+**Save & test** checks both the main model and a distinct optional fast model (used for titles). If
+you edit connection settings while a test is running, run it again before trusting the result.
+
 ---
 
 ## 3. Before the first page
@@ -125,8 +133,8 @@ brief** before you begin, and it rides into:
 Your seed is saved before the model is called. If setup is incomplete or generation fails, open
 **Settings**, configure the endpoint, then return to **Library → Unfinished starts → Resume
 titles**. These starts survive closing the app and disappear from that section once you choose a
-title. **Cancel** stops a title request without losing the seed or earlier proposals; **Retry**
-asks again. **Delete start** removes only that unfinished seed and its proposals.
+title. **Cancel** stops a title request without losing the seed or earlier proposals; **Retry** asks
+again. **Delete start** removes only that unfinished seed and its proposals.
 
 After the seed, the model proposes **five titles at a time**, each with a one-line tagline. You can:
 
