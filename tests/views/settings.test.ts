@@ -9,17 +9,30 @@
  * scoped to the origin it was typed for, and the field promises it is sent
  * "only to this endpoint".
  *
- * Feasibility note: `picker.forUrl` is only ever set by a probe of a server,
- * so the first test stubs `fetch` to answer the model-list request locally.
+ * Model-list requests use a local fetch stub; unrelated LAN detection is
+ * disabled so each test starts with isolated session state and no network.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { renderSettings } from '../../src/ui/views/settings';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as Lan from '../../src/llm/lan';
+import type * as SettingsView from '../../src/ui/views/settings';
 import { defaultLibrary } from '../../src/core/schema';
 import type { Library } from '../../src/core/types';
 import { click, findButton, mountView, settle, StubApp, type } from '../helpers/view-harness';
 
+vi.mock('../../src/llm/lan', async (importOriginal) => ({
+  ...(await importOriginal<typeof Lan>()),
+  detectLocalIps: async () => ['127.0.0.1'],
+  rankSubnets: async () => [],
+}));
+
 const OLD_URL = 'http://127.0.0.1:1234';
 const NEW_URL = 'http://127.0.0.1:4141';
+let renderSettings: typeof SettingsView.renderSettings;
+
+beforeEach(async () => {
+  vi.resetModules();
+  ({ renderSettings } = await import('../../src/ui/views/settings'));
+});
 
 function fixture(): { app: StubApp; root: HTMLElement } {
   const base = defaultLibrary();
@@ -85,9 +98,9 @@ describe('the settings endpoint form', () => {
     const { root } = fixture();
     click(root.querySelector<HTMLButtonElement>('#endpoint-reload-models') ?? undefined);
     await settle();
-    expect((root.querySelector('#endpoint-model') as HTMLSelectElement).value).toBe(
-      'authenticated-writer',
-    );
+    expect(
+      [...root.querySelectorAll<HTMLOptionElement>('#endpoint-model option')].map((o) => o.value),
+    ).toContain('authenticated-writer');
     click(findButton(root, 'Probe this URL'));
     await settle();
     expect((root.querySelector('#endpoint-model') as HTMLSelectElement).value).toBe(
@@ -112,6 +125,19 @@ describe('the settings endpoint form', () => {
     urlBox(root).dispatchEvent(new window.Event('change', { bubbles: true }));
     expect((root.querySelector('#endpoint-model-custom') as HTMLInputElement).value).toBe('');
     expect((root.querySelector('#fast-model') as HTMLInputElement).value).toBe('');
+  });
+
+  it('clears manually entered models on every server switch, not only the first', () => {
+    stubModelListServer();
+    const { root } = fixture();
+    for (const url of [NEW_URL, `${NEW_URL}/another-server`]) {
+      type(root.querySelector<HTMLInputElement>('#endpoint-model-custom'), 'manual-writer');
+      type(root.querySelector<HTMLInputElement>('#fast-model'), 'manual-fast');
+      type(urlBox(root), url);
+      urlBox(root).dispatchEvent(new window.Event('change', { bubbles: true }));
+      expect(root.querySelector<HTMLInputElement>('#endpoint-model-custom')?.value).toBe('');
+      expect(root.querySelector<HTMLInputElement>('#fast-model')?.value).toBe('');
+    }
   });
 
   it('does not let a delayed custom probe overwrite a newly typed endpoint', async () => {
@@ -175,6 +201,61 @@ describe('the settings endpoint form', () => {
       'custom-writer',
     );
   });
+
+  it('preserves an explicit custom model when reloading the server list', async () => {
+    stubModelListServer();
+    const { root } = fixture();
+    click(root.querySelector('#endpoint-reload-models') ?? undefined);
+    await settle();
+    const select = root.querySelector<HTMLSelectElement>('#endpoint-model')!;
+    select.value = '\u0000custom';
+    select.dispatchEvent(new window.Event('change', { bubbles: true }));
+    type(root.querySelector<HTMLInputElement>('#endpoint-model-custom'), 'unlisted-writer');
+    click(root.querySelector('#endpoint-reload-models') ?? undefined);
+    await settle();
+    expect(root.querySelector<HTMLSelectElement>('#endpoint-model')?.value).toBe('\u0000custom');
+    expect(root.querySelector<HTMLInputElement>('#endpoint-model-custom')?.value).toBe(
+      'unlisted-writer',
+    );
+  });
+
+  it('preserves a typed custom model on the first model-list load', async () => {
+    stubModelListServer();
+    const { root } = fixture();
+    type(root.querySelector<HTMLInputElement>('#endpoint-model-custom'), 'unlisted-writer');
+    click(root.querySelector('#endpoint-reload-models') ?? undefined);
+    await settle();
+    expect(root.querySelector<HTMLInputElement>('#endpoint-model-custom')?.value).toBe(
+      'unlisted-writer',
+    );
+  });
+
+  it.each(['#endpoint-url', '#endpoint-model-custom', '#fast-model', '#endpoint-key'])(
+    'does not report success after an unsaved change to %s during the test',
+    async (selector) => {
+      stubModelListServer();
+      const { app, root } = fixture();
+      let finish!: (reply: string) => void;
+      app.generateText = () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        });
+      click(root.querySelector('#endpoint-save-test') ?? undefined);
+      await settle();
+      if (selector === '#endpoint-model-custom') {
+        const select = root.querySelector<HTMLSelectElement>('#endpoint-model');
+        if (select) {
+          select.value = '\u0000custom';
+          select.dispatchEvent(new window.Event('change', { bubbles: true }));
+        }
+      }
+      type(root.querySelector<HTMLInputElement>(selector), `${NEW_URL}/changed`);
+      finish('OK');
+      await settle();
+      expect(root.querySelector('#endpoint-status')?.textContent).toContain('changed');
+      expect(app.toasts.some((toast) => toast.message.startsWith('Connected'))).toBe(false);
+    },
+  );
 
   it('does not report a replaced endpoint as connected or test its fast model on the old server', async () => {
     stubModelListServer();
@@ -249,6 +330,7 @@ describe('the settings endpoint form', () => {
     // "nothing to choose yet" instead of listing 1234's models under 4141.
     expect(root.querySelector('#endpoint-model')).toBeNull();
     expect((root.querySelector('#endpoint-model-custom') as HTMLInputElement).value).toBe('');
+    expect(root.querySelectorAll('#discovered-models option')).toHaveLength(0);
     // Nothing half-adopted can reach Save.
     expect(app.toasts.map((toast) => toast.message).join('\n')).toContain(
       'Model cleared — it belonged to the previous server.',

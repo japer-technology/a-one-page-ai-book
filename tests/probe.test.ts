@@ -18,12 +18,10 @@ const candidate: EndpointCandidate = {
 };
 
 function jsonResponse(payload: unknown, status = 200): Response {
-  return {
-    ok: status >= 200 && status < 300,
+  return new Response(JSON.stringify(payload), {
     status,
-    headers: new Headers({ 'content-type': 'application/json' }),
-    json: async () => payload,
-  } as unknown as Response;
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 afterEach(() => {
@@ -94,10 +92,23 @@ describe('probeCandidate', () => {
       'fetch',
       vi
         .fn()
-        .mockResolvedValueOnce(jsonResponse({}, 401))
+        .mockResolvedValueOnce(jsonResponse({ error: { message: 'This key has expired' } }, 401))
         .mockResolvedValueOnce(jsonResponse({}, 404)),
     );
-    expect((await probeCandidate({ ...candidate, vendor: 'ollama' })).status).toBe('unauthorized');
+    const result = await probeCandidate({ ...candidate, vendor: 'ollama' });
+    expect(result.status).toBe('unauthorized');
+    expect(result.detail).toContain('This key has expired');
+    expect(result.detail).toContain('401');
+  });
+
+  it('preserves plain-text model-list failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('Model service unavailable', { status: 503 })),
+    );
+    const result = await probeCandidate(candidate);
+    expect(result.status).toBe('absent');
+    expect(result.detail).toContain('503: Model service unavailable');
   });
 
   it('tries the alternative Ollama list when the native route returns HTML', async () => {

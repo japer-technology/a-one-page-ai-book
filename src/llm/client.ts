@@ -351,7 +351,7 @@ async function readJsonBody<T>(response: Response): Promise<T> {
   }
 }
 
-async function readJSONError(response: Response): Promise<string> {
+export async function readJSONError(response: Response): Promise<string> {
   // Read the body ONCE: response.json() consumes it, so a later text() fallback
   // would throw "body already read" and hide the server's actual message.
   const text = await response.text().catch(() => '');

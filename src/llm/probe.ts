@@ -11,6 +11,7 @@
  */
 import { baseUrlProblem, CANDIDATES, modelListUrls, parseModelsResponse } from './endpoints';
 import type { EndpointCandidate } from './endpoints';
+import { readJSONError } from './client';
 
 export type ProbeStatus = 'reachable' | 'cors-blocked' | 'unauthorized' | 'absent';
 
@@ -52,6 +53,8 @@ export async function probeCandidate(
   let timedOut = false;
   let unreadable = false;
   let unauthorizedStatus: number | null = null;
+  let httpDetail = '';
+  let unauthorizedDetail = '';
   for (const url of urls) {
     const t = timeoutSignal(timeoutMs);
     const started = performance.now();
@@ -63,8 +66,12 @@ export async function probeCandidate(
         redirect: 'error',
       });
       lastHttpStatus = response.status;
+      if (!response.ok) {
+        httpDetail = (await readJSONError(response)).slice(0, 300).replace(/\s+/g, ' ').trim();
+      }
       if (response.status === 401 || response.status === 403) {
         unauthorizedStatus = response.status;
+        unauthorizedDetail = httpDetail;
       }
       if (!response.ok) continue; // e.g. Ollama without /v1 — try the next URL
       let models: string[] = [];
@@ -126,10 +133,10 @@ export async function probeCandidate(
       models: [],
       latencyMs: null,
       detail: unauthorized
-        ? `answered HTTP ${unauthorizedStatus} — check the API key in Settings, then reload the models`
+        ? `answered HTTP ${unauthorizedStatus}${unauthorizedDetail ? `: ${unauthorizedDetail}` : ''} — check the API key in Settings, then reload the models`
         : unreadable
           ? 'server answered, but did not return an LLM model list — check the URL and protocol'
-          : `something is listening on that port but it is not an LLM model list (HTTP ${lastHttpStatus})`,
+          : `model list request failed (HTTP ${lastHttpStatus}${httpDetail ? `: ${httpDetail}` : ''})`,
     };
   }
 

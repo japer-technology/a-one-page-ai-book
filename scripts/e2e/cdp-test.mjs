@@ -109,6 +109,21 @@ async function changeValue(selector, value, event = 'change') {
   })()`);
 }
 
+// Hold a real HTTP reply so cancellation/edit races do not depend on timing.
+async function holdNextChat() {
+  await evaluate(`(() => {
+    const original = window.fetch;
+    window.__resumeChat = null;
+    window.fetch = async (input, init) => {
+      if (!String(input).endsWith('/v1/chat/completions')) return original(input, init);
+      window.fetch = original;
+      const response = await original(input, init);
+      await new Promise(resolve => { window.__resumeChat = resolve; });
+      return response;
+    };
+  })()`);
+}
+
 async function fontOf(selector) {
   return evaluate(
     `getComputedStyle(document.querySelector(${JSON.stringify(selector)})).fontFamily`,
@@ -168,12 +183,39 @@ out.authenticatedModels = await waitFor(
   10000,
   'authenticated model list',
 );
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Probe this URL')).click()",
+);
+out.authenticatedProbe = await waitFor(
+  "[...document.querySelectorAll('.scan-row')].some(r => r.textContent.includes('/protected') && r.textContent.includes('reachable'))",
+  10000,
+  'authenticated explicit probe',
+);
 await evaluate("document.querySelector('#endpoint-save-test').click()");
 out.authenticatedChat = await waitFor(
   "document.querySelector('#endpoint-status')?.textContent.includes('Connected')",
   10000,
   'authenticated chat test',
 );
+await changeValue('#fast-model', 'missing-fast-model', 'input');
+await evaluate("document.querySelector('#endpoint-save-test').click()");
+out.fastModelFailure = await waitFor(
+  "document.querySelector('#endpoint-status')?.textContent.includes('Main model works, but fast model') && document.querySelector('#endpoint-status')?.textContent.includes('not found')",
+  10000,
+  'fast-model failure with server detail',
+);
+await changeValue('#fast-model', '', 'input');
+await holdNextChat();
+await evaluate("document.querySelector('#endpoint-save-test').click()");
+await waitFor("typeof window.__resumeChat === 'function'", 10000, 'held connection test');
+await changeValue('#fast-model', 'mock-poet-3b', 'input');
+await evaluate('window.__resumeChat()');
+out.editedTestNotConnected = await waitFor(
+  "document.querySelector('#endpoint-status')?.textContent.includes('Settings changed during the test') && !document.querySelector('#endpoint-save-test').disabled",
+  10000,
+  'unsaved change invalidates connection test',
+);
+await changeValue('#fast-model', '', 'input');
 // Restore the public fixture for the remaining journey.
 await changeValue('#endpoint-url', 'http://127.0.0.1:1234', 'input');
 await evaluate(
@@ -199,6 +241,12 @@ await evaluate(`(() => {
 })()`);
 await waitFor("!!document.querySelector('#endpoint-model-custom')", 5000, 'custom model box');
 await changeValue('#endpoint-model-custom', 'unsaved-model', 'input');
+await evaluate("document.querySelector('#endpoint-reload-models').click()");
+out.customModelSurvivesReload = await waitFor(
+  "document.querySelector('#endpoint-model-custom')?.value === 'unsaved-model' && document.querySelector('#endpoint-model')?.value === '\\u0000custom' && !document.querySelector('#endpoint-reload-models').disabled",
+  10000,
+  'custom selection after model-list reload',
+);
 const formats = ['story', 'letter', 'diary', 'newspaper', 'mapnote', 'recipe'];
 const fonts = ['georgia', 'palatino', 'charter', 'serif', 'sans'];
 const readingFonts = {};
@@ -263,8 +311,34 @@ await evaluate(`(() => {
   input.dispatchEvent(new Event('input', { bubbles: true }));
   return 'typed';
 })()`);
+await holdNextChat();
 await evaluate(
   "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Begin')).click(); 'begun'",
+);
+await waitFor("typeof window.__resumeChat === 'function'", 10000, 'held title generation');
+const cancelledSeed = await evaluate('window.__PAGE_TURN__.params().seed');
+await evaluate(
+  "[...document.querySelectorAll('.view-titles button')].find(b => b.textContent === 'Cancel').click(); window.__resumeChat()",
+);
+out.titleCancellation = await waitFor(
+  "document.querySelector('.view-titles')?.textContent.includes('Retry') && document.querySelectorAll('.title-card').length === 0",
+  10000,
+  'cancelled titles stay recoverable',
+);
+await evaluate(
+  "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Library')).click()",
+);
+const cancelledSelector = `.unfinished-start[data-seed-id="${cancelledSeed}"]`;
+await waitFor(
+  `!!document.querySelector(${JSON.stringify(cancelledSelector)})`,
+  5000,
+  'cancelled seed on the shelf',
+);
+await sleep(1000);
+await reloadAndWait(cancelledSelector, 'cancelled seed after reopening the app');
+out.cancelledSeedSurvivesReload = true;
+await evaluate(
+  `document.querySelector(${JSON.stringify(cancelledSelector)}).querySelector('button').click()`,
 );
 out.titleCards = await waitFor(
   "document.querySelectorAll('.title-card').length >= 5",
@@ -388,8 +462,19 @@ await evaluate(
   "[...document.querySelectorAll('.nav-link')].find(b => b.textContent.includes('Settings')).click(); 'settings'",
 );
 await waitFor("!!document.querySelector('.view-settings')", 10000, 'settings again');
+// Discovery results are session state; the recovery checks reloaded the app.
+await changeValue('#endpoint-url', 'http://127.0.0.1:11434', 'input');
 await evaluate(
-  "[...document.querySelectorAll('.scan-row')].find(r => r.textContent.includes('Ollama')).querySelector('button').click(); 'used-ollama'",
+  "document.querySelector('#endpoint-url').dispatchEvent(new Event('change', { bubbles: true }))",
+);
+await changeValue('#endpoint-vendor', 'ollama');
+await evaluate(
+  "[...document.querySelectorAll('button')].find(b => b.textContent.includes('Probe this URL')).click()",
+);
+await waitFor(
+  "document.querySelector('#endpoint-model')?.value === 'mock-ollama-7b'",
+  10000,
+  'Ollama model list after reload',
 );
 out.modelAfterOllamaUse = await evaluate('document.querySelector("#endpoint-model").value');
 await evaluate("document.querySelector('#endpoint-save').click(); 'saved-ollama'");
@@ -401,7 +486,7 @@ await waitFor("!!document.querySelector('.book-card')", 10000, 'book card');
 await evaluate(`(() => {
   const input = document.querySelector('.search');
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(input, 'The Dead Letter');
+  setter.call(input, ${JSON.stringify(out.firstTitle)});
   input.dispatchEvent(new Event('input', { bubbles: true }));
   return 'typed';
 })()`);
@@ -656,7 +741,11 @@ console.log(JSON.stringify(out, null, 2));
 const ok =
   out.connectedToast === true &&
   out.authenticatedModels === true &&
+  out.authenticatedProbe === true &&
   out.authenticatedChat === true &&
+  out.fastModelFailure === true &&
+  out.editedTestNotConnected === true &&
+  out.customModelSurvivesReload === true &&
   // The picker must choose the best writer on the server (7B instruct), not
   // the alphabetically-first entry (the 3B), and the endpoint saved by
   // "Save & test" must be the same model that was tested.
@@ -664,6 +753,8 @@ const ok =
   out.bestModelStarred === true &&
   out.savedAfterTest?.model === 'mock-storyteller-7b' &&
   out.titleCards === true &&
+  out.titleCancellation === true &&
+  out.cancelledSeedSurvivesReload === true &&
   out.unfinishedStartVisible === true &&
   out.unfinishedStartSurvivesReload === true &&
   out.unfinishedTitlesRestored === true &&
