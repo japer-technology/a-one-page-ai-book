@@ -84,8 +84,8 @@ the heavy lifting of _direction_ comes later, page by page, where it belongs. Al
 - A character: _"an immortal librarian who is allergic to books."_
 - Pasted text the model should continue in its own voice.
 - A question: _"what if dogs could file taxes?"_ · A mashup: _"Jane Austen meets Blade Runner."_
-- Nothing at all — 🎲 **I'm feeling lucky** asks the model for a batch of seeds, then cycles
-  through them on subsequent clicks. Without a model, or if generation fails, it uses a built-in idea.
+- Nothing at all — 🎲 **I'm feeling lucky** asks the model for a batch of seeds, then cycles through
+  them on subsequent clicks. Without a model, or if generation fails, it uses a built-in idea.
 
 The seed input even says it: **a sentence, a vibe, a mashup, a question — anything.**
 
