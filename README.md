@@ -91,14 +91,14 @@ pick a model, press **✅ Save & test** — and write your seed.
 
 For a key-protected server, enter its **API key** before **Probe this URL** or **Reload models**.
 **Save & test** checks both the main model and the optional fast model (used for titles). Changing
-servers clears both model selections so an old model name cannot break a new connection.
-If you leave before choosing a title, your seed and proposals remain under **Unfinished starts**
-in the Library. Use **Resume titles** after fixing the connection, or after reopening the app.
+servers clears both model selections so an old model name cannot break a new connection. If you
+leave before choosing a title, your seed and proposals remain under **Unfinished starts** in the
+Library. Use **Resume titles** after fixing the connection, or after reopening the app.
 
 The browser must be allowed to contact your LLM: enable the server's CORS support for the page's
-origin (`null` for a file opened from disk), and allow local-network access if the browser asks.
-If a hosted HTTPS copy cannot reach an HTTP server, open the downloaded HTML file or serve the
-app on localhost. A browser-side app cannot bypass the server's CORS policy.
+origin (`null` for a file opened from disk), and allow local-network access if the browser asks. If
+a hosted HTTPS copy cannot reach an HTTP server, open the downloaded HTML file or serve the app on
+localhost. A browser-side app cannot bypass the server's CORS policy.
 
 ### Scripts
 

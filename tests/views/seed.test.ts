@@ -8,10 +8,12 @@
  * landing in the seed box; and the chat input was the one field with no
  * draft, so any re-render silently dropped a half-typed message.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderSeed, resetSeedSession } from '../../src/ui/views/seed';
 import { defaultLibrary } from '../../src/core/schema';
 import type { StoryNode } from '../../src/core/types';
+import { chat } from '../../src/llm/client';
+import { withLLMRetry } from '../../src/llm/retry';
 import { click, findButton, mountView, settle, StubApp, type } from '../helpers/view-harness';
 
 const bubbles = (root: HTMLElement): string[] =>
@@ -20,6 +22,68 @@ const bubbles = (root: HTMLElement): string[] =>
 beforeEach(() => {
   resetSeedSession();
   window.confirm = () => true;
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('lucky seed generation', () => {
+  it('offers model seeds and walks the batch without another request', async () => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    app.lib.settings.endpoint.model = 'test-model';
+    const ideas = [
+      'A lighthouse starts walking inland.',
+      'A baker discovers a door inside a loaf.',
+    ];
+    app.genTextReply = JSON.stringify(ideas);
+    const root = mountView(app, renderSeed);
+
+    click(findButton(root, 'lucky'));
+    await settle();
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(ideas[0]);
+    click(findButton(root, 'lucky'));
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(ideas[1]);
+    expect(app.calls.filter(([name]) => name === 'generateText')).toHaveLength(1);
+  });
+
+  it('explains reasoning-only output, offers a fallback, and releases the button', async () => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    const endpoint = app.lib.settings.endpoint;
+    endpoint.model = 'google/gemma-4-26b-a4b-qat';
+    endpoint.vendor = 'openai-compat';
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: { content: '', reasoning_content: 'Still thinking about seeds.' },
+                finish_reason: 'length',
+              },
+            ],
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    app.generateText = () => withLLMRetry(() => chat({ endpoint, model: endpoint.model }, []));
+    const root = mountView(app, renderSeed);
+
+    click(findButton(root, 'lucky'));
+    await settle();
+    await settle();
+
+    const seed = root.querySelector<HTMLTextAreaElement>('.seed-input')?.value ?? '';
+    expect(seed.length).toBeGreaterThan(12);
+    expect(seed).not.toContain('Still thinking');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(app.toasts.some(({ message }) => /reasoning but no final answer/.test(message))).toBe(
+      true,
+    );
+    expect(root.querySelector<HTMLButtonElement>('.btn-ghost')?.disabled).toBe(false);
+    expect(findButton(root, 'lucky')).toBeDefined();
+  });
 });
 
 describe('the pre-writing chat session', () => {

@@ -21,6 +21,69 @@ export interface GenOptions {
 
 const MAX_TOKENS = 2400;
 
+interface ModelMessage {
+  content?: string | null;
+  reasoning_content?: string | null;
+  reasoning?: string | null;
+  thinking?: string | null;
+}
+
+interface ModelReply {
+  error?: unknown;
+  choices?: Array<{
+    message?: ModelMessage;
+    delta?: ModelMessage;
+    finish_reason?: string | null;
+  }>;
+  message?: ModelMessage;
+  done?: boolean;
+  done_reason?: string;
+  usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
+}
+
+interface ReplyMetadata {
+  reasoning: boolean;
+  limited: boolean;
+}
+
+/** Keep diagnostics, never the model's private reasoning, alongside the answer. */
+function observeReply(reply: ModelReply, metadata: ReplyMetadata): void {
+  const choice = reply.choices?.[0];
+  for (const message of [choice?.message, choice?.delta, reply.message]) {
+    if (
+      [message?.reasoning_content, message?.reasoning, message?.thinking].some(
+        (text) => typeof text === 'string' && text.trim().length > 0,
+      )
+    ) {
+      metadata.reasoning = true;
+    }
+  }
+  if ((reply.usage?.completion_tokens_details?.reasoning_tokens ?? 0) > 0) {
+    metadata.reasoning = true;
+  }
+  if (choice?.finish_reason === 'length' || reply.done_reason === 'length') {
+    metadata.limited = true;
+  }
+}
+
+function requireAnswer(content: string, metadata: ReplyMetadata): string {
+  if (content.trim().length > 0) return content;
+  // Retrying as an "empty page" repeats the same exhausted reasoning budget.
+  // In particular, Gemma 4 on some MLX runtimes never ends its thinking phase.
+  if (metadata.reasoning) {
+    throw new Error(
+      `The model produced reasoning but no final answer${metadata.limited ? ' before reaching the output token limit' : ''}. ` +
+        'Disable thinking/reasoning in your model server (LM Studio: turn off Thinking), or switch to a different model/runtime.',
+    );
+  }
+  if (metadata.limited) {
+    throw new Error(
+      'The model reached the output token limit without producing a final answer. Check the model server settings or try a different model.',
+    );
+  }
+  throw new Error('LLM returned an empty page');
+}
+
 /**
  * A 200 response can still carry a failure. llama.cpp, vLLM and LM Studio all
  * emit `{error: …}` inside the stream when generation dies mid-flight (OOM,
@@ -159,7 +222,11 @@ function drainLines(
 }
 
 /** Parse one SSE stream from either dialect; invoke onToken per text delta. */
-async function readSSE(response: Response, onToken: (t: string) => void): Promise<void> {
+async function readSSE(
+  response: Response,
+  onToken: (t: string) => void,
+  metadata: ReplyMetadata,
+): Promise<void> {
   if (!response.body) throw new Error('LLM server sent no response body');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -178,13 +245,10 @@ async function readSSE(response: Response, onToken: (t: string) => void): Promis
   const asEvent = (payload: string): boolean | null => {
     if (payload === '[DONE]') return true;
     try {
-      const json = JSON.parse(payload) as {
-        error?: unknown;
-        choices?: Array<{ delta?: { content?: string } }>;
-        message?: { content?: string };
-      };
+      const json = JSON.parse(payload) as ModelReply;
       const error = errorFromPayload(json);
       if (error) throw error;
+      observeReply(json, metadata);
       const delta = json.choices?.[0]?.delta?.content ?? json.message?.content;
       if (typeof delta === 'string' && delta.length > 0) onToken(delta);
       return false;
@@ -275,7 +339,11 @@ async function releaseStream(reader: ReadableStreamDefaultReader<Uint8Array>): P
 }
 
 /** Parse an Ollama NDJSON stream: bare JSON per line, {message:{content}, done}. */
-async function readNdjson(response: Response, onToken: (t: string) => void): Promise<void> {
+async function readNdjson(
+  response: Response,
+  onToken: (t: string) => void,
+  metadata: ReplyMetadata,
+): Promise<void> {
   if (!response.body) throw new Error('LLM server sent no response body');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -287,13 +355,10 @@ async function readNdjson(response: Response, onToken: (t: string) => void): Pro
       buffer += decoder.decode(value, { stream: true });
       const { rest, stop } = drainLines(buffer, (line) => {
         try {
-          const json = JSON.parse(line) as {
-            error?: unknown;
-            message?: { content?: string };
-            done?: boolean;
-          };
+          const json = JSON.parse(line) as ModelReply;
           const error = errorFromPayload(json);
           if (error) throw error;
+          observeReply(json, metadata);
           const delta = json.message?.content;
           if (typeof delta === 'string' && delta.length > 0) onToken(delta);
           if (json.done === true) return true;
@@ -310,9 +375,10 @@ async function readNdjson(response: Response, onToken: (t: string) => void): Pro
     const leftover = buffer.trim();
     if (leftover.length > 0) {
       try {
-        const json = JSON.parse(leftover) as { error?: unknown; message?: { content?: string } };
+        const json = JSON.parse(leftover) as ModelReply;
         const error = errorFromPayload(json);
         if (error) throw error;
+        observeReply(json, metadata);
         const delta = json.message?.content;
         if (typeof delta === 'string' && delta.length > 0) onToken(delta);
       } catch (err) {
@@ -380,6 +446,7 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
   const { endpoint, model, signal, onToken } = opts;
   const temperature = opts.temperature ?? endpoint.temperature ?? 0.9;
   const stream = typeof onToken === 'function';
+  const metadata: ReplyMetadata = { reasoning: false, limited: false };
   // The same normalization every other entry point uses. Stripping only
   // trailing slashes meant a base URL ending in `/v1` — which Settings strips
   // but the schema does not, so an imported or hand-edited library can carry
@@ -407,32 +474,36 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
       if (stream) {
         if (isNdjson(response)) {
           let full = '';
-          await readNdjson(response, (t) => {
-            full += t;
-            onToken(t);
-          });
-          if (full.trim().length === 0) throw new Error('LLM returned an empty page');
-          return full;
+          await readNdjson(
+            response,
+            (t) => {
+              full += t;
+              onToken(t);
+            },
+            metadata,
+          );
+          return requireAnswer(full, metadata);
         }
         if (isEventStream(response)) {
           let full = '';
-          await readSSE(response, (t) => {
-            full += t;
-            onToken(t);
-          });
-          if (full.trim().length === 0) throw new Error('LLM returned an empty page');
-          return full;
+          await readSSE(
+            response,
+            (t) => {
+              full += t;
+              onToken(t);
+            },
+            metadata,
+          );
+          return requireAnswer(full, metadata);
         }
         // fall through: the server ignored stream:true and sent plain JSON
       }
-      const json = await readJsonBody<{ error?: unknown; message?: { content?: string } }>(
-        response,
-      );
+      const json = await readJsonBody<ModelReply>(response);
       const serverError = errorFromPayload(json);
       if (serverError) throw serverError;
+      observeReply(json, metadata);
       const content = json.message?.content ?? '';
-      if (content.trim().length === 0) throw new Error('LLM returned an empty page');
-      return content;
+      return requireAnswer(content, metadata);
     }
     const errorBody = await readJSONError(response);
     if (
@@ -461,26 +532,26 @@ export async function chat(opts: GenOptions, messages: ChatMessage[]): Promise<s
 
   if (stream && isEventStream(response)) {
     let full = '';
-    await readSSE(response, (t) => {
-      full += t;
-      onToken(t);
-    });
-    if (full.trim().length === 0) throw new Error('LLM returned an empty page');
-    return full;
+    await readSSE(
+      response,
+      (t) => {
+        full += t;
+        onToken(t);
+      },
+      metadata,
+    );
+    return requireAnswer(full, metadata);
   }
 
-  const json = await readJsonBody<{
-    error?: unknown;
-    choices?: Array<{ message?: { content?: string } }>;
-  }>(response);
+  const json = await readJsonBody<ModelReply>(response);
   // A 200 that carries the server's error: OOM, model not loaded, context
   // overflow. Reporting it as "empty page" pointed the reader at the wrong
   // problem entirely.
   const serverError = errorFromPayload(json);
   if (serverError) throw serverError;
+  observeReply(json, metadata);
   const content = json.choices?.[0]?.message?.content ?? '';
-  if (content.trim().length === 0) throw new Error('LLM returned an empty page');
-  return content;
+  return requireAnswer(content, metadata);
 }
 
 /** Ask for structured JSON and parse it tolerantly. */
