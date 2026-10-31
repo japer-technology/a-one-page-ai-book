@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { chat, chatJSON, isServerBusyError, isServerWarmingError } from '../src/llm/client';
 // The retry policy (and the verdict on which failures are worth another
 // request) lives in llm/retry.ts; its own expectations are in tests/retry.test.ts.
-import { classifyLLMFailure, isTransientLLMError } from '../src/llm/retry';
+import { classifyLLMFailure, isTransientLLMError, withLLMRetry } from '../src/llm/retry';
 import type { EndpointSettings } from '../src/core/types';
 
 const openai: EndpointSettings = {
@@ -130,6 +130,186 @@ describe('Ollama dialect', () => {
     );
     expect(text).toBe('The keeper.');
     expect(tokens).toEqual(['The ', 'keeper.']);
+  });
+
+  describe('reasoning is not a final answer', () => {
+    it('does not retry a Gemma reasoning-only response as an empty page', async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse({
+          choices: [
+            {
+              message: { content: '', reasoning_content: 'Still considering the story seeds.' },
+              finish_reason: 'length',
+            },
+          ],
+          usage: { completion_tokens_details: { reasoning_tokens: 2400 } },
+        }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const onRetry = vi.fn();
+      const err = await withLLMRetry(
+        () => chat({ endpoint: openai, model: 'google/gemma-4-26b-a4b-qat' }, MESSAGES),
+        { onRetry },
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('reasoning but no final answer');
+      expect((err as Error).message).toContain('output token limit');
+      expect((err as Error).message).toContain('LM Studio');
+      expect((err as Error).message).not.toContain('Still considering');
+      expect(classifyLLMFailure(err)).toBe('fatal');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(onRetry).not.toHaveBeenCalled();
+    });
+
+    it.each(['reasoning_content', 'reasoning', 'thinking'])(
+      'recognizes %s even without a length finish reason',
+      async (field) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () =>
+            jsonResponse({
+              choices: [
+                { message: { content: null, [field]: 'Thinking only.' }, finish_reason: 'stop' },
+              ],
+            }),
+          ),
+        );
+        const err = await chat({ endpoint: openai, model: 'm' }, MESSAGES).catch((e: unknown) => e);
+        expect((err as Error).message).toContain('reasoning but no final answer');
+        expect((err as Error).message).not.toContain('output token limit');
+        expect(classifyLLMFailure(err)).toBe('fatal');
+      },
+    );
+
+    it('recognizes reasoning token usage when reasoning text is not exposed', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          jsonResponse({
+            choices: [{ message: { content: '' }, finish_reason: 'length' }],
+            usage: { completion_tokens_details: { reasoning_tokens: 2400 } },
+          }),
+        ),
+      );
+      await expect(chat({ endpoint: openai, model: 'm' }, MESSAGES)).rejects.toThrow(
+        /reasoning but no final answer.*output token limit/,
+      );
+    });
+
+    it.each([openai, ollama])(
+      'tracks reasoning across SSE chunks for $vendor',
+      async (endpoint) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () =>
+            streamResponse('text/event-stream', [
+              'data: {"choices":[{"delta":{"reasoning_content":"Thinking"}}]}\n\n',
+              'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+              'data: [DONE]\n\n',
+            ]),
+          ),
+        );
+        const onToken = vi.fn();
+        const err = await chat({ endpoint, model: 'm', onToken }, MESSAGES).catch(
+          (e: unknown) => e,
+        );
+        expect((err as Error).message).toMatch(/reasoning but no final answer.*output token limit/);
+        expect(classifyLLMFailure(err)).toBe('fatal');
+        expect(onToken).not.toHaveBeenCalled();
+      },
+    );
+
+    it('tracks Ollama thinking and a final NDJSON line without a newline', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          streamResponse('application/x-ndjson', [
+            '{"message":{"thinking":"Thinking","content":""},"done":false}\n',
+            '{"message":{"content":""},"done":true,"done_reason":"length"}',
+          ]),
+        ),
+      );
+      const onToken = vi.fn();
+      await expect(chat({ endpoint: ollama, model: 'm', onToken }, MESSAGES)).rejects.toThrow(
+        /reasoning but no final answer.*output token limit/,
+      );
+      expect(onToken).not.toHaveBeenCalled();
+    });
+
+    it('recognizes thinking in a non-streaming Ollama reply', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          jsonResponse({
+            message: { thinking: 'Thinking', content: '' },
+            done: true,
+            done_reason: 'length',
+          }),
+        ),
+      );
+      await expect(chat({ endpoint: ollama, model: 'm' }, MESSAGES)).rejects.toThrow(
+        /reasoning but no final answer.*output token limit/,
+      );
+    });
+
+    it('keeps the final answer when reasoning precedes it in a stream', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          streamResponse('text/event-stream', [
+            'data: {"choices":[{"delta":{"reasoning_content":"Thinking"}}]}\n\n',
+            'data: {"choices":[{"delta":{"content":"A lighthouse starts walking."}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            'data: [DONE]\n\n',
+          ]),
+        ),
+      );
+      const tokens: string[] = [];
+      expect(
+        await chat({ endpoint: openai, model: 'm', onToken: (t) => tokens.push(t) }, MESSAGES),
+      ).toBe('A lighthouse starts walking.');
+      expect(tokens).toEqual(['A lighthouse starts walking.']);
+    });
+
+    it('keeps the final answer when a non-streaming reply also contains reasoning', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          jsonResponse({
+            choices: [
+              {
+                message: { content: 'A lighthouse starts walking.', reasoning_content: 'Thinking' },
+              },
+            ],
+          }),
+        ),
+      );
+      expect(await chat({ endpoint: openai, model: 'm' }, MESSAGES)).toBe(
+        'A lighthouse starts walking.',
+      );
+    });
+
+    it('reports an exhausted output budget even without reasoning metadata', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          jsonResponse({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }),
+        ),
+      );
+      const err = await chat({ endpoint: openai, model: 'm' }, MESSAGES).catch((e: unknown) => e);
+      expect((err as Error).message).toContain('output token limit');
+      expect(classifyLLMFailure(err)).toBe('fatal');
+    });
+
+    it('preserves ordinary empty-response retries when there is no reasoning or limit', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => jsonResponse({ choices: [{ message: { content: '' } }] })),
+      );
+      const err = await chat({ endpoint: openai, model: 'm' }, MESSAGES).catch((e: unknown) => e);
+      expect((err as Error).message).toBe('LLM returned an empty page');
+      expect(classifyLLMFailure(err)).toBe('empty');
+    });
   });
 
   it('handles an NDJSON final line without a trailing newline', async () => {

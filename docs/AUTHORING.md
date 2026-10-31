@@ -84,7 +84,8 @@ the heavy lifting of _direction_ comes later, page by page, where it belongs. Al
 - A character: _"an immortal librarian who is allergic to books."_
 - Pasted text the model should continue in its own voice.
 - A question: _"what if dogs could file taxes?"_ · A mashup: _"Jane Austen meets Blade Runner."_
-- Nothing at all — 🎲 **I'm feeling lucky** rolls a seed from a built-in list of twelve.
+- Nothing at all — 🎲 **I'm feeling lucky** asks the model for a batch of seeds, then cycles
+  through them on subsequent clicks. Without a model, or if generation fails, it uses a built-in idea.
 
 The seed input even says it: **a sentence, a vibe, a mashup, a question — anything.**
 
@@ -741,6 +742,12 @@ Everything above, distilled into the habits of a great Page Turn director.
   myself" is the escape hatch when the model keeps missing the note.
 - **A structured phase came back empty.** Titles, suggestions, and cast updates parse tolerantly and
   fall back gracefully — retry, or regenerate with a tweak.
+- **The model works but Lucky reports no answer.** A reasoning model can spend its entire output
+  budget thinking without producing final text. The app detects reasoning-only responses, explains
+  the problem, and avoids repeatedly sending the same request; Lucky offers a built-in idea instead.
+  Disable thinking/reasoning in your model server, or use a different model/runtime. In particular,
+  Gemma 4 26B-A4B QAT has a reported LM Studio MLX issue where reasoning never ends: turn off
+  Thinking in LM Studio or use its GGUF runtime. Increasing the token limit alone may not help.
 - **Iron Author regret.** Fork from an earlier page: the tree makes every "mistake" a branch point.
 - **Debugging.** `window.__PAGE_TURN__` in the devtools console shows the live state — books, nodes,
   settings — at any moment.
