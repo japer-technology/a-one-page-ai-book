@@ -42,7 +42,9 @@ const FALLBACK_SEEDS = [
 ];
 
 function fallbackSeed(): string {
-  const seed = FALLBACK_SEEDS[Math.floor(Math.random() * FALLBACK_SEEDS.length)];
+  const fresh = FALLBACK_SEEDS.filter((seed) => !lucky.offered.includes(seed));
+  const pool = fresh.length > 0 ? fresh : FALLBACK_SEEDS;
+  const seed = pool[Math.floor(Math.random() * pool.length)];
   return seed ?? FALLBACK_SEEDS[0] ?? 'Something wonderful, and a little strange, begins.';
 }
 
@@ -54,6 +56,8 @@ function fallbackSeed(): string {
  */
 const lucky = {
   busy: false,
+  request: 0,
+  context: '',
   pool: [] as string[],
   cursor: 0,
   /** Everything offered this session, so the model never repeats itself. */
@@ -67,6 +71,9 @@ function usableSeed(candidate: string): boolean {
   // A model that ignored the instruction may answer with a title, a label or a
   // numbering prefix; those would enter the seed box as-is.
   if (/^(?:\d+[.)]|[-*•]|seed\b|title\b|idea\b)/i.test(text)) return false;
+  if (/^[{[“"`]|[}\]”"]$/.test(text) || text.includes('\n')) return false;
+  if (/^(?:here (?:are|is)|sure\b|of course\b|could you\b|what (?:genre|kind|type)\b)/i.test(text))
+    return false;
   return text.split(/\s+/).length >= 3;
 }
 
@@ -124,6 +131,9 @@ export function resetSeedSession(): void {
   lucky.pool = [];
   lucky.cursor = 0;
   lucky.offered = [];
+  lucky.context = '';
+  lucky.busy = false;
+  lucky.request++;
 }
 
 /** Clear just the conversation (the reader asked for a fresh one). */
@@ -282,8 +292,22 @@ export function renderSeed(api: AppApi): HTMLElement {
     lengthHint: draft.lengthHint as SeedOptions['lengthHint'],
   });
 
+  const luckyContext = (): string =>
+    JSON.stringify([
+      collect(),
+      api.lib.settings.endpoint.vendor,
+      api.lib.settings.endpoint.baseUrl,
+      api.lib.settings.fastModel || api.lib.settings.endpoint.model,
+    ]);
+
   const rollLuckySeed = async (api2: AppApi): Promise<void> => {
     if (lucky.busy) return;
+    const context = luckyContext();
+    if (lucky.context !== context) {
+      lucky.pool = [];
+      lucky.cursor = 0;
+      lucky.context = context;
+    }
     // A batch the model already gave us costs nothing: walk it first.
     const next = lucky.pool[lucky.cursor];
     if (next !== undefined) {
@@ -292,50 +316,77 @@ export function renderSeed(api: AppApi): HTMLElement {
       api2.refresh();
       return;
     }
-    if (!api2.lib.settings.endpoint.model) {
+    const model = api2.lib.settings.fastModel || api2.lib.settings.endpoint.model;
+    if (!model) {
       // No endpoint yet: the built-in ideas still work, so the button is never
       // a dead end on a fresh install.
       const idea = fallbackSeed();
       lucky.offered.push(idea);
       offerSeed(idea);
+      api2.toast('No model selected — here is a built-in idea.', 'info');
       return;
     }
+    const originalSeed = draft.seed;
+    const session = chatSession;
+    const request = ++lucky.request;
     lucky.busy = true;
     api2.refresh();
-    const session = chatSession;
     try {
-      const fast = api2.lib.settings.fastModel || api2.lib.settings.endpoint.model;
       const raw = await api2.generateText(luckySeedMessages(5, collect(), lucky.offered), {
-        model: fast,
+        model,
+        quiet: true,
       });
       // The session was reset (a book was born, or the reader asked for a
       // fresh conversation) while the roll was in flight: these ideas belong
       // to the abandoned story and must not repopulate the pool or the box.
       // Abort-on-navigate usually wins the race; this makes the invariant not
       // depend on which promise settles first.
-      if (session !== chatSession) return;
-      const ideas = parseStringList(raw).filter(usableSeed).slice(0, 5);
+      if (session !== chatSession || request !== lucky.request) return;
+      if (context !== luckyContext()) {
+        api2.toast('Your starting notes changed — click Lucky again for ideas that match.', 'info');
+        return;
+      }
+      const seen = new Set(lucky.offered.map((idea) => idea.toLowerCase()));
+      const ideas = parseStringList(raw)
+        .map((idea) => idea.trim())
+        .filter((idea) => {
+          const key = idea.toLowerCase();
+          if (!usableSeed(idea) || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .slice(0, 5);
       if (ideas.length === 0) throw new Error('The model returned no usable seed');
       lucky.pool = ideas;
-      lucky.cursor = 1;
+      const edited = draft.seed !== originalSeed;
+      lucky.cursor = edited ? 0 : 1;
       lucky.offered.push(...ideas);
-      offerSeed(ideas[0] ?? '');
-      api2.toast('Rolled by the model — click again for another', 'info');
+      if (!edited) offerSeed(ideas[0] ?? '');
+      api2.toast(
+        edited
+          ? 'Your seed was kept — click Lucky again to use a generated idea.'
+          : 'Rolled by the model — click again for another',
+        'info',
+      );
     } catch (err) {
-      if (!isCancelled(err) && session === chatSession) {
+      if (!isCancelled(err) && session === chatSession && request === lucky.request) {
         // Honest fallback: say what happened, then still fill the box.
-        const idea = fallbackSeed();
-        lucky.offered.push(idea);
-        offerSeed(idea);
+        const edited = draft.seed !== originalSeed || context !== luckyContext();
+        if (!edited) {
+          const idea = fallbackSeed();
+          lucky.offered.push(idea);
+          offerSeed(idea);
+        }
         api2.toast(
-          `The model could not roll an idea (${api2.genError(err)}) — here is one of ours.`,
+          `The model could not roll an idea (${api2.genError(err)}) — ${edited ? 'your seed was kept.' : 'here is one of ours.'}`,
           'info',
         );
       }
     } finally {
-      lucky.busy = false;
+      if (request === lucky.request) {
+        lucky.busy = false;
+      }
       api2.refresh();
-      document.querySelector<HTMLTextAreaElement>('.seed-input')?.focus();
     }
   };
 
@@ -572,14 +623,14 @@ export function renderSeed(api: AppApi): HTMLElement {
         {
           disabled: lucky.busy,
           title:
-            lucky.cursor < lucky.pool.length
+            lucky.context === luckyContext() && lucky.cursor < lucky.pool.length
               ? 'Next of the ideas the model already gave you'
-              : api.lib.settings.endpoint.model
+              : api.lib.settings.fastModel || api.lib.settings.endpoint.model
                 ? 'Ask the model for a fresh story seed (uses your starting notes)'
                 : 'No model selected — this rolls one of the built-in ideas',
         },
       ),
-      lucky.pool.length > 1
+      lucky.context === luckyContext() && lucky.cursor < lucky.pool.length
         ? h('span', {
             class: 'field-hint',
             text: `${Math.max(0, lucky.pool.length - lucky.cursor)} more idea(s) from the model — click again`,
