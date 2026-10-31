@@ -309,6 +309,11 @@ describe('the dice', () => {
     expect(user).toContain('first person');
     expect(user).toContain('novella');
     expect(user).toContain('distinct IN KIND');
+    expect(user).toContain('12–240 characters');
+    expect(user).toContain('at least three words');
+    expect(user).toContain('not a question asking the reader');
+    expect(user).toContain('starting notes take priority');
+    expect(user).toContain('quotation marks only as JSON string delimiters');
   });
 
   it('tells the model what has already been offered, so rolls do not repeat', () => {

@@ -29,6 +29,22 @@ afterEach(() => {
 });
 
 describe('lucky seed generation', () => {
+  it('uses built-in ideas without a model and does not repeat before exhausting them', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    const root = mountView(app, renderSeed);
+    const ideas = new Set<string>();
+    for (let i = 0; i < 12; i++) {
+      click(findButton(root, 'lucky'));
+      ideas.add(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value ?? '');
+    }
+    expect(ideas.size).toBe(12);
+    expect(ideas.has('')).toBe(false);
+    expect(app.calls.some(([name]) => name === 'generateText')).toBe(false);
+    expect(app.toasts[0]?.message).toContain('built-in idea');
+    vi.restoreAllMocks();
+  });
+
   it('offers model seeds and walks the batch without another request', async () => {
     const app = new StubApp(defaultLibrary(), null, 'seed');
     app.lib.settings.endpoint.model = 'test-model';
@@ -45,6 +61,150 @@ describe('lucky seed generation', () => {
     click(findButton(root, 'lucky'));
     expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(ideas[1]);
     expect(app.calls.filter(([name]) => name === 'generateText')).toHaveLength(1);
+  });
+
+  it('uses a configured fast model even without a prose model', async () => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    app.lib.settings.endpoint.model = '';
+    app.lib.settings.fastModel = 'fast-model';
+    app.genTextReply = '["A baker discovers a door inside a loaf."]';
+    const generate = vi.spyOn(app, 'generateText');
+    const root = mountView(app, renderSeed);
+
+    click(findButton(root, 'lucky'));
+    await settle();
+
+    expect(generate).toHaveBeenCalledWith(expect.any(Array), {
+      model: 'fast-model',
+      quiet: true,
+    });
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(
+      'A baker discovers a door inside a loaf.',
+    );
+  });
+
+  it('discards cached seeds when the starting notes change', async () => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    app.lib.settings.endpoint.model = 'test-model';
+    app.genTextReply =
+      '["A lighthouse starts walking inland.", "A baker discovers a door inside a loaf."]';
+    const root = mountView(app, renderSeed);
+    click(findButton(root, 'lucky'));
+    await settle();
+
+    type(root.querySelector<HTMLInputElement>('input[list="genres"]'), 'cozy mystery');
+    app.genTextReply = '["A village baker finds a stolen necklace in her flour."]';
+    click(findButton(root, 'lucky'));
+    await settle();
+
+    const calls = app.calls.filter(([name]) => name === 'generateText');
+    expect(calls).toHaveLength(2);
+    expect(JSON.stringify(calls[1])).toContain('genre: cozy mystery');
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(
+      'A village baker finds a stolen necklace in her flour.',
+    );
+  });
+
+  it('trims seeds and drops duplicates, commentary, and broken JSON', async () => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    app.lib.settings.endpoint.model = 'test-model';
+    const idea = 'A lighthouse starts walking inland.';
+    app.genTextReply = JSON.stringify([
+      'Here are five different story seeds:',
+      'Could you tell me which genre you prefer?',
+      '["A baker discovers a door inside a loaf.",',
+      `  ${idea}  `,
+      idea.toUpperCase(),
+    ]);
+    const root = mountView(app, renderSeed);
+    click(findButton(root, 'lucky'));
+    await settle();
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(idea);
+
+    app.genTextReply = JSON.stringify([idea, 'A baker discovers a door inside a loaf.']);
+    click(findButton(root, 'lucky'));
+    await settle();
+    expect(app.calls.filter(([name]) => name === 'generateText')).toHaveLength(2);
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(
+      'A baker discovers a door inside a loaf.',
+    );
+  });
+
+  it.each([false, true])('keeps edits made while a roll is pending (failure: %s)', async (fail) => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    app.lib.settings.endpoint.model = 'test-model';
+    let release = (): void => {};
+    app.generateText = () =>
+      new Promise((resolve, reject) => {
+        release = () =>
+          fail
+            ? reject(new Error('Model unavailable'))
+            : resolve('["A lighthouse starts walking inland."]');
+      });
+    const root = mountView(app, renderSeed);
+    click(findButton(root, 'lucky'));
+    type(root.querySelector<HTMLTextAreaElement>('.seed-input'), 'My own carefully typed idea.');
+    release();
+    await settle();
+
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(
+      'My own carefully typed idea.',
+    );
+    expect(app.toasts.at(-1)?.message).toContain('seed was kept');
+    if (!fail) {
+      click(findButton(root, 'lucky'));
+      expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(
+        'A lighthouse starts walking inland.',
+      );
+    }
+  });
+
+  it('discards a reply requested for starting notes that have changed', async () => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    app.lib.settings.endpoint.model = 'test-model';
+    let release = (): void => {};
+    app.generateText = () =>
+      new Promise((resolve) => {
+        release = () => resolve('["A lighthouse starts walking inland."]');
+      });
+    const root = mountView(app, renderSeed);
+    click(findButton(root, 'lucky'));
+    type(root.querySelector<HTMLInputElement>('input[list="genres"]'), 'cozy mystery');
+    release();
+    await settle();
+
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe('');
+    expect(app.toasts.at(-1)?.message).toContain('starting notes changed');
+    expect(findButton(root, 'lucky')?.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('allows a new roll after reset without an old request unlocking or overwriting it', async () => {
+    const app = new StubApp(defaultLibrary(), null, 'seed');
+    app.lib.settings.endpoint.model = 'test-model';
+    const releases: Array<(text: string) => void> = [];
+    app.generateText = () =>
+      new Promise((resolve) => {
+        releases.push(resolve);
+      });
+    const root = mountView(app, renderSeed);
+    click(findButton(root, 'lucky'));
+    resetSeedSession();
+    app.refresh();
+    expect(findButton(root, 'lucky')?.hasAttribute('disabled')).toBe(false);
+    click(findButton(root, 'lucky'));
+    expect(releases).toHaveLength(2);
+
+    releases[0]?.('["A stale lighthouse starts walking inland."]');
+    await settle();
+    expect(findButton(root, 'Asking the model')?.hasAttribute('disabled')).toBe(true);
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe('');
+
+    releases[1]?.('["A baker discovers a door inside a loaf."]');
+    await settle();
+    expect(findButton(root, 'lucky')?.hasAttribute('disabled')).toBe(false);
+    expect(root.querySelector<HTMLTextAreaElement>('.seed-input')?.value).toBe(
+      'A baker discovers a door inside a loaf.',
+    );
   });
 
   it('explains reasoning-only output, offers a fallback, and releases the button', async () => {

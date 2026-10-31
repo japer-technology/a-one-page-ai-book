@@ -698,10 +698,12 @@ export function luckySeedMessages(
       content: `Propose ${count} different story SEEDS — the single opening line a writer could build a whole book from.${register}
 
 Each seed must be:
-- ONE sentence. No titles, no numbering, no commentary, no quotation marks around it.
+- ONE complete sentence, 12–240 characters long, with at least three words.
+- A story premise, not a question asking the reader for more information.
+- No titles, numbering, labels or commentary. Use quotation marks only as JSON string delimiters.
 - concrete: a person, a place, and something that has just gone wrong or become possible;
 - evocative but plain — a hook, not a pitch;
-- distinct IN KIND from the others: different genre, setting and premise, never ${count} flavours of one idea.
+- distinct IN KIND from the others: different protagonists, settings and conflicts, never ${count} flavours of one idea. Vary the genre only if the reader has not specified one; their starting notes take priority.
 
 Respond with ONLY a JSON array of ${count} strings.${avoidBlock}`,
     },

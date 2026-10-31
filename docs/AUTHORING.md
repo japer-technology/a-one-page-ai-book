@@ -85,7 +85,10 @@ the heavy lifting of _direction_ comes later, page by page, where it belongs. Al
 - Pasted text the model should continue in its own voice.
 - A question: _"what if dogs could file taxes?"_ · A mashup: _"Jane Austen meets Blade Runner."_
 - Nothing at all — 🎲 **I'm feeling lucky** asks the model for a batch of seeds, then cycles through
-  them on subsequent clicks. Without a model, or if generation fails, it uses a built-in idea.
+  them on subsequent clicks. Without a model, or if generation fails, it uses a built-in idea. Rolls
+  respect your optional starting notes; changing them starts a fresh batch. If you edit your seed
+  while the model is thinking, your text is kept — click Lucky again to use a generated idea
+  instead.
 
 The seed input even says it: **a sentence, a vibe, a mashup, a question — anything.**
 
